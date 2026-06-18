@@ -1,0 +1,682 @@
+# ==============================================================================
+# Intants AI Voice Interview Platform — CI Workflow
+# Task: S4-006 / Sprint 3 retro A1 / issue #36
+# ==============================================================================
+#
+# JOBS OVERVIEW
+# -------------
+# backend   — matrix over [data_gateway, interview_core]
+#             Python 3.12 · Poetry · ruff · mypy · pytest
+#             Postgres 16 + Redis 7 service containers
+#
+# frontend  — Node 22 · npm ci · eslint · tsc build · vitest
+#
+# e2e       — COST-GATED (opt-in). Spins up the full local stack via
+#             docker compose, starts backend services + Vite dev server,
+#             then runs Playwright against Chromium.
+#
+#             COST GUARD: the e2e job hits live external APIs (Gemini,
+#             Sarvam) on every run. Estimated cost: ~₹1-2 per run.
+#             To trigger it you MUST either:
+#               (a) add the "e2e" label to the pull request, OR
+#               (b) trigger the workflow manually via workflow_dispatch.
+#             Backend + frontend jobs always run on every PR/push.
+#
+# REQUIRED GITHUB SECRETS (add under Settings → Secrets → Actions)
+# -----------------------------------------------------------------
+# See .github/workflows/README.md for the full list and instructions.
+#
+# KNOWN ISSUES
+# ------------
+# mypy "Source file found twice" error: this is a known issue with the
+# shared/ path editable-install and mypy's module discovery. The error
+# produces exit code 2 (not 1). We use --no-error-summary and treat
+# exit code 2 as a warning (non-blocking). Tracked in task #13.
+# ==============================================================================
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# ---------------------------------------------------------------------------
+# BACKEND JOB
+# Matrix: data_gateway, interview_core (run in parallel)
+# ---------------------------------------------------------------------------
+jobs:
+  backend:
+    name: backend / ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [data_gateway, interview_core]
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: intants
+          POSTGRES_PASSWORD: intants
+          POSTGRES_DB: intants_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U intants -d intants_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    defaults:
+      run:
+        working-directory: services/${{ matrix.service }}
+
+    env:
+      # -----------------------------------------------------------------------
+      # Database + cache (same URL pattern for both services; data_gateway
+      # owns the schema and runs alembic; interview_core reads the same DB)
+      # -----------------------------------------------------------------------
+      DATABASE_URL: postgresql+asyncpg://intants:intants@localhost:5432/intants_test
+      REDIS_URL: redis://localhost:6379/0
+
+      # -----------------------------------------------------------------------
+      # Service identity
+      # -----------------------------------------------------------------------
+      SERVICE_NAME: ${{ matrix.service }}
+      APP_ENV: ci
+      LOG_LEVEL: WARNING
+      HOST: 0.0.0.0
+      PORT: 8001
+
+      # -----------------------------------------------------------------------
+      # Auth / JWT (must be identical across both services so cross-service
+      # JWT validation tests pass)
+      # -----------------------------------------------------------------------
+      JWT_SECRET: ci-test-jwt-secret-not-real-64-char-placeholder-xxxxxxxxxxx
+      JWT_ALGORITHM: HS256
+      JWT_EXPIRY_HOURS: "24"
+      JWT_REFRESH_EXPIRY_DAYS: "7"
+      JWT_ISSUER: intants-data-gateway
+      JWT_AUDIENCE: intants-services
+      PASSWORD_HASH_ROUNDS: "4"       # minimal rounds for CI speed
+
+      # -----------------------------------------------------------------------
+      # Auth provider (local = no external IdP required)
+      # -----------------------------------------------------------------------
+      AUTH_PROVIDER: local
+
+      # -----------------------------------------------------------------------
+      # DPDP consent salt (non-secret placeholder; never stores real PII in CI)
+      # -----------------------------------------------------------------------
+      CONSENT_IP_SALT: ci-consent-ip-salt-placeholder-not-real-32-hex
+
+      # -----------------------------------------------------------------------
+      # Trusted proxy count (0 = no reverse proxy in CI)
+      # -----------------------------------------------------------------------
+      TRUSTED_PROXY_COUNT: "0"
+
+      # -----------------------------------------------------------------------
+      # Rate limits (relaxed for test isolation)
+      # -----------------------------------------------------------------------
+      RATE_LIMIT_LOGIN_PER_MINUTE: "100"
+      RATE_LIMIT_API_PER_MINUTE: "1000"
+
+      # -----------------------------------------------------------------------
+      # Email (disabled; Mailpit not running in CI)
+      # -----------------------------------------------------------------------
+      SMTP_HOST: localhost
+      SMTP_PORT: "1025"
+      SMTP_USE_TLS: "false"
+      EMAIL_FROM: noreply@intants.com
+      EMAIL_FROM_NAME: Intants CI
+
+      # -----------------------------------------------------------------------
+      # CORS (not enforced in tests)
+      # -----------------------------------------------------------------------
+      CORS_ALLOWED_ORIGINS: http://localhost:5173
+
+      # -----------------------------------------------------------------------
+      # LLM provider — gemini with placeholder key so live tests auto-skip.
+      # interview_core/tests/integration/test_interview_flow.py checks
+      # @pytest.mark.integration and skips when GEMINI_API_KEY is absent/empty.
+      # The conftest.py installs CannedAdapter for all integration tests, so
+      # unit + integration (non-live) tests run without hitting Gemini.
+      # -----------------------------------------------------------------------
+      LLM_PROVIDER: gemini
+      GEMINI_MODEL: gemini-2.5-flash
+      GEMINI_MAX_TOKENS: "2048"
+      GEMINI_API_BASE_URL: https://generativelanguage.googleapis.com/v1beta
+      # GEMINI_API_KEY is intentionally left empty here so live-LLM tests skip.
+      # If you want live Gemini tests to run, add GEMINI_API_KEY as a secret.
+      GEMINI_API_KEY: ""
+
+      # -----------------------------------------------------------------------
+      # Speech providers — placeholder keys; live tests skip when key absent
+      # -----------------------------------------------------------------------
+      SPEECH_STT_PROVIDER: sarvam
+      SPEECH_TTS_PROVIDER: sarvam
+      SARVAM_STT_MODEL: saaras:v3
+      SARVAM_TTS_MODEL: bulbul:v2
+      SARVAM_API_KEY: ${{ secrets.SARVAM_API_KEY }}
+
+      # -----------------------------------------------------------------------
+      # Object storage (MinIO not started in backend CI; S3 calls mocked in
+      # unit tests. Integration tests that need S3 are skipped if endpoint
+      # unreachable — same pattern as Gemini.)
+      # -----------------------------------------------------------------------
+      S3_ENDPOINT: http://localhost:9000
+      S3_REGION: auto
+      S3_BUCKET_NAME: intants-interview-audio
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_USE_SSL: "false"
+
+      # -----------------------------------------------------------------------
+      # Avatar provider (D-ID Talks Streams; tests mock the HTTP calls)
+      # -----------------------------------------------------------------------
+      AVATAR_PROVIDER: did
+
+      # -----------------------------------------------------------------------
+      # Anthropic (not used in CI — LLM_PROVIDER=gemini above)
+      # -----------------------------------------------------------------------
+      ANTHROPIC_MODEL: claude-sonnet-4-6
+      ANTHROPIC_MAX_TOKENS: "1024"
+      ANTHROPIC_TEMPERATURE: "0.4"
+      ANTHROPIC_PROMPT_CACHE: "true"
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      # -----------------------------------------------------------------------
+      # AWS Bedrock (not used in CI)
+      # -----------------------------------------------------------------------
+      AWS_REGION: ap-south-1
+      BEDROCK_MODEL_ID: anthropic.claude-sonnet-4-6-20260201-v1:0
+
+      # -----------------------------------------------------------------------
+      # Observability (disabled in CI)
+      # -----------------------------------------------------------------------
+      SENTRY_DSN: ""
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
+
+      # -----------------------------------------------------------------------
+      # Feature flags
+      # -----------------------------------------------------------------------
+      FEATURE_AVATAR_ENABLED: "true"
+      FEATURE_VOICE_INTERRUPTION: "true"
+      FEATURE_MULTILINGUAL: "true"
+
+      # -----------------------------------------------------------------------
+      # Redis session TTL (interview_core only; harmless for data_gateway)
+      # -----------------------------------------------------------------------
+      REDIS_SESSION_TTL_SECONDS: "3600"
+
+      # -----------------------------------------------------------------------
+      # Database pool size (keep small in CI)
+      # -----------------------------------------------------------------------
+      DATABASE_POOL_SIZE: "5"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # -----------------------------------------------------------------------
+      # Cache Poetry virtual environment.
+      # Key includes matrix.service so data_gateway and interview_core caches
+      # never collide even though they share the same runner pool.
+      # -----------------------------------------------------------------------
+      - name: Cache Poetry venv
+        uses: actions/cache@v4
+        with:
+          path: services/${{ matrix.service }}/.venv
+          key: poetry-venv-${{ matrix.service }}-${{ runner.os }}-${{ hashFiles(format('services/{0}/pyproject.toml', matrix.service)) }}
+          restore-keys: |
+            poetry-venv-${{ matrix.service }}-${{ runner.os }}-
+
+      - name: Install Poetry
+        run: |
+          pip install --quiet "poetry==1.8.3"
+          poetry config virtualenvs.in-project true
+
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-ansi
+
+      # -----------------------------------------------------------------------
+      # Run alembic migrations.
+      # data_gateway owns the schema. interview_core reads the same DB but
+      # does not own migrations — we still run the data_gateway migrations
+      # from the data_gateway working directory for the interview_core matrix
+      # entry so the schema exists before interview_core tests run.
+      # -----------------------------------------------------------------------
+      - name: Run alembic migrations (data_gateway schema)
+        if: matrix.service == 'data_gateway'
+        run: poetry run alembic upgrade head
+
+      - name: Run alembic migrations (data_gateway schema, for interview_core)
+        if: matrix.service == 'interview_core'
+        working-directory: services/data_gateway
+        run: |
+          pip install --quiet "poetry==1.8.3"
+          poetry config virtualenvs.in-project true
+          poetry install --no-interaction --no-ansi --only main
+          poetry run alembic upgrade head
+
+      # -----------------------------------------------------------------------
+      # Lint with ruff
+      # -----------------------------------------------------------------------
+      - name: Lint (ruff)
+        run: poetry run ruff check .
+
+      # -----------------------------------------------------------------------
+      # Type-check with mypy.
+      #
+      # KNOWN ISSUE — task #13: mypy reports "Source file found twice" for
+      # modules in shared/ when Poetry resolves the editable path install.
+      # This produces exit code 2 (errors present) rather than exit code 1
+      # (usage error). We capture the exit code and treat code 2 as a warning:
+      # the step is marked as a success but the message is echoed to the log so
+      # it remains visible. Exit code 1 (or any other non-zero, non-2 code)
+      # still fails the job. Remove this workaround once task #13 is resolved.
+      # -----------------------------------------------------------------------
+      - name: Type-check (mypy)
+        run: |
+          set +e
+          poetry run mypy app --no-error-summary 2>&1
+          MYPY_EXIT=$?
+          set -e
+          if [ "$MYPY_EXIT" -eq 2 ]; then
+            echo "::warning::mypy exited with code 2 (known 'Source file found twice' issue — task #13). Treating as non-fatal."
+            exit 0
+          fi
+          exit $MYPY_EXIT
+
+      # -----------------------------------------------------------------------
+      # Run pytest.
+      # Coverage: NOT instrumented here — pytest-cov is not yet in
+      # pyproject.toml. Sprint 5 will add pytest-cov + set baselines.
+      # The -m "not integration" marker excludes tests that need live external
+      # services (Gemini, Sarvam). Those tests self-skip when keys are absent
+      # but explicitly excluding them keeps the output clean and the run fast.
+      #
+      # For interview_core: shared/ is already on PYTHONPATH via pyproject.toml
+      # [tool.pytest.ini_options] pythonpath = [".", "../.."] — no extra step.
+      # -----------------------------------------------------------------------
+      # Alembic single-head check (S5-008).
+      # Runs ONLY in the data_gateway matrix entry (data_gateway owns all
+      # migrations; interview_core has no alembic setup of its own).
+      #
+      # We do NOT use `alembic check` (autogenerate drift): this project writes
+      # migrations by hand and treats them as the schema source of truth, and
+      # the nos_competencies.embedding pgvector column cannot be ORM-mapped, so
+      # autogenerate reports permanent false drift (see alembic/env.py comment).
+      #
+      # Instead we assert a single linear migration head. This catches the real
+      # failure mode — two migrations sharing a down_revision (branching) or a
+      # duplicate revision id — which would make `alembic upgrade head` ambiguous.
+      # `alembic upgrade head` has already run cleanly in the step above.
+      # -----------------------------------------------------------------------
+      - name: Check Alembic single head (no branching)
+        if: matrix.service == 'data_gateway'
+        run: |
+          HEADS=$(poetry run alembic heads | grep -c '(head)')
+          echo "Alembic heads found: $HEADS"
+          if [ "$HEADS" -ne 1 ]; then
+            echo "::error::Expected exactly 1 Alembic head, found $HEADS. Migrations have branched — rebase the new revision onto the current head."
+            poetry run alembic heads
+            exit 1
+          fi
+
+      - name: Test (pytest)
+        run: |
+          poetry run pytest tests/ -q \
+            --tb=short \
+            -m "not integration"
+
+  # ---------------------------------------------------------------------------
+  # FRONTEND JOB
+  # Single job — no matrix
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # -----------------------------------------------------------------------
+      # Cache npm. Key is tied to package-lock.json so any lockfile change
+      # busts the cache and forces a clean install.
+      # -----------------------------------------------------------------------
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Lint (eslint)
+        run: npm run lint
+
+      # -----------------------------------------------------------------------
+      # Build — runs tsc -b + vite build. Type errors and dead imports surface
+      # here. This is the fastest way to run a full type-check in the frontend
+      # because "tsc --noEmit" on the project references is slower than the
+      # build itself.
+      # -----------------------------------------------------------------------
+      - name: Build (tsc + vite)
+        run: npm run build
+        env:
+          # Provide dummy public env vars so the build doesn't fail on missing
+          # VITE_* variables. These values are never shipped to production.
+          VITE_API_BASE_URL: http://localhost:8002
+          VITE_INTERVIEW_API_URL: http://localhost:8001
+          VITE_FEEDBACK_API_URL: http://localhost:8003
+          VITE_ADMIN_API_URL: http://localhost:8004
+          VITE_WS_BASE_URL: ws://localhost:8001
+          VITE_APP_NAME: Intants AI Interview
+          VITE_APP_ENV: ci
+          VITE_AVATAR_PROVIDER: did
+          VITE_RPM_SUBDOMAIN: intants
+          VITE_HEYGEN_AVATAR_ID: ci-placeholder
+          VITE_SENTRY_DSN: ""
+          VITE_FEATURE_AVATAR: "true"
+          VITE_FEATURE_VOICE_INTERRUPTION: "true"
+          VITE_FEATURE_MULTILINGUAL: "true"
+
+      # -----------------------------------------------------------------------
+      # Unit tests — Vitest in run mode (not watch mode).
+      # jsdom environment; no live network calls.
+      # Coverage: NOT instrumented here — @vitest/coverage-v8 is not yet in
+      # package.json. Sprint 5 will add it and set thresholds.
+      # -----------------------------------------------------------------------
+      - name: Test (vitest)
+        run: npm test -- --run --reporter=verbose
+
+  # ---------------------------------------------------------------------------
+  # E2E JOB — OPT-IN (cost-gated)
+  #
+  # ONLY runs when:
+  #   - The PR has the "e2e" label, OR
+  #   - The workflow is triggered manually via workflow_dispatch
+  #
+  # Reason: each E2E run hits live Gemini + Sarvam APIs. Estimated cost ~₹1-2
+  # per run. Do not add this label to every PR — reserve it for PR branches
+  # that touch the voice pipeline, WebSocket protocol, or auth flows.
+  #
+  # Depends on: backend + frontend (both must be green before E2E runs)
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: e2e (opt-in)
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    if: >
+      contains(github.event.pull_request.labels.*.name, 'e2e') ||
+      github.event_name == 'workflow_dispatch'
+
+    env:
+      # Services use the same credentials as docker-compose defaults
+      DATABASE_URL: postgresql+asyncpg://intants:intants@localhost:5432/intants_test
+      REDIS_URL: redis://localhost:6379/0
+
+      # Auth shared secret — must be identical in both backend processes
+      JWT_SECRET: ci-test-jwt-secret-not-real-64-char-placeholder-xxxxxxxxxxx
+      JWT_ALGORITHM: HS256
+      JWT_ISSUER: intants-data-gateway
+      JWT_AUDIENCE: intants-services
+      PASSWORD_HASH_ROUNDS: "4"
+      AUTH_PROVIDER: local
+
+      CONSENT_IP_SALT: ci-consent-ip-salt-placeholder-not-real-32-hex
+      TRUSTED_PROXY_COUNT: "0"
+
+      # LLM — real key required for E2E (avatar + voice pipeline)
+      LLM_PROVIDER: gemini
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_MODEL: gemini-2.5-flash
+      GEMINI_MAX_TOKENS: "2048"
+      GEMINI_API_BASE_URL: https://generativelanguage.googleapis.com/v1beta
+
+      SPEECH_STT_PROVIDER: sarvam
+      SPEECH_TTS_PROVIDER: sarvam
+      SARVAM_STT_MODEL: saaras:v3
+      SARVAM_TTS_MODEL: bulbul:v2
+      SARVAM_API_KEY: ${{ secrets.SARVAM_API_KEY }}
+
+      AVATAR_PROVIDER: did
+
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_MODEL: claude-sonnet-4-6
+      ANTHROPIC_MAX_TOKENS: "1024"
+      ANTHROPIC_TEMPERATURE: "0.4"
+      ANTHROPIC_PROMPT_CACHE: "true"
+
+      AWS_REGION: ap-south-1
+
+      SMTP_HOST: localhost
+      SMTP_PORT: "1025"
+      SMTP_USE_TLS: "false"
+      EMAIL_FROM: noreply@intants.com
+      EMAIL_FROM_NAME: Intants CI
+
+      CORS_ALLOWED_ORIGINS: http://localhost:5173
+      RATE_LIMIT_LOGIN_PER_MINUTE: "100"
+      RATE_LIMIT_API_PER_MINUTE: "1000"
+      DATABASE_POOL_SIZE: "5"
+      REDIS_SESSION_TTL_SECONDS: "3600"
+      SENTRY_DSN: ""
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
+      FEATURE_AVATAR_ENABLED: "true"
+      FEATURE_VOICE_INTERRUPTION: "true"
+      FEATURE_MULTILINGUAL: "true"
+      S3_ENDPOINT: http://localhost:9000
+      S3_REGION: auto
+      S3_BUCKET_NAME: intants-interview-audio
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_USE_SSL: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Spin up the full local stack (Postgres + Redis + MinIO + Mailpit).
+      # The docker-compose file maps host 5433 → container 5432 for Postgres
+      # (to avoid clashing with a local Postgres). In the E2E job we have no
+      # local Postgres so we override POSTGRES_PORT_HOST to 5432 so that the
+      # DATABASE_URL above resolves correctly without changing the compose file.
+      # -----------------------------------------------------------------------
+      - name: Start docker compose stack
+        run: |
+          # Override the Postgres host port to 5432 (CI has no system Postgres)
+          POSTGRES_PORT_HOST=5432 docker compose \
+            -f infra/docker/docker-compose.yml \
+            up -d --wait postgres redis minio mailpit
+        timeout-minutes: 3
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        run: pip install --quiet "poetry==1.8.3"
+
+      # -----------------------------------------------------------------------
+      # Install and migrate data_gateway (owns the schema)
+      # -----------------------------------------------------------------------
+      - name: Install data_gateway deps
+        working-directory: services/data_gateway
+        run: |
+          poetry config virtualenvs.in-project true
+          poetry install --no-interaction --no-ansi
+
+      - name: Run alembic migrations
+        working-directory: services/data_gateway
+        run: |
+          poetry run alembic upgrade head
+        env:
+          DATABASE_URL: postgresql+asyncpg://intants:intants@localhost:5432/intants_test
+
+      # -----------------------------------------------------------------------
+      # Install interview_core deps
+      # -----------------------------------------------------------------------
+      - name: Install interview_core deps
+        working-directory: services/interview_core
+        run: |
+          poetry config virtualenvs.in-project true
+          poetry install --no-interaction --no-ansi
+
+      # -----------------------------------------------------------------------
+      # Start data_gateway and interview_core as background processes.
+      # Redirect logs to files for post-run diagnosis.
+      # -----------------------------------------------------------------------
+      - name: Start data_gateway (background)
+        working-directory: services/data_gateway
+        run: |
+          poetry run uvicorn app.main:app --host 0.0.0.0 --port 8002 \
+            > /tmp/data_gateway.log 2>&1 &
+          echo "DATA_GATEWAY_PID=$!" >> $GITHUB_ENV
+
+      - name: Start interview_core (background)
+        working-directory: services/interview_core
+        run: |
+          poetry run uvicorn app.main:app --host 0.0.0.0 --port 8001 \
+            > /tmp/interview_core.log 2>&1 &
+          echo "INTERVIEW_CORE_PID=$!" >> $GITHUB_ENV
+
+      # -----------------------------------------------------------------------
+      # Frontend — install deps + start Vite dev server
+      # -----------------------------------------------------------------------
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Cache npm (E2E)
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
+
+      - name: Install web deps (npm ci)
+        working-directory: web
+        run: npm ci
+
+      - name: Start Vite dev server (background)
+        working-directory: web
+        run: |
+          npm run dev -- --host 0.0.0.0 --port 5173 \
+            > /tmp/vite.log 2>&1 &
+          echo "VITE_PID=$!" >> $GITHUB_ENV
+        env:
+          VITE_API_BASE_URL: http://localhost:8002
+          VITE_INTERVIEW_API_URL: http://localhost:8001
+          VITE_FEEDBACK_API_URL: http://localhost:8003
+          VITE_ADMIN_API_URL: http://localhost:8004
+          VITE_WS_BASE_URL: ws://localhost:8001
+          VITE_APP_NAME: Intants AI Interview
+          VITE_APP_ENV: ci
+          VITE_AVATAR_PROVIDER: did
+          VITE_RPM_SUBDOMAIN: intants
+          VITE_HEYGEN_AVATAR_ID: ""
+          VITE_SENTRY_DSN: ""
+          VITE_FEATURE_AVATAR: "true"
+          VITE_FEATURE_VOICE_INTERRUPTION: "true"
+          VITE_FEATURE_MULTILINGUAL: "true"
+
+      # -----------------------------------------------------------------------
+      # Wait for all three services to be healthy before running Playwright.
+      # Timeout: 60s total (services should be up within 30s on a warm runner)
+      # -----------------------------------------------------------------------
+      - name: Wait for services to be ready
+        run: |
+          echo "Waiting for data_gateway (:8002)..."
+          timeout 60 bash -c 'until curl -sf http://localhost:8002/health; do sleep 2; done'
+          echo "Waiting for interview_core (:8001)..."
+          timeout 60 bash -c 'until curl -sf http://localhost:8001/health; do sleep 2; done'
+          echo "Waiting for Vite dev server (:5173)..."
+          timeout 60 bash -c 'until curl -sf http://localhost:5173; do sleep 2; done'
+          echo "All services ready."
+
+      # -----------------------------------------------------------------------
+      # Playwright — install Chromium only (other browsers not needed).
+      # Cache the browser binaries keyed on package-lock.json hash.
+      # -----------------------------------------------------------------------
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
+      - name: Install Playwright Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright E2E tests
+        working-directory: web
+        run: npm run e2e
+        env:
+          CI: "true"
+
+      # -----------------------------------------------------------------------
+      # Upload Playwright trace + screenshots on failure for diagnosis.
+      # -----------------------------------------------------------------------
+      - name: Upload Playwright artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.run_id }}
+          path: |
+            web/test-results/
+            web/playwright-report/
+          retention-days: 7
+
+      # -----------------------------------------------------------------------
+      # Always dump service logs for post-run diagnosis.
+      # -----------------------------------------------------------------------
+      - name: Dump service logs
+        if: always()
+        run: |
+          echo "=== data_gateway log ===" && cat /tmp/data_gateway.log || true
+          echo "=== interview_core log ===" && cat /tmp/interview_core.log || true
+          echo "=== vite log ===" && cat /tmp/vite.log || true

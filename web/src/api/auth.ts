@@ -1,0 +1,76 @@
+// Auth API — switches between mock and real backend via VITE_USE_MOCK env var.
+//
+// All real-backend calls go through the central apiClient which handles:
+//   - credentials:'include' (cookies)
+//   - Authorization: Bearer injection
+//   - 401 → single-flight refresh → retry
+//
+// login/register/getMe/logout keep the same signatures for zero call-site churn.
+// The `token` parameter on getMe/logout is kept (but ignored) because the client
+// injects the current token from the store automatically.
+
+import type {
+  LoginRequest,
+  LoginResponse,
+  RegisterRequest,
+  RegisterResponse,
+  MeResponse,
+  LogoutResponse,
+} from '../types/auth';
+import { mockAuthResponse, mockMeResponse, mockLogoutResponse, simulateDelay } from './mock';
+import { apiGet, apiPost } from './client';
+import { setToken } from './tokenStore';
+
+const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false';
+
+export async function login(request: LoginRequest): Promise<LoginResponse> {
+  if (USE_MOCK) {
+    await simulateDelay();
+    return mockAuthResponse;
+  }
+  // skipAuth: true — no Bearer header on login; the response sets cookies.
+  const res = await apiPost<LoginResponse>('/auth/login', request, { skipAuth: true });
+  // Store the access token immediately so the very next authenticated call
+  // (e.g. getMe) carries the Bearer header. Without this, getMe fires before
+  // the store is populated → 401 → bounced back to /login.
+  setToken(res.access_token);
+  return res;
+}
+
+export async function register(request: RegisterRequest): Promise<RegisterResponse> {
+  if (USE_MOCK) {
+    await simulateDelay();
+    return mockAuthResponse;
+  }
+  const res = await apiPost<RegisterResponse>('/auth/register', request, { skipAuth: true });
+  // Same as login: populate the store before any follow-up authenticated call.
+  setToken(res.access_token);
+  return res;
+}
+
+/**
+ * Fetch the current user's profile.
+ * The `_token` parameter is accepted for backwards-compatibility but ignored —
+ * the central client injects the current token automatically.
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export async function getMe(_token?: string): Promise<MeResponse> {
+  if (USE_MOCK) {
+    await simulateDelay(200);
+    return mockMeResponse;
+  }
+  return apiGet<MeResponse>('/auth/me');
+}
+
+/**
+ * Sign out — calls POST /auth/logout which clears both server-side cookies.
+ * The `_token` parameter is accepted for backwards-compatibility but ignored.
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export async function logout(_token?: string): Promise<LogoutResponse> {
+  if (USE_MOCK) {
+    await simulateDelay(200);
+    return mockLogoutResponse;
+  }
+  return apiPost<LogoutResponse>('/auth/logout', {});
+}
