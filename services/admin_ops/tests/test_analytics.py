@@ -213,6 +213,7 @@ def _fake_detail_row_no_scorecard() -> dict[str, Any]:
         "scorecard_id": None,
         "composite_score": None,
         "scores": None,
+        "rationale": None,
         "strengths": None,
         "improvements": None,
         "summary": None,
@@ -230,6 +231,12 @@ def _fake_detail_row_with_scorecard() -> dict[str, Any]:
                 "technical": 7,
                 "problem_solving": 7,
                 "confidence": 8,
+            },
+            "rationale": {
+                "communication": "Clear and well-structured (8 — exceeds tier).",
+                "technical": "Solid depth on most topics (7 — meets tier).",
+                "problem_solving": "Structured reasoning with examples (7).",
+                "confidence": "Composed and assertive throughout (8).",
             },
             "strengths": ["Clear communication", "Good examples", "Structured thinking"],
             "improvements": [
@@ -505,6 +512,9 @@ def test_detail_happy_path_with_scorecard() -> None:
     assert sc["confidence"] == 8.0
     assert len(sc["strengths"]) == 3
     assert len(sc["improvements"]) == 3
+    # Per-axis rationale surfaces for the admin drill-in "why this score" panels.
+    assert sc["rationale"]["communication"].startswith("Clear and well-structured")
+    assert "rationale" in sc and len(sc["rationale"]) == 4
 
 
 # ===========================================================================

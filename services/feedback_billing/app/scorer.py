@@ -31,6 +31,13 @@ log = structlog.get_logger(__name__)
 
 SCORER_VERSION: str = "1.0"
 
+# Transient Gemini HTTP statuses worth retrying: 429 rate-limit, plus gateway /
+# overload errors (503 "high demand" is the common one on the free tier). A 4xx
+# like 400/403 is a real problem (bad prompt / key) and is NOT retried.
+_GEMINI_RETRY_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+_GEMINI_MAX_ATTEMPTS: int = 4  # 1 initial + 3 retries
+_GEMINI_BACKOFF_BASE_SECONDS: float = 1.0  # exponential: 1s, 2s, 4s
+
 # Axis weights for composite score (LLD §10).
 _WEIGHTS: dict[str, float] = {
     "communication": 0.30,
@@ -263,15 +270,38 @@ async def score_session(
         },
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(url, json=body)
-    except httpx.RequestError as exc:
-        raise ScoringError(f"Gemini HTTP request failed: {exc}") from exc
+    # Retry on transient failures (notably 503 "high demand" on the free tier)
+    # with exponential backoff, so a momentary Gemini hiccup does not cost the
+    # candidate their scorecard. Non-transient errors (bad key/prompt) fail fast.
+    response = None
+    last_error = "no attempt made"
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        for attempt in range(_GEMINI_MAX_ATTEMPTS):
+            try:
+                response = await client.post(url, json=body)
+            except httpx.RequestError as exc:
+                response = None
+                last_error = f"request error: {exc}"
+            else:
+                if response.status_code == 200:
+                    break
+                last_error = f"HTTP {response.status_code}: {response.text[:300]}"
+                if response.status_code not in _GEMINI_RETRY_STATUSES:
+                    break  # non-transient (e.g. 400/403) — do not retry
+            if attempt < _GEMINI_MAX_ATTEMPTS - 1:
+                backoff = _GEMINI_BACKOFF_BASE_SECONDS * (2**attempt)
+                log.warning(
+                    "score.gemini_retry",
+                    attempt=attempt + 1,
+                    max_attempts=_GEMINI_MAX_ATTEMPTS,
+                    backoff_s=backoff,
+                    error=last_error,
+                )
+                await asyncio.sleep(backoff)
 
-    if response.status_code != 200:
+    if response is None or response.status_code != 200:
         raise ScoringError(
-            f"Gemini returned HTTP {response.status_code}: {response.text[:300]}"
+            f"Gemini call failed after {_GEMINI_MAX_ATTEMPTS} attempt(s): {last_error}"
         )
 
     # ---- 3. Parse response -----------------------------------------------

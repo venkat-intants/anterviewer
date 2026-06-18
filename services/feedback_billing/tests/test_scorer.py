@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.scorer import (
+    _GEMINI_MAX_ATTEMPTS,
     _WEIGHTS,
     ScoringError,
     _clamp,
@@ -344,3 +345,109 @@ def test_clamp_below_min() -> None:
 def test_clamp_boundary_values() -> None:
     assert _clamp(0) == 0
     assert _clamp(10) == 10
+
+
+# ---------------------------------------------------------------------------
+# Gemini 503 / transient-error retry
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_score_session_retries_on_503_then_succeeds() -> None:
+    """A transient 503 is retried; the next 200 succeeds and writes a scorecard."""
+    mock_db = _make_db_session()
+    mock_settings = _make_settings()
+
+    resp_503 = _make_httpx_response(status_code=503, text_body="high demand")
+    resp_200 = _make_httpx_response(json_body=_GOOD_GEMINI_RESPONSE)
+
+    with (
+        patch("app.scorer.httpx.AsyncClient") as mock_client_cls,
+        patch("app.scorer.asyncio.sleep", new=AsyncMock()) as mock_sleep,
+    ):
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        # First call 503, second call 200.
+        mock_client.post = AsyncMock(side_effect=[resp_503, resp_200])
+        mock_client_cls.return_value = mock_client
+
+        scorecard_id, _scores, _composite = await score_session(
+            session_id=str(uuid.uuid4()),
+            job_title="Junior Java Developer",
+            experience_level="entry",
+            language="en",
+            turns=_SAMPLE_TURNS,
+            db_session=mock_db,
+            settings=mock_settings,
+        )
+
+    uuid.UUID(scorecard_id)  # valid UUID → success
+    assert mock_client.post.await_count == 2  # retried once
+    assert mock_sleep.await_count == 1  # backed off once
+    mock_db.commit.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_score_session_gives_up_after_max_503() -> None:
+    """Persistent 503 → ScoringError after _GEMINI_MAX_ATTEMPTS, no DB write."""
+    mock_db = _make_db_session()
+    mock_settings = _make_settings()
+
+    resp_503 = _make_httpx_response(status_code=503, text_body="high demand")
+
+    with (
+        patch("app.scorer.httpx.AsyncClient") as mock_client_cls,
+        patch("app.scorer.asyncio.sleep", new=AsyncMock()),
+    ):
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=resp_503)
+        mock_client_cls.return_value = mock_client
+
+        with pytest.raises(ScoringError):
+            await score_session(
+                session_id=str(uuid.uuid4()),
+                job_title="Junior Java Developer",
+                experience_level="entry",
+                language="en",
+                turns=_SAMPLE_TURNS,
+                db_session=mock_db,
+                settings=mock_settings,
+            )
+
+        assert mock_client.post.await_count == _GEMINI_MAX_ATTEMPTS
+    mock_db.commit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_score_session_does_not_retry_on_403() -> None:
+    """A 403 (bad key) is non-transient → fail fast, exactly one attempt."""
+    mock_db = _make_db_session()
+    mock_settings = _make_settings()
+
+    resp_403 = _make_httpx_response(status_code=403, text_body="permission denied")
+
+    with (
+        patch("app.scorer.httpx.AsyncClient") as mock_client_cls,
+        patch("app.scorer.asyncio.sleep", new=AsyncMock()),
+    ):
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=resp_403)
+        mock_client_cls.return_value = mock_client
+
+        with pytest.raises(ScoringError):
+            await score_session(
+                session_id=str(uuid.uuid4()),
+                job_title="Junior Java Developer",
+                experience_level="entry",
+                language="en",
+                turns=_SAMPLE_TURNS,
+                db_session=mock_db,
+                settings=mock_settings,
+            )
+
+        assert mock_client.post.await_count == 1  # no retry on 403
