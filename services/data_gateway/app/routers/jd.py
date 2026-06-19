@@ -17,6 +17,7 @@ import uuid
 from typing import Annotated
 
 import structlog
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from pydantic import BaseModel
 from pypdf import PdfReader
@@ -99,7 +100,16 @@ async def upload_jd_document(
         )
 
     # --- 2. read + size check ---
-    raw: bytes = await file.read()
+    # A mid-upload client disconnect / spooled temp OSError must not escape as
+    # an unhandled, CORS-less 500.
+    try:
+        raw: bytes = await file.read()
+    except Exception as exc:
+        log.warning("jd.upload.read_failed", error_type=type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not read the uploaded file. Please try again.",
+        ) from exc
     if len(raw) > _MAX_JD_BYTES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -127,32 +137,73 @@ async def upload_jd_document(
         )
 
     # --- 4. text extraction ---
-    text_content = _extract_pdf_text(raw)
+    # pypdf can raise on encrypted/corrupt PDFs — surface a clean 400 instead of
+    # an unhandled, CORS-less 500.
+    try:
+        text_content = _extract_pdf_text(raw)
+    except Exception as exc:
+        log.warning("jd.upload.pdf_parse_failed", error_type=type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not read the PDF. Please upload a valid, unencrypted PDF file.",
+        ) from exc
 
     # --- 5. S3 upload ---
+    # Convert storage failures (bad credentials, unreachable endpoint) to a 502
+    # so they reach the browser WITH CORS headers, instead of escaping as an
+    # unhandled 500 that surfaces as a misleading "Network error".
     key = f"jd-documents/{job_id}.pdf"
-    await upload_file(
-        bucket=settings.s3_bucket_name,
-        key=key,
-        data=raw,
-        content_type="application/pdf",
-        settings=settings,
-    )
+    try:
+        await upload_file(
+            bucket=settings.s3_bucket_name,
+            key=key,
+            data=raw,
+            content_type="application/pdf",
+            settings=settings,
+        )
+    except (BotoCoreError, ClientError) as exc:
+        log.error(
+            "jd.upload.storage_failed",
+            job_id=str(job_id),
+            s3_key=key,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Document storage is currently unavailable. Please try again later.",
+        ) from exc
 
     # --- 6. DB update ---
-    await db.execute(
-        text(
-            "UPDATE jobs SET jd_text = :jd_text, "
-            "jd_s3_key = :jd_s3_key, updated_at = now() "
-            "WHERE id = :jid"
-        ),
-        {
-            "jd_text": text_content,
-            "jd_s3_key": key,
-            "jid": job_id,
-        },
-    )
-    await db.commit()
+    # The JD object lives at a deterministic key (overwritten on each upload), so
+    # a failed DB write leaves no true orphan. Convert the failure to a 503
+    # (CORS-decorated) rather than letting it escape as an unhandled 500.
+    try:
+        await db.execute(
+            text(
+                "UPDATE jobs SET jd_text = :jd_text, "
+                "jd_s3_key = :jd_s3_key, updated_at = now() "
+                "WHERE id = :jid"
+            ),
+            {
+                "jd_text": text_content,
+                "jd_s3_key": key,
+                "jid": job_id,
+            },
+        )
+        await db.commit()
+    except Exception as db_exc:
+        log.error(
+            "jd.upload.db_write_failed",
+            job_id=str(job_id),
+            s3_key=key,
+            error_type=type(db_exc).__name__,
+            error=str(db_exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not save the job description. Please try again.",
+        ) from db_exc
 
     log.info(
         "jd.upload.ok",

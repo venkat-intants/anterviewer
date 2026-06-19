@@ -9,6 +9,7 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 from fastapi import HTTPException
 from pypdf import PdfReader
 
@@ -165,3 +166,191 @@ async def test_resume_upload_happy_path() -> None:
     # resume_id segment must be a valid UUID
     raw_id = response.resume_s3_key.split("/")[-1].replace(".pdf", "")
     uuid.UUID(raw_id)
+
+
+# ---------------------------------------------------------------------------
+# 5. test_storage_failure_returns_502 — a boto ClientError must NOT escape as an
+#    unhandled 500 (which would skip CORS headers and surface in the browser as
+#    "Network error"); it must become a clean HTTP 502.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_storage_failure_returns_502() -> None:
+    """A storage ClientError (e.g. bad credentials) → HTTP 502, not a 500."""
+    from app.routers.resume import upload_resume
+
+    mock_file = MagicMock()
+    mock_file.content_type = "application/pdf"
+    mock_file.read = AsyncMock(return_value=_make_minimal_pdf())
+    mock_file.filename = "cv.pdf"
+
+    mock_user = MagicMock()
+    mock_user.user_id = str(uuid.uuid4())
+
+    mock_db = AsyncMock()
+
+    storage_error = ClientError(
+        {"Error": {"Code": "InvalidAccessKeyId", "Message": "Malformed Access Key Id"}},
+        "PutObject",
+    )
+
+    with (
+        patch("app.routers.resume._extract_pdf_text", return_value="text"),
+        patch("app.routers.resume._upload_to_s3", new=AsyncMock(side_effect=storage_error)),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await upload_resume(file=mock_file, current_user=mock_user, db=mock_db)
+
+    assert exc_info.value.status_code == 502
+    # The DB must never be committed when storage fails.
+    mock_db.commit.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# 6. test_corrupt_pdf_returns_400 — pypdf raising on a corrupt/encrypted PDF
+#    must become a clean HTTP 400, not an unhandled 500.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_corrupt_pdf_returns_400() -> None:
+    """A pypdf parse error → HTTP 400 with a helpful message, not a 500."""
+    from app.routers.resume import upload_resume
+
+    mock_file = MagicMock()
+    mock_file.content_type = "application/pdf"
+    mock_file.read = AsyncMock(return_value=b"%PDF-1.4 not-really-a-pdf")
+    mock_file.filename = "broken.pdf"
+
+    mock_user = MagicMock()
+    mock_user.user_id = str(uuid.uuid4())
+
+    mock_db = AsyncMock()
+
+    with (
+        patch(
+            "app.routers.resume._extract_pdf_text",
+            side_effect=Exception("PdfReadError: EOF marker not found"),
+        ),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await upload_resume(file=mock_file, current_user=mock_user, db=mock_db)
+
+    assert exc_info.value.status_code == 400
+    assert "PDF" in exc_info.value.detail
+
+
+# ---------------------------------------------------------------------------
+# 7. test_commit_failure_returns_503 — a DB commit failure must clean up the
+#    orphaned S3 object AND become a clean HTTP 503 (CORS-decorated), not a
+#    re-raised raw DB error (which would skip CORS and read as "Network error").
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_commit_failure_returns_503() -> None:
+    """DB commit failure → S3 cleanup + HTTP 503, not a raw 500."""
+    from app.routers.resume import upload_resume
+
+    mock_file = MagicMock()
+    mock_file.content_type = "application/pdf"
+    mock_file.read = AsyncMock(return_value=_make_minimal_pdf())
+    mock_file.filename = "cv.pdf"
+
+    mock_user = MagicMock()
+    mock_user.user_id = str(uuid.uuid4())
+
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock()
+    mock_db.add = MagicMock()
+    mock_db.commit = AsyncMock(side_effect=RuntimeError("connection lost"))
+
+    delete_mock = AsyncMock()
+
+    with (
+        patch("app.routers.resume._extract_pdf_text", return_value="text"),
+        patch("app.routers.resume._upload_to_s3", new=AsyncMock()),
+        patch("app.routers.resume._delete_from_s3", new=delete_mock),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await upload_resume(file=mock_file, current_user=mock_user, db=mock_db)
+
+    assert exc_info.value.status_code == 503
+    # The orphaned S3 object must be cleaned up after the failed commit.
+    delete_mock.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# 8. test_db_demote_failure_returns_503 — a DB error on the PRE-commit demote
+#    statement (outside the old commit-only guard) must also become a clean 503
+#    with S3 cleanup, not an unhandled 500.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_db_demote_failure_returns_503() -> None:
+    """A failure on _demote_current_resumes (before commit) → 503 + S3 cleanup."""
+    from app.routers.resume import upload_resume
+
+    mock_file = MagicMock()
+    mock_file.content_type = "application/pdf"
+    mock_file.read = AsyncMock(return_value=_make_minimal_pdf())
+    mock_file.filename = "cv.pdf"
+
+    mock_user = MagicMock()
+    mock_user.user_id = str(uuid.uuid4())
+
+    mock_db = AsyncMock()
+    delete_mock = AsyncMock()
+
+    with (
+        patch("app.routers.resume._extract_pdf_text", return_value="text"),
+        patch("app.routers.resume._upload_to_s3", new=AsyncMock()),
+        patch(
+            "app.routers.resume._demote_current_resumes",
+            new=AsyncMock(side_effect=RuntimeError("statement timeout")),
+        ),
+        patch("app.routers.resume._delete_from_s3", new=delete_mock),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await upload_resume(file=mock_file, current_user=mock_user, db=mock_db)
+
+    assert exc_info.value.status_code == 503
+    # Must never commit, and must clean up the orphaned S3 object.
+    mock_db.commit.assert_not_awaited()
+    delete_mock.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# 9. test_malformed_user_id_returns_400 — a non-UUID JWT subject must become a
+#    clean 400, not an unhandled 500 (ValueError from uuid.UUID()).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_malformed_user_id_returns_400() -> None:
+    """A non-UUID current_user.user_id → HTTP 400, not an unhandled 500."""
+    from app.routers.resume import upload_resume
+
+    mock_file = MagicMock()
+    mock_file.content_type = "application/pdf"
+    mock_file.read = AsyncMock(return_value=_make_minimal_pdf())
+    mock_file.filename = "cv.pdf"
+
+    mock_user = MagicMock()
+    mock_user.user_id = "not-a-uuid@example.com"  # e.g. an SSO email subject
+
+    mock_db = AsyncMock()
+    s3_mock = AsyncMock()
+
+    with (
+        patch("app.routers.resume._extract_pdf_text", return_value="text"),
+        patch("app.routers.resume._upload_to_s3", new=s3_mock),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await upload_resume(file=mock_file, current_user=mock_user, db=mock_db)
+
+    assert exc_info.value.status_code == 400
+    # The bad id is caught before any storage write happens.
+    s3_mock.assert_not_awaited()

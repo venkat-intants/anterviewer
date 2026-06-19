@@ -34,6 +34,7 @@ from typing import Annotated
 import aioboto3
 import structlog
 from botocore.config import Config as BotoConfig
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
@@ -290,7 +291,16 @@ async def _do_upload(
         )
 
     # --- 2. read + size check ---
-    raw: bytes = await file.read()
+    # A mid-upload client disconnect (starlette ClientDisconnect) or a spooled
+    # temp-file OSError would otherwise escape as an unhandled, CORS-less 500.
+    try:
+        raw: bytes = await file.read()
+    except Exception as exc:
+        log.warning("resume.upload.read_failed", error_type=type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not read the uploaded file. Please try again.",
+        ) from exc
     if len(raw) > _MAX_RESUME_BYTES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -298,50 +308,105 @@ async def _do_upload(
         )
 
     # --- 3. text extraction ---
-    text_content = _extract_pdf_text(raw)
+    # pypdf can raise on encrypted/corrupt PDFs. Surface a clean 400 instead of
+    # letting it bubble up as an unhandled 500 — an unhandled error is emitted
+    # by Starlette's outermost ServerErrorMiddleware, which sits OUTSIDE the CORS
+    # middleware, so the browser would receive a header-less cross-origin
+    # response and report a misleading "Network error — could not reach server"
+    # rather than the real cause.
+    try:
+        text_content = _extract_pdf_text(raw)
+    except Exception as exc:
+        log.warning(
+            "resume.upload.pdf_parse_failed",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not read the PDF. Please upload a valid, unencrypted PDF file.",
+        ) from exc
 
     # --- 4. Build versioned S3 key ---
-    user_uuid = uuid.UUID(user.user_id)
+    # The JWT subject is not guaranteed to be a canonical UUID (the google/
+    # keycloak/naipunyam auth providers may carry an email or opaque id), so
+    # uuid.UUID() can raise — guard it into a clean 400 rather than an
+    # unhandled, CORS-less 500.
+    try:
+        user_uuid = uuid.UUID(user.user_id)
+    except (ValueError, AttributeError, TypeError) as exc:
+        log.warning("resume.upload.bad_user_id", error_type=type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not resolve your user account. Please sign in again.",
+        ) from exc
     resume_id = uuid.uuid4()
     filename = file.filename or f"resume_{resume_id}.pdf"
     versioned_key = f"resumes/{user_uuid}/{resume_id}.pdf"
 
-    await _upload_to_s3(raw, versioned_key)
+    # --- 4b. upload to object storage ---
+    # A storage failure (bad/malformed credentials, unreachable endpoint, etc.)
+    # must NOT escape as an unhandled 500: that response bypasses CORSMiddleware
+    # and the browser surfaces it as "Network error — could not reach server"
+    # with no actionable detail. Convert it to a 502 so the client receives a
+    # CORS-decorated, meaningful error, and log the underlying cause for ops.
+    try:
+        await _upload_to_s3(raw, versioned_key)
+    except (BotoCoreError, ClientError) as exc:
+        log.error(
+            "resume.upload.storage_failed",
+            user_id=user.user_id,
+            s3_key=versioned_key,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Resume storage is currently unavailable. Please try again later.",
+        ) from exc
 
     # --- 5. DB: demote previous current → insert new row → sync users table ---
-    # IMPORTANT: S3 upload succeeded above. If db.commit() fails below we must
-    # best-effort delete the just-uploaded S3 object to avoid an orphan.
+    # IMPORTANT: S3 upload succeeded above. The ENTIRE write sequence is guarded
+    # as one unit — a transient DB error or an autoflush IntegrityError can fire
+    # on the demote/insert/sync statements, not only on commit(). On ANY failure
+    # we best-effort delete the just-uploaded S3 object (to avoid an orphan) and
+    # re-raise as an HTTPException so the response is produced INSIDE the CORS
+    # middleware and carries the CORS headers the browser requires — an unhandled
+    # DB error here would otherwise surface as a misleading "Network error".
     now = datetime.now(tz=UTC)
-    await _demote_current_resumes(db, user_uuid)
-
-    new_resume = Resume(
-        id=resume_id,
-        user_id=user_uuid,
-        filename=filename,
-        resume_text=text_content,
-        resume_s3_key=versioned_key,
-        is_current=True,
-        uploaded_at=now,
-        created_at=now,
-    )
-    db.add(new_resume)
-
-    await _sync_users_table(db, user_uuid, text_content, versioned_key)
     try:
+        await _demote_current_resumes(db, user_uuid)
+
+        new_resume = Resume(
+            id=resume_id,
+            user_id=user_uuid,
+            filename=filename,
+            resume_text=text_content,
+            resume_s3_key=versioned_key,
+            is_current=True,
+            uploaded_at=now,
+            created_at=now,
+        )
+        db.add(new_resume)
+
+        await _sync_users_table(db, user_uuid, text_content, versioned_key)
         await db.commit()
     except Exception as db_exc:
         # Rollback is handled by SQLAlchemy on the next operation, but the S3
         # object has already been written.  Best-effort delete it now so we
         # don't leave an unreferenced file in storage.
         log.error(
-            "resume.upload.commit_failed",
+            "resume.upload.db_write_failed",
             user_id=str(user_uuid),
             s3_key=versioned_key,
             error_type=type(db_exc).__name__,
             error=str(db_exc),
         )
         await _delete_from_s3(versioned_key)
-        raise
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not save the resume. Please try again.",
+        ) from db_exc
 
     log.info(
         "resume.upload.ok",
