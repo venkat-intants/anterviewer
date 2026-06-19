@@ -7,6 +7,10 @@ Scope (what gets purged):
   - sessions WHERE status='completed' AND completed_at < NOW() - INTERVAL N days
   - turns CASCADE via FK (ON DELETE CASCADE on turns.session_id — confirmed in
     migration eda3829ec95a, fk_turns_session_id with ondelete='CASCADE')
+  - integrity_events CASCADE via FK (ON DELETE CASCADE on
+    integrity_events.session_id — migration 20260618_0002). So proctoring /
+    biometric-derived gaze data is purged together with its session here; the
+    erasure endpoint additionally hard-deletes it immediately on request.
   - audio recordings — separate concern; tracked when blob storage lands (Sprint 5)
 
 Out of scope (what is NEVER deleted by this job):

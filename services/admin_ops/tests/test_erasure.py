@@ -96,8 +96,10 @@ def _make_mock_session(
 
     call_results: list[Any] = [user, existing_erasure]
     call_index: dict[str, int] = {"i": 0}
+    executed_sql: list[str] = []
 
     async def _execute(stmt: Any, *args: Any, **kwargs: Any) -> MagicMock:  # noqa: ANN401
+        executed_sql.append(str(stmt))
         result = MagicMock()
         idx = call_index["i"]
         call_index["i"] += 1
@@ -105,9 +107,11 @@ def _make_mock_session(
             call_results[idx] if idx < len(call_results) else None
         )
         result.scalars.return_value = scalars_result
+        result.rowcount = 0
         return result
 
     session.execute = _execute
+    session.executed_sql = executed_sql  # test introspection
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
     session.add = MagicMock()
@@ -201,6 +205,11 @@ def test_erasure_happy_path() -> None:
     scheduled = datetime.fromisoformat(data["scheduled_completion"])
     delta = scheduled - datetime.now(UTC)
     assert timedelta(days=29, hours=23) < delta < timedelta(days=30, hours=1)
+
+    # Proctoring/biometric integrity events are hard-deleted immediately.
+    assert any(
+        "DELETE FROM integrity_events" in sql for sql in mock_session.executed_sql
+    ), "erasure must immediately purge integrity_events for the user's sessions"
 
 
 # ---------------------------------------------------------------------------

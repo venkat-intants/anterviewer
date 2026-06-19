@@ -2,7 +2,11 @@
 
 DPDP Act 2023, §17: every data principal has the right to erasure of their
 personal data. This endpoint initiates a soft-delete of the user's account
-and sessions, then schedules full erasure 30 days out.
+and sessions, then schedules full erasure 30 days out. Proctoring integrity
+events (biometric-derived gaze/face signals) are HARD-deleted immediately —
+they are too sensitive to keep through the 30-day grace window. The 90-day
+retention cron separately purges integrity_events via ON DELETE CASCADE when it
+hard-deletes the parent session.
 
 Contract:
   POST /admin/users/{user_id}/dpdp/delete
@@ -33,7 +37,7 @@ from typing import Annotated
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -176,6 +180,27 @@ async def request_erasure(
             )
         else:
             log.info("erasure.no_sessions_to_delete", user_id=str(user_id))
+
+        # 3b-ii. HARD-delete proctoring integrity events for this user's sessions.
+        #        These are biometric-DERIVED (gaze/face) signals — the most
+        #        sensitive proctoring data — so they are purged IMMEDIATELY on an
+        #        erasure request rather than waiting out the 30-day grace that
+        #        applies to less-sensitive soft-deleted session/turn data.
+        #        (Sessions are only soft-deleted here, so the FK cascade does not
+        #        fire yet — hence the explicit DELETE.)
+        purge_result = await db.execute(
+            text(
+                "DELETE FROM integrity_events "
+                "WHERE session_id IN (SELECT id FROM sessions WHERE user_id = :user_id)"
+            ),
+            {"user_id": user_id},
+        )
+        _purged_rc = getattr(purge_result, "rowcount", None)
+        log.info(
+            "erasure.integrity_events_purged",
+            user_id=str(user_id),
+            count=_purged_rc if isinstance(_purged_rc, int) else None,
+        )
 
         # 3c. Insert erasure_requests row
         erasure_row = ErasureRequest(
