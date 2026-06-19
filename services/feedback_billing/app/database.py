@@ -10,6 +10,7 @@ Cloud / pgBouncer note:
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from urllib.parse import urlsplit
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -29,18 +30,37 @@ def init_engine() -> None:
     global _engine, _session_factory
 
     if settings.database_ssl:
-        # Prisma / pgBouncer pooled endpoint: SSL required, prepared-statement
-        # cache disabled, NullPool so SQLAlchemy doesn't double-pool.
-        _engine = create_async_engine(
-            settings.database_url,
-            connect_args={
-                "ssl": settings.database_ssl,
-                "statement_cache_size": 0,
-            },
-            poolclass=NullPool,
-            pool_pre_ping=True,
-            echo=False,
-        )
+        # Cloud Postgres over SSL. The pool choice depends on the endpoint:
+        host = urlsplit(settings.database_url).hostname or ""
+        if "-pooler" in host:
+            # pgBouncer POOLED endpoint: NullPool so SQLAlchemy doesn't pool on
+            # top of pgBouncer, and statement_cache_size=0 because pgBouncer
+            # transaction mode rejects named prepared statements.
+            _engine = create_async_engine(
+                settings.database_url,
+                connect_args={"ssl": settings.database_ssl, "statement_cache_size": 0},
+                poolclass=NullPool,
+                pool_pre_ping=True,
+                echo=False,
+            )
+        else:
+            # DIRECT endpoint (no server-side pooler): keep a real client-side
+            # pool so connections are REUSED across requests instead of paying a
+            # full TLS + auth handshake (~1s+ over the WAN) on EVERY request — the
+            # cause of multi-second page loads when the DB is in a far region.
+            # Leave asyncpg's prepared-statement cache ON (default): a real session
+            # caches statements per pooled connection, so a repeated query costs ONE
+            # round-trip instead of prepare+execute. pool_pre_ping + pool_recycle
+            # survive the provider's idle autosuspend dropping connections.
+            _engine = create_async_engine(
+                settings.database_url,
+                connect_args={"ssl": settings.database_ssl},
+                pool_size=settings.database_pool_size,
+                max_overflow=5,
+                pool_pre_ping=True,
+                pool_recycle=280,
+                echo=False,
+            )
     else:
         _engine = create_async_engine(
             settings.database_url,
