@@ -324,7 +324,14 @@ export function useProctoring({
     const startWorker = (): boolean => {
       if (typeof Worker === 'undefined' || typeof createImageBitmap === 'undefined') return false;
       try {
-        worker = new Worker(new URL('./proctorWorker.ts', import.meta.url), { type: 'module' });
+        // CLASSIC worker (deliberately NOT { type: 'module' }). In a module
+        // worker, MediaPipe loads its wasm-loader .js via ESM import(), which
+        // Vite's dev server refuses for files served from /public ("…should not
+        // be imported from source code…"). A classic worker makes MediaPipe use
+        // importScripts() instead — a plain static fetch of the self-hosted
+        // /public wasm. Vite still bundles this worker and its imports for both
+        // dev and build, so the only behavioural change is how the wasm loads.
+        worker = new Worker(new URL('./proctorWorker.ts', import.meta.url));
       } catch {
         return false;
       }

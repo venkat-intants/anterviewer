@@ -5,6 +5,12 @@
 // animations) smooth on low-end devices. The main thread keeps ALL decision and
 // state logic — this worker only turns a video frame into gaze signals.
 //
+// IMPORTANT: this is instantiated as a CLASSIC worker (see useProctoring), not a
+// module worker. In a module worker MediaPipe loads its wasm loader via ESM
+// import(), which Vite's dev server rejects for /public files; as a classic
+// worker MediaPipe falls back to importScripts(), a plain static fetch of the
+// self-hosted wasm. Vite still bundles the imports below into the worker.
+//
 // Protocol:
 //   main → worker  { type: 'init', wasmUrl, modelUrl }
 //   worker → main  { type: 'ready' } | { type: 'error', error }
