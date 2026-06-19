@@ -101,6 +101,17 @@ export interface InterviewDetailResponse {
   completed_at: string | null;
   duration_seconds: number | null;
   scorecard: ScorecardDetail | null;
+  /** Phase B proctoring — 0-100 integrity score; null if proctoring was off. */
+  integrity_score?: number | null;
+  /** Per-type event counts + flagged seconds; null if proctoring was off. */
+  proctoring_summary?: ProctoringSummary | null;
+}
+
+export interface ProctoringSummary {
+  by_type?: Record<string, number>;
+  flagged_seconds?: Record<string, number>;
+  total_events?: number;
+  total_flagged_seconds?: number;
 }
 
 export interface ByRoleItem {

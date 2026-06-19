@@ -20,6 +20,7 @@ import {
   AlertCircle,
   ChevronDown,
   Info,
+  ShieldCheck,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
@@ -31,7 +32,7 @@ import {
   Tooltip,
 } from 'recharts';
 import { getInterviewDetail } from '@/api/admin';
-import type { ScorecardDetail } from '@/api/admin';
+import type { ScorecardDetail, ProctoringSummary } from '@/api/admin';
 import { toast } from '@/lib/toast';
 import { formatDate, formatDuration, statusProps, languageLabel } from '@/lib/formatters';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -199,6 +200,90 @@ function ScoreBarRow({
         </div>
       )}
     </div>
+  );
+}
+
+// ── Integrity (proctoring) panel ─────────────────────────────────────────────
+
+const INTEGRITY_LABELS: Record<string, string> = {
+  gaze_away: 'Looked away from screen',
+  face_absent: 'Face not visible',
+  multiple_faces: 'Multiple faces detected',
+  tab_blur: 'Switched tab / window',
+  fullscreen_exit: 'Left fullscreen',
+  copy: 'Copied text',
+  paste: 'Pasted text',
+  second_voice: 'Second voice detected',
+  devtools_open: 'Developer tools opened',
+};
+
+function integrityColor(score: number): string {
+  if (score >= 80) return 'text-green-600';
+  if (score >= 60) return 'text-amber-500';
+  return 'text-destructive';
+}
+
+function IntegrityPanel({
+  score,
+  summary,
+}: {
+  score: number | null | undefined;
+  summary: ProctoringSummary | null | undefined;
+}) {
+  const byType = summary?.by_type ?? {};
+  const flaggedSeconds = summary?.flagged_seconds ?? {};
+  const types = Object.keys(byType);
+
+  return (
+    <Card className="shadow-sm">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base flex items-center gap-2">
+          <span className="inline-flex h-6 w-6 items-center justify-center rounded bg-primary/10">
+            <ShieldCheck className="h-4 w-4 text-primary" aria-hidden="true" />
+          </span>
+          Interview Integrity
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">
+          AI-assisted flagging for human review — not an automated decision. Webcam
+          signals are approximate; review the flags in context.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {score === null || score === undefined ? (
+          <p className="text-sm text-muted-foreground">
+            Proctoring was not enabled for this session.
+          </p>
+        ) : (
+          <>
+            <div className="flex items-baseline gap-2">
+              <span className={cn('text-4xl font-extrabold tabular-nums', integrityColor(score))}>
+                {score}
+              </span>
+              <span className="text-sm text-muted-foreground">/ 100 integrity</span>
+            </div>
+
+            {types.length === 0 ? (
+              <p className="text-sm text-green-600">No integrity flags were raised. ✓</p>
+            ) : (
+              <ul className="space-y-2" aria-label="Integrity flags">
+                {types.map((t) => (
+                  <li key={t} className="flex items-center justify-between gap-2 text-sm">
+                    <span className="flex items-center gap-2 text-foreground">
+                      <AlertCircle className="h-3.5 w-3.5 text-amber-500 shrink-0" aria-hidden="true" />
+                      {INTEGRITY_LABELS[t] ?? t}
+                    </span>
+                    <span className="text-muted-foreground tabular-nums">
+                      {byType[t]}×
+                      {flaggedSeconds[t] ? ` · ${flaggedSeconds[t]}s` : ''}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -532,6 +617,11 @@ export default function AdminInterviewDetail() {
           </Card>
         </motion.div>
       )}
+
+      {/* Integrity / proctoring panel — shown regardless of scorecard presence */}
+      <motion.div variants={fadeUp}>
+        <IntegrityPanel score={data.integrity_score} summary={data.proctoring_summary} />
+      </motion.div>
     </motion.div>
   );
 }

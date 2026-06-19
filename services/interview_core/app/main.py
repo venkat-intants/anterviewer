@@ -15,6 +15,7 @@ from app.llm import build_default_adapter
 from app.redis_client import close_redis, init_redis
 from app.routers.api import router as api_router
 from app.routers.avatars import router as avatars_router
+from app.routers.integrity import router as integrity_router
 from app.routers.rooms import router as rooms_router
 from app.routers.sessions import router as sessions_router
 
@@ -69,6 +70,7 @@ app.include_router(api_router)
 app.include_router(avatars_router)
 app.include_router(sessions_router)
 app.include_router(rooms_router)
+app.include_router(integrity_router)
 # NOTE: WS turn-loop + avatar routers removed 2026-05-31 — the real-time
 # interview transport (LiveKit/Pipecat) + avatar layer are being rebuilt
 # from scratch. The brain (graph/), voice (speech/), LLM and data layers

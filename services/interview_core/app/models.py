@@ -138,6 +138,12 @@ class Session(Base):
     # NULL means the baseline presenter ("presenter_alice").
     # Added by data_gateway migration 20260530_0003.
     presenter_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Phase B proctoring (data_gateway migration 20260618_0002). NULL = no
+    # proctoring data (proctoring off / legacy session).
+    integrity_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    proctoring_summary: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True
+    )
 
     job: Mapped[Job] = relationship("Job", back_populates="sessions")
     turns: Mapped[list[Turn]] = relationship(
@@ -180,3 +186,33 @@ class Turn(Base):
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
 
     session: Mapped[Session] = relationship("Session", back_populates="turns")
+
+
+# ---------------------------------------------------------------------------
+# IntegrityEvent — one flagged proctoring event within a session (Phase B).
+# ---------------------------------------------------------------------------
+
+
+class IntegrityEvent(Base):
+    """A single flagged integrity/proctoring event during an interview.
+
+    event_type: gaze_away | face_absent | multiple_faces | tab_blur |
+                fullscreen_exit | copy | paste | second_voice | ...
+    ended_at:   NULL for instantaneous events; set for ranged events so a
+                duration (and thus a per-second penalty) can be computed.
+    event_metadata: optional detail, e.g. {"confidence": 0.7, "yaw_deg": 35}.
+    """
+
+    __tablename__ = "integrity_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    event_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))

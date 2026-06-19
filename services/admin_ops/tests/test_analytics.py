@@ -217,6 +217,8 @@ def _fake_detail_row_no_scorecard() -> dict[str, Any]:
         "strengths": None,
         "improvements": None,
         "summary": None,
+        "integrity_score": None,
+        "proctoring_summary": None,
     }
 
 
@@ -245,6 +247,13 @@ def _fake_detail_row_with_scorecard() -> dict[str, Any]:
                 {"area": "Problem solving", "suggestion": "Review algorithms"},
             ],
             "summary": "Strong candidate overall.",
+            "integrity_score": 82,
+            "proctoring_summary": {
+                "by_type": {"gaze_away": 2, "tab_blur": 1},
+                "flagged_seconds": {"gaze_away": 7.5},
+                "total_events": 3,
+                "total_flagged_seconds": 7.5,
+            },
         }
     )
     return row
@@ -515,6 +524,9 @@ def test_detail_happy_path_with_scorecard() -> None:
     # Per-axis rationale surfaces for the admin drill-in "why this score" panels.
     assert sc["rationale"]["communication"].startswith("Clear and well-structured")
     assert "rationale" in sc and len(sc["rationale"]) == 4
+    # Phase B proctoring fields surface for the integrity panel.
+    assert data["integrity_score"] == 82
+    assert data["proctoring_summary"]["by_type"]["gaze_away"] == 2
 
 
 # ===========================================================================

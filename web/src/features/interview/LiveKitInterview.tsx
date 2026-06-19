@@ -13,8 +13,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Mic, MicOff, Video, VideoOff, PhoneOff, Loader2, AlertCircle, Clock } from 'lucide-react';
+import { Mic, MicOff, Video, VideoOff, PhoneOff, Loader2, AlertCircle, Clock, ShieldCheck } from 'lucide-react';
 import { useLiveKitInterview } from '@/hooks/useLiveKitInterview';
+import { useProctoring } from '@/features/interview/useProctoring';
 import type { LiveKitStatus } from '@/hooks/useLiveKitInterview';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -57,6 +58,16 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
     toggleMic,
     toggleCamera,
   } = useLiveKitInterview(sessionId, cameraConsented);
+
+  // Phase B — proctoring runs only when the candidate consented to the camera
+  // and the room is connected. It reads the SAME local self-view video element,
+  // detects gaze/face/tab signals in-browser, and emits events to the backend.
+  const isConnectedForProctoring = status === 'connected';
+  const { ready: proctoringReady, activeWarning } = useProctoring({
+    sessionId,
+    videoRef: localVideoRef,
+    enabled: cameraConsented && isConnectedForProctoring,
+  });
 
   // Resolve translated status labels — memoised so the object is only rebuilt
   // when the active locale changes, not on every 1-second timer tick.
@@ -258,19 +269,64 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
           <span>{STATUS_LABEL[status]}</span>
         </div>
 
-        {/* Live timer pill — only shown once the avatar frame is visible */}
-        {avatarReady && (
+        <div className="flex items-center gap-2">
+          {/* Proctoring indicator — shown when camera proctoring is consented + live */}
+          {cameraConsented && isConnected && (
+            <div
+              className={cn(
+                'rounded-full bg-white/10 backdrop-blur px-3 py-1.5',
+                'text-xs flex items-center gap-1.5',
+              )}
+              title={
+                proctoringReady
+                  ? 'Interview integrity monitoring is active (on-device).'
+                  : 'Starting integrity monitoring…'
+              }
+            >
+              <ShieldCheck
+                className={cn(
+                  'h-3.5 w-3.5 flex-shrink-0',
+                  proctoringReady ? 'text-emerald-400' : 'text-amber-400 animate-pulse',
+                )}
+                aria-hidden="true"
+              />
+              <span className="hidden sm:inline">
+                {proctoringReady ? t('interview.proctoringOn') : t('interview.proctoringStarting')}
+              </span>
+            </div>
+          )}
+
+          {/* Live timer pill — only shown once the avatar frame is visible */}
+          {avatarReady && (
+            <div
+              className={cn(
+                'rounded-full bg-white/10 backdrop-blur px-3 py-1.5',
+                'text-sm flex items-center gap-2',
+              )}
+            >
+              <Clock className="h-3.5 w-3.5 flex-shrink-0 text-zinc-300" aria-hidden="true" />
+              <span className="tabular-nums">{formatElapsed(elapsedSeconds)}</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Live candidate nudge (z-30) — sustained proctoring lapse ─────── */}
+      {isConnected && activeWarning && (
+        <div className="absolute inset-x-0 top-20 z-30 flex justify-center px-4 pointer-events-none">
           <div
+            role="status"
+            aria-live="assertive"
             className={cn(
-              'rounded-full bg-white/10 backdrop-blur px-3 py-1.5',
-              'text-sm flex items-center gap-2',
+              'flex items-center gap-2.5 rounded-xl px-4 py-3 shadow-xl',
+              'bg-amber-400/95 text-amber-950 max-w-md',
             )}
           >
-            <Clock className="h-3.5 w-3.5 flex-shrink-0 text-zinc-300" aria-hidden="true" />
-            <span className="tabular-nums">{formatElapsed(elapsedSeconds)}</span>
+            <AlertCircle className="h-5 w-5 flex-shrink-0" aria-hidden="true" />
+            <p className="text-sm font-semibold">{t(`interview.warn_${activeWarning}`)}</p>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* ── Bottom overlay / control dock (z-20) ─────────────────────────── */}
       <div

@@ -154,6 +154,13 @@ class InterviewDetailResponse(BaseModel):
     scorecard: ScorecardDetail | None = Field(
         None, description="null when the session has not been scored yet."
     )
+    # Phase B proctoring. null when proctoring was off for this session.
+    integrity_score: int | None = Field(
+        None, description="0-100 integrity score, higher = cleaner. null if no proctoring."
+    )
+    proctoring_summary: dict[str, Any] | None = Field(
+        None, description="Per-type event counts + flagged seconds. null if no proctoring."
+    )
 
 
 class ByRoleItem(BaseModel):
@@ -710,6 +717,8 @@ async def get_interview_detail(
             s.started_at                        AS started_at,
             s.completed_at                      AS completed_at,
             s.duration_seconds                  AS duration_seconds,
+            s.integrity_score                   AS integrity_score,
+            s.proctoring_summary                AS proctoring_summary,
             sc.scorecard_id::text               AS scorecard_id,
             sc.composite_score::float           AS composite_score,
             sc.scores                           AS scores,
@@ -784,6 +793,10 @@ async def get_interview_detail(
             int(row["duration_seconds"]) if row["duration_seconds"] is not None else None
         ),
         scorecard=scorecard,
+        integrity_score=(
+            int(row["integrity_score"]) if row["integrity_score"] is not None else None
+        ),
+        proctoring_summary=row["proctoring_summary"] or None,
     )
 
 
