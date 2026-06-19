@@ -15,11 +15,12 @@ sys.path.insert(0, _SERVICE_ROOT)
 
 
 async def main() -> int:
-    from app.config import settings
+    import redis.asyncio as aioredis
+    from sqlalchemy import text
     from sqlalchemy.ext.asyncio import create_async_engine
     from sqlalchemy.pool import NullPool
-    from sqlalchemy import text
-    import redis.asyncio as aioredis
+
+    from app.config import settings
 
     print("=" * 60)
     print("interview_core cloud connectivity check")
@@ -42,7 +43,7 @@ async def main() -> int:
             )
             tables = [r[0] for r in row2.fetchall()]
         await eng.dispose()
-        print(f"\n[PASS] Postgres")
+        print("\n[PASS] Postgres")
         print(f"       {ver[:60]}")
         print(f"       tables ({len(tables)}): {', '.join(tables)}")
     except Exception as exc:

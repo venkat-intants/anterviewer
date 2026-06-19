@@ -23,7 +23,8 @@ OUT = Path(__file__).resolve().parent / "_vd.txt"
 
 def w(m: str) -> None:
     with OUT.open("a", encoding="utf-8") as f:
-        f.write(m + "\n"); f.flush()
+        f.write(m + "\n")
+        f.flush()
 
 
 async def main() -> None:

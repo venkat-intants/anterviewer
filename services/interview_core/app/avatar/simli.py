@@ -33,6 +33,7 @@ PII: never log audio bytes — event + counters only.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 
 import aiohttp
@@ -171,7 +172,7 @@ class SimliAvatar:
         # 4. Wait for the avatar to actually appear in the room.
         try:
             await asyncio.wait_for(joined.wait(), timeout=20)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             await self._cleanup_http()
             raise AvatarError("simli avatar did not join room within 20s") from exc
 
@@ -229,8 +230,6 @@ class SimliAvatar:
 
     async def _cleanup_http(self) -> None:
         if self._http is not None and not self._http.closed:
-            try:
+            with contextlib.suppress(Exception):
                 await self._http.close()
-            except Exception:  # noqa: BLE001
-                pass
         self._http = None

@@ -22,7 +22,11 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
-import { postIntegrityEvents, type IntegrityEventOut } from '@/api/integrity';
+import {
+  postIntegrityEvents,
+  type IntegrityEventOut,
+  type IntegrityEventType,
+} from '@/api/integrity';
 
 // ── Tunables ─────────────────────────────────────────────────────────────────
 const DETECT_INTERVAL_MS = 500; // ~2 fps
@@ -113,7 +117,7 @@ export function useProctoring({
   const warnRef = useRef<ProctorWarningType | null>(null);
 
   // Push an instantaneous event.
-  const pushInstant = (type: string) => {
+  const pushInstant = (type: IntegrityEventType) => {
     queueRef.current.push({ type, started_at: nowIso() });
   };
 
@@ -168,8 +172,10 @@ export function useProctoring({
   // change. Priority: face absent > multiple faces > looking away.
   const evaluateWarnings = (t: number) => {
     const cond = condRef.current;
-    const sustained = (c: Condition): boolean =>
-      cond[c].since !== null && t - (cond[c].since as number) >= WARN_MS;
+    const sustained = (c: Condition): boolean => {
+      const since = cond[c].since;
+      return since !== null && t - since >= WARN_MS;
+    };
 
     let next: ProctorWarningType | null = null;
     if (sustained('face_absent')) next = 'face_absent';

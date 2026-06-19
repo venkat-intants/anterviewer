@@ -20,8 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli
-from livekit.plugins import openai, silero, simli
-from livekit.plugins import sarvam
+from livekit.plugins import openai, sarvam, silero, simli
 
 from app.config import settings
 

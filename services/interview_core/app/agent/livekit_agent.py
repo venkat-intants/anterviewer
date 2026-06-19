@@ -31,13 +31,13 @@ import structlog
 from livekit import rtc
 
 from app.agent.orchestrator import InterviewOrchestrator, OrchestratorHooks
-from app.avatar.voice_only import VoiceOnlyAvatar
 from app.avatar.base import AvatarError, AvatarTransport
 from app.avatar.simli import SimliAvatar
+from app.avatar.voice_only import VoiceOnlyAvatar
 from app.config import settings
 from app.graph.brain import InterviewBrain
-from app.graph.state import Language
 from app.graph.personas import Persona
+from app.graph.state import Language
 from app.llm.base import LLMAdapter
 from app.speech import build_default_tts_adapter
 from app.speech.sarvam_stt_stream import SarvamStreamingSTT, STTStreamError
@@ -268,7 +268,7 @@ class InterviewAgent:
         try:
             await asyncio.wait_for(joined.wait(), timeout=timeout)
             log.info("agent.candidate_joined", session_id=self._session_id)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.info("agent.candidate_wait_timeout", session_id=self._session_id)
 
     def _on_track_subscribed(

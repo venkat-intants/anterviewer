@@ -99,7 +99,7 @@ async def main() -> int:
 
     try:
         await asyncio.wait_for(agent.run(agent_token), timeout=window)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         print(f"\n[smoke] {window}s window elapsed — exiting (expected if no candidate joined).")
     print("[smoke] done.")
     return 0

@@ -34,6 +34,7 @@ PII: never log candidate/interviewer text or audio bytes — event + counters on
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Protocol, runtime_checkable
 
 import structlog
@@ -166,10 +167,8 @@ class InterviewOrchestrator:
         # Cancel the in-flight turn task; brain won't commit the interrupted line.
         if self._active_turn is not None and not self._active_turn.done():
             self._active_turn.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._active_turn
-            except asyncio.CancelledError:
-                pass
         self._active_turn = None
         log.info("orchestrator.interrupted", session_id=self._brain.state["session_id"])
 

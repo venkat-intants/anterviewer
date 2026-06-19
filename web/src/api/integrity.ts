@@ -16,7 +16,7 @@ export type IntegrityEventType =
   | 'devtools_open';
 
 export interface IntegrityEventOut {
-  type: IntegrityEventType | string;
+  type: IntegrityEventType;
   /** ISO-8601 UTC start timestamp. */
   started_at: string;
   /** ISO-8601 UTC end timestamp for ranged events; omit for instantaneous. */

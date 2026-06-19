@@ -8,8 +8,6 @@ Verifies:
 
 from __future__ import annotations
 
-import struct
-
 import pytest
 
 from app.avatar.base import AvatarSpeechResult, AvatarTransport, VisemeFrame
@@ -60,7 +58,7 @@ def test_viseme_frame_is_frozen() -> None:
     """VisemeFrame is immutable (safe to share across coroutines)."""
     vf = VisemeFrame(viseme="aa", offset_ms=120)
     assert vf.weight == 1.0
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017 — frozen dataclass raises FrozenInstanceError/AttributeError
         vf.offset_ms = 5  # type: ignore[misc]
 
 

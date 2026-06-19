@@ -29,10 +29,9 @@ sys.path.insert(0, _SERVICE_ROOT)
 async def check_postgres() -> tuple[bool, str]:
     """Connect to Prisma Postgres and run a schema sanity check."""
     try:
-        import sqlalchemy
+        from sqlalchemy import text
         from sqlalchemy.ext.asyncio import create_async_engine
         from sqlalchemy.pool import NullPool
-        from sqlalchemy import text
     except ImportError as exc:
         return False, f"sqlalchemy not installed: {exc}"
 

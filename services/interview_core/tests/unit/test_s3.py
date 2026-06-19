@@ -18,7 +18,6 @@ from botocore.exceptions import ClientError
 
 from app.config import Settings
 
-
 # ---------------------------------------------------------------------------
 # Minimal settings fixture
 # ---------------------------------------------------------------------------
@@ -180,7 +179,7 @@ async def test_upload_audio_returns_none_on_boto_core_error() -> None:
 
     from app.s3 import upload_audio
 
-    class _ConnTimeout(BotoCoreError):
+    class _ConnTimeout(BotoCoreError):  # noqa: N818 — test-local stub mirroring a botocore error
         msg = "Connection timed out"
 
     mock_session = _mock_aioboto3_session(put_object_side_effect=_ConnTimeout())

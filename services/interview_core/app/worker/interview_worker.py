@@ -195,9 +195,8 @@ async def _lookup_session(
     from sqlalchemy import select
 
     from app.database import get_session_factory, init_engine
-    from app.models import Job
+    from app.models import Job, User
     from app.models import Session as InterviewSession
-    from app.models import User
 
     # Guard: a failed init_engine() must not silently escape — log and return
     # defaults instead of propagating the exception to the avatar start path.

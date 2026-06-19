@@ -47,6 +47,7 @@ from collections.abc import AsyncIterator
 import structlog
 
 from app.graph.nodes import _build_history_messages
+from app.graph.personas import Persona
 from app.graph.prompts import (
     render_ask_question_user_prompt,
     render_closing,
@@ -63,7 +64,6 @@ from app.graph.state import (
     TurnRecord,
     build_initial_state,
 )
-from app.graph.personas import Persona
 from app.llm.base import LLMAdapter, LLMMessage
 
 log = structlog.get_logger(__name__)
