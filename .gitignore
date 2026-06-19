@@ -157,3 +157,6 @@ services/interview_core/spike_*.txt
 services/interview_core/demo.log
 services/interview_core/live_session.*
 services/interview_core/interview_test.html
+
+# MediaPipe proctoring assets — vendored locally by web/scripts/fetch-mediapipe.mjs (npm run setup:mediapipe)
+web/public/mediapipe/

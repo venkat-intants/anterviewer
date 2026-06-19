@@ -66,9 +66,10 @@ const GAZE_THRESHOLDS: GazeThresholds = {
 // lapses.
 const WARN_MS = 5000;
 
-const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm';
-const MODEL_URL =
-  'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+// Self-hosted (same-origin) MediaPipe assets — vendored into public/mediapipe by
+// web/scripts/fetch-mediapipe.mjs (npm run setup:mediapipe). No runtime CDN call.
+const WASM_URL = '/mediapipe/wasm';
+const MODEL_URL = '/mediapipe/face_landmarker.task';
 
 /** A sustained-condition warning surfaced to the candidate in real time. */
 export type ProctorWarningType = ProctorCondition;

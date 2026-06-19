@@ -10,6 +10,14 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
+      // The MediaPipe proctoring assets (~37 MB of wasm + the model) are large
+      // on-demand runtime files loaded only during an interview — never part of
+      // the app shell. Exclude them from the service-worker precache manifest
+      // (otherwise workbox fails the build on the >2 MB precache size limit).
+      // They still load fine from our own origin when proctoring starts.
+      workbox: {
+        globIgnores: ['**/mediapipe/**'],
+      },
       manifest: {
         name: 'Intants AI Interview',
         short_name: 'Intants',
