@@ -205,8 +205,6 @@ integrity scoring (1), admin timeline UI (1–2), consent + tests (1).
   undermine the "advisory" stance, so it's deferred. The scorer already reserves
   a weight for it (forward-compatible). Note: `multiple_faces` already covers the
   *visible* helper case.
-- **Identity verification** (face snapshot + match vs ID photo + liveness) —
-  the plan's proctoring "Phase 2".
 - **Web Worker** for detection (currently main-thread at ~2 fps) — scaling polish.
 - **Self-hosting the MediaPipe model** (currently loads from Google's CDN).
 - **Threshold calibration / optional candidate calibration step** — current
