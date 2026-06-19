@@ -32,7 +32,7 @@ import {
   Tooltip,
 } from 'recharts';
 import { getInterviewDetail } from '@/api/admin';
-import type { ScorecardDetail, ProctoringSummary } from '@/api/admin';
+import type { ScorecardDetail, ProctoringSummary, IntegrityEventItem } from '@/api/admin';
 import { toast } from '@/lib/toast';
 import { formatDate, formatDuration, statusProps, languageLabel } from '@/lib/formatters';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -223,16 +223,26 @@ function integrityColor(score: number): string {
   return 'text-destructive';
 }
 
+function fmtClock(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? ''
+    : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
 function IntegrityPanel({
   score,
   summary,
+  events,
 }: {
   score: number | null | undefined;
   summary: ProctoringSummary | null | undefined;
+  events: IntegrityEventItem[] | undefined;
 }) {
   const byType = summary?.by_type ?? {};
   const flaggedSeconds = summary?.flagged_seconds ?? {};
   const types = Object.keys(byType);
+  const timeline = events ?? [];
 
   return (
     <Card className="shadow-sm">
@@ -279,6 +289,31 @@ function IntegrityPanel({
                   </li>
                 ))}
               </ul>
+            )}
+
+            {/* Time-ordered event timeline (most recent first) */}
+            {timeline.length > 0 && (
+              <div className="pt-1">
+                <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Event timeline
+                </p>
+                <ul className="space-y-1 max-h-64 overflow-y-auto" aria-label="Integrity event timeline">
+                  {timeline.map((ev, idx) => (
+                    <li
+                      key={idx}
+                      className="flex items-center justify-between gap-2 rounded-md bg-muted/40 px-2.5 py-1.5 text-xs"
+                    >
+                      <span className="flex items-center gap-2 text-foreground">
+                        <span className="tabular-nums text-muted-foreground">{fmtClock(ev.started_at)}</span>
+                        {INTEGRITY_LABELS[ev.event_type] ?? ev.event_type}
+                      </span>
+                      {ev.duration_seconds != null && (
+                        <span className="tabular-nums text-muted-foreground">{ev.duration_seconds}s</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
           </>
         )}
@@ -620,7 +655,11 @@ export default function AdminInterviewDetail() {
 
       {/* Integrity / proctoring panel — shown regardless of scorecard presence */}
       <motion.div variants={fadeUp}>
-        <IntegrityPanel score={data.integrity_score} summary={data.proctoring_summary} />
+        <IntegrityPanel
+          score={data.integrity_score}
+          summary={data.proctoring_summary}
+          events={data.integrity_events}
+        />
       </motion.div>
     </motion.div>
   );

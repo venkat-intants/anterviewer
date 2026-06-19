@@ -138,6 +138,15 @@ class ScorecardDetail(BaseModel):
     summary: str | None
 
 
+class IntegrityEventItem(BaseModel):
+    """One flagged proctoring event in the drill-in timeline."""
+
+    event_type: str
+    started_at: str
+    ended_at: str | None = None
+    duration_seconds: float | None = None
+
+
 class InterviewDetailResponse(BaseModel):
     """Drill-in detail returned by GET /admin/interviews/{session_id}."""
 
@@ -160,6 +169,10 @@ class InterviewDetailResponse(BaseModel):
     )
     proctoring_summary: dict[str, Any] | None = Field(
         None, description="Per-type event counts + flagged seconds. null if no proctoring."
+    )
+    integrity_events: list[IntegrityEventItem] = Field(
+        default_factory=list,
+        description="Time-ordered flagged proctoring events (most recent first, capped).",
     )
 
 
@@ -744,6 +757,23 @@ async def get_interview_detail(
             detail=f"Session {session_id} not found",
         )
 
+    # Proctoring event timeline (most-recent-first, capped). Separate query so a
+    # session with no proctoring simply yields an empty list.
+    event_rows = (
+        await db.execute(
+            sa_text(
+                """
+                SELECT event_type, started_at, ended_at
+                FROM integrity_events
+                WHERE session_id = :session_id
+                ORDER BY started_at DESC
+                LIMIT 200
+                """
+            ),
+            {"session_id": session_id},
+        )
+    ).mappings().all()
+
     # Audit-log PII access — write in background so a commit failure here does
     # not prevent the response from being returned.
     await _write_audit(
@@ -775,6 +805,22 @@ async def get_interview_detail(
             summary=str(row["summary"]) if row["summary"] else None,
         )
 
+    integrity_events: list[IntegrityEventItem] = []
+    for ev in event_rows:
+        started = ev["started_at"]
+        ended = ev["ended_at"]
+        dur: float | None = None
+        if started is not None and ended is not None:
+            dur = round((ended - started).total_seconds(), 1)
+        integrity_events.append(
+            IntegrityEventItem(
+                event_type=str(ev["event_type"]),
+                started_at=_iso(started) or "",
+                ended_at=_iso(ended),
+                duration_seconds=dur,
+            )
+        )
+
     return InterviewDetailResponse(
         session_id=str(row["session_id"]),
         candidate_email=str(row["candidate_email"]),
@@ -797,6 +843,7 @@ async def get_interview_detail(
             int(row["integrity_score"]) if row["integrity_score"] is not None else None
         ),
         proctoring_summary=row["proctoring_summary"] or None,
+        integrity_events=integrity_events,
     )
 
 

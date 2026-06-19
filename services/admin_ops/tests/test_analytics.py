@@ -500,11 +500,24 @@ def test_detail_happy_path_no_scorecard() -> None:
     assert data["session_id"] == _SESSION_ID
     assert data["candidate_email"] == _CANDIDATE_EMAIL
     assert data["scorecard"] is None
+    # No proctoring events → empty timeline (not an error).
+    assert data["integrity_events"] == []
 
 
 def test_detail_happy_path_with_scorecard() -> None:
     detail_row = _fake_detail_row_with_scorecard()
-    session = _make_session_with_results([detail_row, None])
+    # 2nd execute = the integrity_events timeline query (most-recent-first).
+    from datetime import timedelta
+
+    event_rows = [
+        {
+            "event_type": "gaze_away",
+            "started_at": _NOW,
+            "ended_at": _NOW + timedelta(seconds=5),
+        },
+        {"event_type": "tab_blur", "started_at": _NOW, "ended_at": None},
+    ]
+    session = _make_session_with_results([detail_row, event_rows])
     client = TestClient(_build_app(session), raise_server_exceptions=False)
     resp = client.get(
         f"/admin/interviews/{_SESSION_ID}", headers=_auth_header(_admin_token())
@@ -527,6 +540,12 @@ def test_detail_happy_path_with_scorecard() -> None:
     # Phase B proctoring fields surface for the integrity panel.
     assert data["integrity_score"] == 82
     assert data["proctoring_summary"]["by_type"]["gaze_away"] == 2
+    # Proctoring event timeline surfaces with computed durations.
+    assert len(data["integrity_events"]) == 2
+    assert data["integrity_events"][0]["event_type"] == "gaze_away"
+    assert data["integrity_events"][0]["duration_seconds"] == 5.0
+    assert data["integrity_events"][1]["event_type"] == "tab_blur"
+    assert data["integrity_events"][1]["duration_seconds"] is None
 
 
 # ===========================================================================

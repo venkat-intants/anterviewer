@@ -105,6 +105,8 @@ export interface InterviewDetailResponse {
   integrity_score?: number | null;
   /** Per-type event counts + flagged seconds; null if proctoring was off. */
   proctoring_summary?: ProctoringSummary | null;
+  /** Time-ordered proctoring events (most recent first). */
+  integrity_events?: IntegrityEventItem[];
 }
 
 export interface ProctoringSummary {
@@ -112,6 +114,13 @@ export interface ProctoringSummary {
   flagged_seconds?: Record<string, number>;
   total_events?: number;
   total_flagged_seconds?: number;
+}
+
+export interface IntegrityEventItem {
+  event_type: string;
+  started_at: string;
+  ended_at?: string | null;
+  duration_seconds?: number | null;
 }
 
 export interface ByRoleItem {

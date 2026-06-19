@@ -27,6 +27,15 @@ import {
   type IntegrityEventOut,
   type IntegrityEventType,
 } from '@/api/integrity';
+import {
+  advanceCondition,
+  closeOpenConditions as closeOpenConditionsPure,
+  freshCondStates,
+  isLookingAway,
+  pickWarning,
+  type GazeThresholds,
+  type ProctorCondition,
+} from '@/features/interview/proctorLogic';
 
 // ── Tunables ─────────────────────────────────────────────────────────────────
 const DETECT_INTERVAL_MS = 500; // ~2 fps
@@ -38,21 +47,18 @@ const MIN_RANGED_MS = 1200; // a ranged condition must persist this long to coun
 //   forwardX → left/right head turn (yaw),  forwardY → up/down tilt (pitch).
 // A value of ~0.30 corresponds to roughly a 17° rotation off-centre. This is
 // far more robust to head ROTATION than 2D landmark ratios.
-const POSE_YAW = 0.32;
-const POSE_PITCH = 0.34;
-
-// Fallback (used only if the transformation matrix is unavailable): nose
-// position ratio within the face box. Looser, less reliable.
-const HORIZ_LOW = 0.36;
-const HORIZ_HIGH = 0.64;
-const VERT_LOW = 0.28;
-const VERT_HIGH = 0.66;
-
-// TRUE eye-gaze (iris) detection via FaceLandmarker blendshapes. The eyeLook*
-// scores (0-1) quantify how far the eyes are deviated from centre, INDEPENDENT
-// of head pose — so eyes pointed off-screen are caught even with a still head.
-// Above this threshold the gaze is considered off-screen.
-const EYE_GAZE_THRESH = 0.55;
+// (yaw/pitch ~0.30 ≈ 17° off-centre) primary head-pose; nose-ratio is the
+// fallback; eye-gaze blendshape threshold catches eyes-off-screen with a still
+// head. All gathered into one GazeThresholds object passed to isLookingAway().
+const GAZE_THRESHOLDS: GazeThresholds = {
+  poseYaw: 0.32,
+  posePitch: 0.34,
+  eyeGaze: 0.55,
+  horizLow: 0.36,
+  horizHigh: 0.64,
+  vertLow: 0.28,
+  vertHigh: 0.66,
+};
 
 // Real-time candidate nudge: how long a condition must persist before we show an
 // on-screen "please look back" warning. Longer than the scoring debounce
@@ -64,15 +70,8 @@ const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/w
 const MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 
-type Condition = 'gaze_away' | 'face_absent' | 'multiple_faces';
-
 /** A sustained-condition warning surfaced to the candidate in real time. */
-export type ProctorWarningType = 'face_absent' | 'gaze_away' | 'multiple_faces';
-
-interface CondState {
-  since: number | null; // epoch ms the condition first became true (pre-debounce)
-  openIso: string | null; // ISO start once it has passed the debounce
-}
+export type ProctorWarningType = ProctorCondition;
 
 interface UseProctoringArgs {
   sessionId: string;
@@ -107,11 +106,7 @@ export function useProctoring({
 
   // Mutable state kept in refs so the detection loop / listeners are stable.
   const queueRef = useRef<IntegrityEventOut[]>([]);
-  const condRef = useRef<Record<Condition, CondState>>({
-    gaze_away: { since: null, openIso: null },
-    face_absent: { since: null, openIso: null },
-    multiple_faces: { since: null, openIso: null },
-  });
+  const condRef = useRef(freshCondStates());
   // Current warning type, mirrored in a ref so the 2 fps loop only calls
   // setActiveWarning when it actually CHANGES (avoids a re-render every tick).
   const warnRef = useRef<ProctorWarningType | null>(null);
@@ -121,41 +116,19 @@ export function useProctoring({
     queueRef.current.push({ type, started_at: nowIso() });
   };
 
-  // Drive a ranged condition's debounced state machine for this tick.
-  const updateCondition = (name: Condition, isTrue: boolean, t: number) => {
-    const st = condRef.current[name];
-    if (isTrue) {
-      if (st.since === null) st.since = t;
-      if (st.openIso === null && t - st.since >= MIN_RANGED_MS) {
-        st.openIso = new Date(st.since).toISOString();
-      }
-    } else {
-      if (st.openIso !== null) {
-        queueRef.current.push({
-          type: name,
-          started_at: st.openIso,
-          ended_at: nowIso(),
-        });
-      }
-      st.since = null;
-      st.openIso = null;
-    }
+  // Drive a ranged condition's debounced state machine for this tick (pure
+  // logic in proctorLogic.advanceCondition — see its unit tests).
+  const updateCondition = (name: ProctorCondition, isTrue: boolean, t: number) => {
+    const { next, emit } = advanceCondition(name, condRef.current[name], isTrue, t, MIN_RANGED_MS);
+    condRef.current[name] = next;
+    if (emit) queueRef.current.push(emit);
   };
 
   // Close any still-open ranged conditions (called on stop).
   const closeOpenConditions = () => {
-    (Object.keys(condRef.current) as Condition[]).forEach((name) => {
-      const st = condRef.current[name];
-      if (st.openIso !== null) {
-        queueRef.current.push({
-          type: name,
-          started_at: st.openIso,
-          ended_at: nowIso(),
-        });
-      }
-      st.since = null;
-      st.openIso = null;
-    });
+    const events = closeOpenConditionsPure(condRef.current, Date.now());
+    if (events.length) queueRef.current.push(...events);
+    condRef.current = freshCondStates();
   };
 
   const flush = async () => {
@@ -167,21 +140,10 @@ export function useProctoring({
     }
   };
 
-  // Decide whether to nudge the candidate: the highest-priority condition that
-  // has been continuously active for ≥ WARN_MS. Updates React state only on
-  // change. Priority: face absent > multiple faces > looking away.
+  // Decide whether to nudge the candidate (highest-priority condition sustained
+  // ≥ WARN_MS). Updates React state only on change to avoid a re-render/tick.
   const evaluateWarnings = (t: number) => {
-    const cond = condRef.current;
-    const sustained = (c: Condition): boolean => {
-      const since = cond[c].since;
-      return since !== null && t - since >= WARN_MS;
-    };
-
-    let next: ProctorWarningType | null = null;
-    if (sustained('face_absent')) next = 'face_absent';
-    else if (sustained('multiple_faces')) next = 'multiple_faces';
-    else if (sustained('gaze_away')) next = 'gaze_away';
-
+    const next = pickWarning(condRef.current, t, WARN_MS);
     if (next !== warnRef.current) {
       warnRef.current = next;
       setActiveWarning(next);
@@ -293,21 +255,22 @@ export function useProctoring({
           updateCondition('face_absent', n === 0, t);
           updateCondition('multiple_faces', n > 1, t);
 
-          // "Looking away" — evaluable with exactly one face.
+          // "Looking away" — evaluable with exactly one face. Gather the raw
+          // signals from this frame, then let proctorLogic.isLookingAway decide
+          // (head pose primary, nose-ratio fallback, eye-gaze OR-combined).
           let gazeAway = false;
           if (n === 1) {
-            // PRIMARY: 3D head pose from the facial transformation matrix.
-            // data is a column-major 4x4; the third column (indices 8,9,10) is
-            // the head's forward axis in camera space. Large |x|/|y| ⇒ the head
-            // is turned/tilted away from the screen (covers head ROTATION, not
-            // just eye gaze — handles "looked away" and "looking down at phone").
+            // Head pose: 3rd column (indices 8,9) of the column-major rotation
+            // matrix is the head's forward axis. Large |x|/|y| ⇒ turned away.
             const matrix = result.facialTransformationMatrixes?.[0]?.data;
-            if (matrix && matrix.length >= 11) {
-              const fwdX = matrix[8];
-              const fwdY = matrix[9];
-              gazeAway = Math.abs(fwdX) > POSE_YAW || Math.abs(fwdY) > POSE_PITCH;
-            } else {
-              // FALLBACK: 2D nose-position ratio (matrix unavailable).
+            const hasMatrix = !!matrix && matrix.length >= 11;
+            const fwdX = hasMatrix ? matrix[8] : null;
+            const fwdY = hasMatrix ? matrix[9] : null;
+
+            // Nose-ratio fallback (only used when the matrix is unavailable).
+            let horiz: number | null = null;
+            let vert: number | null = null;
+            if (!hasMatrix) {
               const lm = faces[0];
               const leftX = lm[234]?.x ?? 0;
               const rightX = lm[454]?.x ?? 1;
@@ -315,16 +278,12 @@ export function useProctoring({
               const topY = lm[10]?.y ?? 0;
               const chinY = lm[152]?.y ?? 1;
               const noseY = lm[1]?.y ?? 0.5;
-              const horiz = rightX !== leftX ? (noseX - leftX) / (rightX - leftX) : 0.5;
-              const vert = chinY !== topY ? (noseY - topY) / (chinY - topY) : 0.45;
-              gazeAway =
-                horiz < HORIZ_LOW || horiz > HORIZ_HIGH || vert < VERT_LOW || vert > VERT_HIGH;
+              horiz = rightX !== leftX ? (noseX - leftX) / (rightX - leftX) : 0.5;
+              vert = chinY !== topY ? (noseY - topY) / (chinY - topY) : 0.45;
             }
 
-            // ALSO: true EYE-GAZE from iris blendshapes — catches eyes pointed
-            // off-screen even when the head is still/facing forward. eyeLook*
-            // scores are 0-1; we combine the two eyes per direction and flag if
-            // any direction is strongly deviated.
+            // True eye-gaze from iris blendshapes (per-direction, two eyes avgd).
+            let eyeMax: number | null = null;
             const shapes = result.faceBlendshapes?.[0]?.categories;
             if (shapes) {
               const bs = (name: string): number =>
@@ -333,10 +292,10 @@ export function useProctoring({
               const lookRight = (bs('eyeLookOutRight') + bs('eyeLookInLeft')) / 2;
               const lookUp = (bs('eyeLookUpLeft') + bs('eyeLookUpRight')) / 2;
               const lookDown = (bs('eyeLookDownLeft') + bs('eyeLookDownRight')) / 2;
-              const eyesAway =
-                Math.max(lookLeft, lookRight, lookUp, lookDown) > EYE_GAZE_THRESH;
-              gazeAway = gazeAway || eyesAway;
+              eyeMax = Math.max(lookLeft, lookRight, lookUp, lookDown);
             }
+
+            gazeAway = isLookingAway({ fwdX, fwdY, eyeMax, horiz, vert }, GAZE_THRESHOLDS);
           }
           updateCondition('gaze_away', gazeAway, t);
 

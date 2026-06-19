@@ -179,6 +179,42 @@ integrity scoring (1), admin timeline UI (1–2), consent + tests (1).
   disability). Document known limitations.
 - Make the candidate aware proctoring is active (consent + visible indicator).
 
+### 5.6 Status — Phase B v1 SHIPPED (2026-06-19)
+
+**Built, tested, and live:**
+- Client-side detection (browser, on-device): **head-pose** gaze (3D rotation
+  matrix), **true eye-gaze** (iris blendshapes), **face-absent**, **multiple-faces**,
+  plus **tab-switch / copy / paste / fullscreen-exit**. Raw video never leaves
+  the device — only events.
+- Ingestion API (`POST /api/sessions/{id}/integrity-events`, ownership-checked) +
+  `integrity_events` table + rolling `integrity_score` (0–100) + `proctoring_summary`.
+- Pure decision logic extracted to `web/.../proctorLogic.ts` (debounce state
+  machine, warning selection, gaze decision) with **13 Vitest unit tests**;
+  backend scoring + endpoint covered by **13 pytest tests**.
+- **Live candidate warnings** (on-screen, ≥5s sustained) for face-absent /
+  looking-away / multiple-faces.
+- Admin **integrity panel** with score, per-type flags, and a **time-ordered
+  event timeline**. Disclaimer: "AI-assisted flagging for human review."
+- Defense-in-depth: per-event duration clamp (900s) so a client clock bug can't
+  blow up the score.
+
+**Deferred (by design — NOT in v1):**
+- **`second_voice` detection** — robustly distinguishing a second/background
+  speaker needs speaker **diarization** (or careful echo handling so the avatar's
+  own audio isn't misread). Shipping a false-positive-prone version would
+  undermine the "advisory" stance, so it's deferred. The scorer already reserves
+  a weight for it (forward-compatible). Note: `multiple_faces` already covers the
+  *visible* helper case.
+- **Identity verification** (face snapshot + match vs ID photo + liveness) —
+  the plan's proctoring "Phase 2".
+- **Web Worker** for detection (currently main-thread at ~2 fps) — scaling polish.
+- **Self-hosting the MediaPipe model** (currently loads from Google's CDN).
+- **Threshold calibration / optional candidate calibration step** — current
+  thresholds are sensible defaults, tunable in one place (`proctorLogic.ts` /
+  `useProctoring.ts`).
+- **Proctoring data retention policy** — fold `integrity_events` into the DPDP
+  retention/erasure job before production.
+
 ---
 
 ## 6. Phase C — Bulk hiring engine
