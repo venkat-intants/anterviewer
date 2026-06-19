@@ -118,6 +118,59 @@ export interface GazeSignals {
   vert: number | null;
 }
 
+/** One detected frame's data, destructured from a MediaPipe FaceLandmarker result. */
+export interface FrameData {
+  /** faceLandmarks — array (one per face) of normalized {x,y} landmark arrays. */
+  faces: Array<Array<{ x: number; y: number }>>;
+  /** facialTransformationMatrixes[0].data — column-major 4x4, or undefined. */
+  matrix?: number[];
+  /** faceBlendshapes[0].categories — {categoryName, score}, or undefined. */
+  blendshapes?: Array<{ categoryName: string; score: number }>;
+}
+
+/**
+ * Parse one MediaPipe frame into the gaze signals + face count. Pure (no
+ * MediaPipe/DOM imports) so it is shared identically by the Web Worker path and
+ * the main-thread fallback, and is unit-testable. Returns face count `n` plus
+ * the signals consumed by isLookingAway.
+ */
+export function extractGazeSignals(frame: FrameData): { n: number; signals: GazeSignals } {
+  const n = frame.faces.length;
+  const empty: GazeSignals = { fwdX: null, fwdY: null, eyeMax: null, horiz: null, vert: null };
+  if (n !== 1) return { n, signals: empty };
+
+  const hasMatrix = Array.isArray(frame.matrix) && frame.matrix.length >= 11;
+  const fwdX = hasMatrix ? frame.matrix![8] : null;
+  const fwdY = hasMatrix ? frame.matrix![9] : null;
+
+  let horiz: number | null = null;
+  let vert: number | null = null;
+  if (!hasMatrix) {
+    const lm = frame.faces[0];
+    const leftX = lm[234]?.x ?? 0;
+    const rightX = lm[454]?.x ?? 1;
+    const noseX = lm[1]?.x ?? 0.5;
+    const topY = lm[10]?.y ?? 0;
+    const chinY = lm[152]?.y ?? 1;
+    const noseY = lm[1]?.y ?? 0.5;
+    horiz = rightX !== leftX ? (noseX - leftX) / (rightX - leftX) : 0.5;
+    vert = chinY !== topY ? (noseY - topY) / (chinY - topY) : 0.45;
+  }
+
+  let eyeMax: number | null = null;
+  if (frame.blendshapes) {
+    const bs = (name: string): number =>
+      frame.blendshapes!.find((c) => c.categoryName === name)?.score ?? 0;
+    const lookLeft = (bs('eyeLookOutLeft') + bs('eyeLookInRight')) / 2;
+    const lookRight = (bs('eyeLookOutRight') + bs('eyeLookInLeft')) / 2;
+    const lookUp = (bs('eyeLookUpLeft') + bs('eyeLookUpRight')) / 2;
+    const lookDown = (bs('eyeLookDownLeft') + bs('eyeLookDownRight')) / 2;
+    eyeMax = Math.max(lookLeft, lookRight, lookUp, lookDown);
+  }
+
+  return { n, signals: { fwdX, fwdY, eyeMax, horiz, vert } };
+}
+
 /**
 /** A calibrated neutral head-pose baseline (the candidate's "facing forward"). */
 export interface NeutralPose {

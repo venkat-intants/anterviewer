@@ -32,9 +32,11 @@ import {
   averageNeutral,
   closeOpenConditions as closeOpenConditionsPure,
   DEFAULT_NEUTRAL,
+  extractGazeSignals,
   freshCondStates,
   isLookingAway,
   pickWarning,
+  type GazeSignals,
   type GazeThresholds,
   type NeutralPose,
   type ProctorCondition,
@@ -227,14 +229,61 @@ export function useProctoring({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, sessionId]);
 
-  // ── MediaPipe face/gaze detection loop ──────────────────────────────────────
+  // ── MediaPipe detection — Web Worker (inference off the main thread) with a
+  //    main-thread fallback if Workers/createImageBitmap are unavailable or the
+  //    worker fails to initialise. Both paths feed the SAME processSignals(). ──
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
     let landmarker: FaceLandmarker | null = null;
+    let worker: Worker | null = null;
     let intervalId: number | undefined;
+    let initTimer: number | undefined;
+    let workerReady = false;
+    let posting = false; // backpressure: one in-flight frame at a time
 
-    const start = async () => {
+    // Shared decision logic — runs on the main thread regardless of where the
+    // inference happened. `t` is wall-clock epoch ms (condition timing + ISO).
+    const processSignals = (n: number, signals: GazeSignals, t: number) => {
+      // Presence is ALWAYS evaluated (independent of calibration).
+      updateCondition('face_absent', n === 0, t);
+      updateCondition('multiple_faces', n > 1, t);
+
+      // Calibration: sample the neutral head pose while a single face is
+      // visible, then average it. Hard timeout so a candidate who is away from
+      // the start never blocks gaze detection. Gaze isn't evaluated until done.
+      if (!calibDoneRef.current) {
+        const loopStart = loopStartRef.current ?? t;
+        loopStartRef.current = loopStart;
+        if (n === 1 && signals.fwdX !== null && signals.fwdY !== null) {
+          if (calibStartRef.current === null) {
+            calibStartRef.current = t;
+            setCalibrating(true);
+          }
+          calibSamplesRef.current.push({ fwdX: signals.fwdX, fwdY: signals.fwdY });
+        }
+        const gathered =
+          calibStartRef.current !== null && t - calibStartRef.current >= CALIBRATION_MS;
+        const timedOut = t - loopStart >= CALIBRATION_MS + 7000;
+        if (gathered || timedOut) {
+          neutralRef.current = averageNeutral(calibSamplesRef.current);
+          calibDoneRef.current = true;
+          setCalibrating(false);
+        } else {
+          updateCondition('gaze_away', false, t); // don't flag gaze mid-calibration
+          evaluateWarnings(t); // presence warnings still apply
+          return;
+        }
+      }
+
+      const gazeAway =
+        n === 1 ? isLookingAway(signals, GAZE_THRESHOLDS, neutralRef.current) : false;
+      updateCondition('gaze_away', gazeAway, t);
+      evaluateWarnings(t);
+    };
+
+    // ── Main-thread fallback: run inference inline on the <video> element. ──
+    const startMainThread = async () => {
       try {
         const fileset = await FilesetResolver.forVisionTasks(WASM_URL);
         if (cancelled) return;
@@ -242,9 +291,7 @@ export function useProctoring({
           baseOptions: { modelAssetPath: MODEL_URL },
           runningMode: 'VIDEO',
           numFaces: 2,
-          // Real 3D head orientation — used to detect head ROTATION reliably.
           outputFacialTransformationMatrixes: true,
-          // Iris/eye blendshapes — used for true EYE-GAZE direction.
           outputFaceBlendshapes: true,
         });
         if (cancelled) {
@@ -252,123 +299,101 @@ export function useProctoring({
           return;
         }
         setReady(true);
-
         intervalId = window.setInterval(() => {
           const video = videoRef.current;
-          if (!landmarker || !video || video.readyState < 2 || video.videoWidth === 0) {
-            return;
-          }
-          // Two DIFFERENT clocks, deliberately:
-          //  - tMono  (performance.now): monotonic ms-since-load, REQUIRED by
-          //    MediaPipe's detectForVideo timestamp.
-          //  - t      (Date.now): wall-clock epoch ms, used for condition timing
-          //    AND for building the event ISO timestamps. Using tMono there
-          //    would seed start times at ~1970 and make durations decades long.
-          const tMono = performance.now();
-          const t = Date.now();
+          if (!landmarker || !video || video.readyState < 2 || video.videoWidth === 0) return;
           let result;
           try {
-            result = landmarker.detectForVideo(video, tMono);
+            result = landmarker.detectForVideo(video, performance.now());
           } catch {
-            return; // transient decode error — skip this frame
+            return;
           }
-          const faces = result.faceLandmarks ?? [];
-          const n = faces.length;
-
-          // Presence is ALWAYS evaluated (independent of calibration).
-          updateCondition('face_absent', n === 0, t);
-          updateCondition('multiple_faces', n > 1, t);
-
-          // Head-pose forward vector: 3rd column (indices 8,9) of the
-          // column-major rotation matrix. Used for both calibration and gaze.
-          const matrix = result.facialTransformationMatrixes?.[0]?.data;
-          const hasMatrix = !!matrix && matrix.length >= 11;
-          const fwdX = hasMatrix ? matrix[8] : null;
-          const fwdY = hasMatrix ? matrix[9] : null;
-
-          // ── Calibration phase ──────────────────────────────────────────────
-          // Sample the neutral head pose while a single face is visible, then
-          // average it. Has a hard timeout so a candidate who is away from the
-          // very start doesn't block gaze detection forever. Gaze is NOT
-          // evaluated until calibration resolves; presence already is (above).
-          if (!calibDoneRef.current) {
-            const loopStart = loopStartRef.current ?? t;
-            loopStartRef.current = loopStart;
-            if (n === 1 && fwdX !== null && fwdY !== null) {
-              if (calibStartRef.current === null) {
-                calibStartRef.current = t;
-                setCalibrating(true);
-              }
-              calibSamplesRef.current.push({ fwdX, fwdY });
-            }
-            const gathered =
-              calibStartRef.current !== null && t - calibStartRef.current >= CALIBRATION_MS;
-            const timedOut = t - loopStart >= CALIBRATION_MS + 7000;
-            if (gathered || timedOut) {
-              neutralRef.current = averageNeutral(calibSamplesRef.current);
-              calibDoneRef.current = true;
-              setCalibrating(false);
-            } else {
-              updateCondition('gaze_away', false, t); // don't flag gaze mid-calibration
-              evaluateWarnings(t); // presence warnings still apply
-              return;
-            }
-          }
-
-          // ── Post-calibration: "looking away" relative to the neutral pose ───
-          let gazeAway = false;
-          if (n === 1) {
-            // Nose-ratio fallback (only used when the matrix is unavailable).
-            let horiz: number | null = null;
-            let vert: number | null = null;
-            if (!hasMatrix) {
-              const lm = faces[0];
-              const leftX = lm[234]?.x ?? 0;
-              const rightX = lm[454]?.x ?? 1;
-              const noseX = lm[1]?.x ?? 0.5;
-              const topY = lm[10]?.y ?? 0;
-              const chinY = lm[152]?.y ?? 1;
-              const noseY = lm[1]?.y ?? 0.5;
-              horiz = rightX !== leftX ? (noseX - leftX) / (rightX - leftX) : 0.5;
-              vert = chinY !== topY ? (noseY - topY) / (chinY - topY) : 0.45;
-            }
-
-            // True eye-gaze from iris blendshapes (per-direction, two eyes avgd).
-            let eyeMax: number | null = null;
-            const shapes = result.faceBlendshapes?.[0]?.categories;
-            if (shapes) {
-              const bs = (name: string): number =>
-                shapes.find((c) => c.categoryName === name)?.score ?? 0;
-              const lookLeft = (bs('eyeLookOutLeft') + bs('eyeLookInRight')) / 2;
-              const lookRight = (bs('eyeLookOutRight') + bs('eyeLookInLeft')) / 2;
-              const lookUp = (bs('eyeLookUpLeft') + bs('eyeLookUpRight')) / 2;
-              const lookDown = (bs('eyeLookDownLeft') + bs('eyeLookDownRight')) / 2;
-              eyeMax = Math.max(lookLeft, lookRight, lookUp, lookDown);
-            }
-
-            gazeAway = isLookingAway(
-              { fwdX, fwdY, eyeMax, horiz, vert },
-              GAZE_THRESHOLDS,
-              neutralRef.current,
-            );
-          }
-          updateCondition('gaze_away', gazeAway, t);
-
-          // Real-time candidate nudge for sustained (≥5s) lapses.
-          evaluateWarnings(t);
+          const { n, signals } = extractGazeSignals({
+            faces: result.faceLandmarks ?? [],
+            matrix: result.facialTransformationMatrixes?.[0]?.data as number[] | undefined,
+            blendshapes: result.faceBlendshapes?.[0]?.categories,
+          });
+          processSignals(n, signals, Date.now());
         }, DETECT_INTERVAL_MS);
       } catch {
-        // Model failed to load (offline, CDN blocked) — proctoring degrades to
-        // browser-event signals only. Never throw into the interview.
-        setReady(false);
+        setReady(false); // model failed to load — degrade to browser events only
       }
     };
 
-    void start();
+    // ── Preferred path: offload inference to a Web Worker. ──
+    const startWorker = (): boolean => {
+      if (typeof Worker === 'undefined' || typeof createImageBitmap === 'undefined') return false;
+      try {
+        worker = new Worker(new URL('./proctorWorker.ts', import.meta.url), { type: 'module' });
+      } catch {
+        return false;
+      }
+      worker.onmessage = (ev: MessageEvent) => {
+        const data = ev.data as
+          | { type: 'ready' }
+          | { type: 'signals'; n: number; signals: GazeSignals }
+          | { type: 'error' };
+        if (data.type === 'ready') {
+          workerReady = true;
+          if (initTimer) clearTimeout(initTimer);
+          if (cancelled) return;
+          setReady(true);
+          intervalId = window.setInterval(() => {
+            const video = videoRef.current;
+            if (!worker || posting || !video || video.readyState < 2 || video.videoWidth === 0) {
+              return;
+            }
+            posting = true;
+            createImageBitmap(video)
+              .then((bitmap) => {
+                worker?.postMessage({ type: 'frame', bitmap, ts: performance.now() }, [bitmap]);
+              })
+              .catch(() => {
+                posting = false;
+              });
+          }, DETECT_INTERVAL_MS);
+        } else if (data.type === 'signals') {
+          posting = false;
+          processSignals(data.n, data.signals, Date.now());
+        } else {
+          posting = false; // transient inference error — skip frame
+        }
+      };
+      worker.onerror = () => {
+        // Worker crashed before/while ready → fall back to the main thread once.
+        if (!workerReady && !cancelled) {
+          workerReady = true; // guard against double fallback
+          worker?.terminate();
+          worker = null;
+          void startMainThread();
+        }
+      };
+      worker.postMessage({ type: 'init', wasmUrl: WASM_URL, modelUrl: MODEL_URL });
+      // If 'ready' never arrives, give up on the worker and use the main thread.
+      initTimer = window.setTimeout(() => {
+        if (!workerReady && !cancelled) {
+          workerReady = true;
+          worker?.terminate();
+          worker = null;
+          void startMainThread();
+        }
+      }, 8000);
+      return true;
+    };
+
+    if (!startWorker()) void startMainThread();
 
     return () => {
       cancelled = true;
       if (intervalId !== undefined) clearInterval(intervalId);
+      if (initTimer !== undefined) clearTimeout(initTimer);
+      if (worker) {
+        try {
+          worker.terminate();
+        } catch {
+          /* ignore */
+        }
+      }
       if (landmarker) {
         try {
           landmarker.close();

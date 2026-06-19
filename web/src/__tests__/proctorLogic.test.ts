@@ -5,6 +5,7 @@ import {
   averageNeutral,
   closeOpenConditions,
   DEFAULT_NEUTRAL,
+  extractGazeSignals,
   freshCondStates,
   isLookingAway,
   pickWarning,
@@ -129,6 +130,48 @@ describe('isLookingAway', () => {
     expect(isLookingAway({ ...base, fwdX: 0.8 }, TH, neutral)).toBe(true);
     // Without the neutral, that same 0.4 pose WOULD be flagged.
     expect(isLookingAway({ ...base, fwdX: 0.4 }, TH)).toBe(true);
+  });
+});
+
+describe('extractGazeSignals', () => {
+  it('reports 0 faces with empty signals when no face is present', () => {
+    const { n, signals } = extractGazeSignals({ faces: [] });
+    expect(n).toBe(0);
+    expect(signals).toEqual({ fwdX: null, fwdY: null, eyeMax: null, horiz: null, vert: null });
+  });
+
+  it('reports >1 faces with empty signals (gaze not evaluated)', () => {
+    const { n, signals } = extractGazeSignals({ faces: [[], []] });
+    expect(n).toBe(2);
+    expect(signals.fwdX).toBeNull();
+  });
+
+  it('reads head-pose forward vector from the transformation matrix', () => {
+    // column-major 4x4; indices 8,9 are the forward x,y.
+    const matrix: number[] = Array.from({ length: 16 }, () => 0);
+    matrix[8] = 0.5;
+    matrix[9] = -0.2;
+    const { n, signals } = extractGazeSignals({ faces: [[]], matrix });
+    expect(n).toBe(1);
+    expect(signals.fwdX).toBe(0.5);
+    expect(signals.fwdY).toBe(-0.2);
+    expect(signals.horiz).toBeNull(); // matrix present → no nose-ratio fallback
+  });
+
+  it('falls back to nose-ratio when no matrix, and reads eye blendshapes', () => {
+    const faceLm = Array.from({ length: 478 }, () => ({ x: 0.5, y: 0.5 }));
+    faceLm[234] = { x: 0.2, y: 0.5 };
+    faceLm[454] = { x: 0.8, y: 0.5 };
+    faceLm[1] = { x: 0.5, y: 0.5 };
+    faceLm[10] = { x: 0.5, y: 0.2 };
+    faceLm[152] = { x: 0.5, y: 0.9 };
+    const { signals } = extractGazeSignals({
+      faces: [faceLm],
+      blendshapes: [{ categoryName: 'eyeLookOutLeft', score: 0.8 }],
+    });
+    expect(signals.fwdX).toBeNull();
+    expect(signals.horiz).toBeCloseTo(0.5); // nose centred
+    expect(signals.eyeMax).toBeGreaterThan(0); // picked up the eye blendshape
   });
 });
 
