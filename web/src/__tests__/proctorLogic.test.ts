@@ -2,7 +2,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   advanceCondition,
+  averageNeutral,
   closeOpenConditions,
+  DEFAULT_NEUTRAL,
   freshCondStates,
   isLookingAway,
   pickWarning,
@@ -117,5 +119,30 @@ describe('isLookingAway', () => {
     expect(isLookingAway({ fwdX: null, fwdY: null, eyeMax: 0, horiz: 0.9, vert: 0.45 }, TH)).toBe(true);
     // matrix present and centred → fallback ignored even if nose ratio looks off
     expect(isLookingAway({ fwdX: 0, fwdY: 0, eyeMax: 0, horiz: 0.9, vert: 0.45 }, TH)).toBe(false);
+  });
+
+  it('measures head pose RELATIVE to the calibrated neutral', () => {
+    const neutral = { fwdX: 0.4, fwdY: 0.0 }; // candidate sits turned ~0.4 to one side
+    // Sitting at their neutral → NOT away, even though |fwdX|=0.4 > poseYaw.
+    expect(isLookingAway({ ...base, fwdX: 0.4 }, TH, neutral)).toBe(false);
+    // Turning a further 0.4 beyond neutral → away.
+    expect(isLookingAway({ ...base, fwdX: 0.8 }, TH, neutral)).toBe(true);
+    // Without the neutral, that same 0.4 pose WOULD be flagged.
+    expect(isLookingAway({ ...base, fwdX: 0.4 }, TH)).toBe(true);
+  });
+});
+
+describe('averageNeutral', () => {
+  it('returns the default (0,0) when there are no samples', () => {
+    expect(averageNeutral([])).toEqual(DEFAULT_NEUTRAL);
+  });
+
+  it('averages the collected head-pose samples', () => {
+    const n = averageNeutral([
+      { fwdX: 0.2, fwdY: 0.1 },
+      { fwdX: 0.4, fwdY: 0.3 },
+    ]);
+    expect(n.fwdX).toBeCloseTo(0.3);
+    expect(n.fwdY).toBeCloseTo(0.2);
   });
 });

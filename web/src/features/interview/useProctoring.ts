@@ -29,11 +29,14 @@ import {
 } from '@/api/integrity';
 import {
   advanceCondition,
+  averageNeutral,
   closeOpenConditions as closeOpenConditionsPure,
+  DEFAULT_NEUTRAL,
   freshCondStates,
   isLookingAway,
   pickWarning,
   type GazeThresholds,
+  type NeutralPose,
   type ProctorCondition,
 } from '@/features/interview/proctorLogic';
 
@@ -66,6 +69,13 @@ const GAZE_THRESHOLDS: GazeThresholds = {
 // lapses.
 const WARN_MS = 5000;
 
+// Candidate calibration: while a single face is visible at the very start, we
+// sample the head's forward vector for this long and average it into a neutral
+// baseline, so "looking away" is measured relative to THIS candidate's natural
+// facing-forward pose (kills false positives from off-angle seating). No events
+// are emitted during calibration.
+const CALIBRATION_MS = 2500;
+
 // Self-hosted (same-origin) MediaPipe assets — vendored into public/mediapipe by
 // web/scripts/fetch-mediapipe.mjs (npm run setup:mediapipe). No runtime CDN call.
 const WASM_URL = '/mediapipe/wasm';
@@ -90,6 +100,8 @@ export interface UseProctoringReturn {
    * for ≥ WARN_MS), or null. Drives the on-screen "please look back" banner.
    */
   activeWarning: ProctorWarningType | null;
+  /** True during the brief startup calibration ("hold still") window. */
+  calibrating: boolean;
 }
 
 function nowIso(): string {
@@ -104,6 +116,16 @@ export function useProctoring({
   const [ready, setReady] = useState(false);
   const [score, setScore] = useState<number | null>(null);
   const [activeWarning, setActiveWarning] = useState<ProctorWarningType | null>(null);
+  const [calibrating, setCalibrating] = useState(false);
+
+  // Calibration state: neutral baseline + the samples gathered during the
+  // startup window. calibStartRef is the epoch ms the window began (on first
+  // face seen), or null before that. calibDoneRef flips true once averaged.
+  const neutralRef = useRef<NeutralPose>(DEFAULT_NEUTRAL);
+  const calibSamplesRef = useRef<NeutralPose[]>([]);
+  const calibStartRef = useRef<number | null>(null);
+  const calibDoneRef = useRef(false);
+  const loopStartRef = useRef<number | null>(null);
 
   // Mutable state kept in refs so the detection loop / listeners are stable.
   const queueRef = useRef<IntegrityEventOut[]>([]);
@@ -253,21 +275,49 @@ export function useProctoring({
           const faces = result.faceLandmarks ?? [];
           const n = faces.length;
 
+          // Presence is ALWAYS evaluated (independent of calibration).
           updateCondition('face_absent', n === 0, t);
           updateCondition('multiple_faces', n > 1, t);
 
-          // "Looking away" — evaluable with exactly one face. Gather the raw
-          // signals from this frame, then let proctorLogic.isLookingAway decide
-          // (head pose primary, nose-ratio fallback, eye-gaze OR-combined).
+          // Head-pose forward vector: 3rd column (indices 8,9) of the
+          // column-major rotation matrix. Used for both calibration and gaze.
+          const matrix = result.facialTransformationMatrixes?.[0]?.data;
+          const hasMatrix = !!matrix && matrix.length >= 11;
+          const fwdX = hasMatrix ? matrix[8] : null;
+          const fwdY = hasMatrix ? matrix[9] : null;
+
+          // ── Calibration phase ──────────────────────────────────────────────
+          // Sample the neutral head pose while a single face is visible, then
+          // average it. Has a hard timeout so a candidate who is away from the
+          // very start doesn't block gaze detection forever. Gaze is NOT
+          // evaluated until calibration resolves; presence already is (above).
+          if (!calibDoneRef.current) {
+            const loopStart = loopStartRef.current ?? t;
+            loopStartRef.current = loopStart;
+            if (n === 1 && fwdX !== null && fwdY !== null) {
+              if (calibStartRef.current === null) {
+                calibStartRef.current = t;
+                setCalibrating(true);
+              }
+              calibSamplesRef.current.push({ fwdX, fwdY });
+            }
+            const gathered =
+              calibStartRef.current !== null && t - calibStartRef.current >= CALIBRATION_MS;
+            const timedOut = t - loopStart >= CALIBRATION_MS + 7000;
+            if (gathered || timedOut) {
+              neutralRef.current = averageNeutral(calibSamplesRef.current);
+              calibDoneRef.current = true;
+              setCalibrating(false);
+            } else {
+              updateCondition('gaze_away', false, t); // don't flag gaze mid-calibration
+              evaluateWarnings(t); // presence warnings still apply
+              return;
+            }
+          }
+
+          // ── Post-calibration: "looking away" relative to the neutral pose ───
           let gazeAway = false;
           if (n === 1) {
-            // Head pose: 3rd column (indices 8,9) of the column-major rotation
-            // matrix is the head's forward axis. Large |x|/|y| ⇒ turned away.
-            const matrix = result.facialTransformationMatrixes?.[0]?.data;
-            const hasMatrix = !!matrix && matrix.length >= 11;
-            const fwdX = hasMatrix ? matrix[8] : null;
-            const fwdY = hasMatrix ? matrix[9] : null;
-
             // Nose-ratio fallback (only used when the matrix is unavailable).
             let horiz: number | null = null;
             let vert: number | null = null;
@@ -296,7 +346,11 @@ export function useProctoring({
               eyeMax = Math.max(lookLeft, lookRight, lookUp, lookDown);
             }
 
-            gazeAway = isLookingAway({ fwdX, fwdY, eyeMax, horiz, vert }, GAZE_THRESHOLDS);
+            gazeAway = isLookingAway(
+              { fwdX, fwdY, eyeMax, horiz, vert },
+              GAZE_THRESHOLDS,
+              neutralRef.current,
+            );
           }
           updateCondition('gaze_away', gazeAway, t);
 
@@ -324,9 +378,16 @@ export function useProctoring({
       }
       setReady(false);
       clearWarning();
+      // Reset calibration so a reconnect re-calibrates from scratch.
+      neutralRef.current = DEFAULT_NEUTRAL;
+      calibSamplesRef.current = [];
+      calibStartRef.current = null;
+      calibDoneRef.current = false;
+      loopStartRef.current = null;
+      setCalibrating(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, sessionId]);
 
-  return { ready, score, activeWarning };
+  return { ready, score, activeWarning, calibrating };
 }

@@ -63,7 +63,7 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
   // and the room is connected. It reads the SAME local self-view video element,
   // detects gaze/face/tab signals in-browser, and emits events to the backend.
   const isConnectedForProctoring = status === 'connected';
-  const { ready: proctoringReady, activeWarning } = useProctoring({
+  const { ready: proctoringReady, activeWarning, calibrating } = useProctoring({
     sessionId,
     videoRef: localVideoRef,
     enabled: cameraConsented && isConnectedForProctoring,
@@ -324,6 +324,16 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
           >
             <AlertCircle className="h-5 w-5 flex-shrink-0" aria-hidden="true" />
             <p className="text-sm font-semibold">{t(`interview.warn_${activeWarning}`)}</p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Calibration banner (z-30) — brief "hold still" at start ──────── */}
+      {isConnected && calibrating && !activeWarning && (
+        <div className="absolute inset-x-0 top-20 z-30 flex justify-center px-4 pointer-events-none">
+          <div className="flex items-center gap-2.5 rounded-xl bg-white/15 backdrop-blur px-4 py-3 text-white shadow-xl max-w-md">
+            <Loader2 className="h-5 w-5 flex-shrink-0 animate-spin" aria-hidden="true" />
+            <p className="text-sm font-medium">{t('interview.calibrating')}</p>
           </div>
         </div>
       )}

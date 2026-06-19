@@ -119,15 +119,47 @@ export interface GazeSignals {
 }
 
 /**
- * Decide whether the candidate is "looking away" from one frame's signals.
- * Head pose is primary; nose-ratio is the fallback when the pose matrix is
- * unavailable; eye-gaze (iris blendshapes) is OR-combined so eyes pointed
- * off-screen count even with a still head.
+/** A calibrated neutral head-pose baseline (the candidate's "facing forward"). */
+export interface NeutralPose {
+  fwdX: number;
+  fwdY: number;
+}
+
+/** Uncalibrated default — assumes the camera is dead-ahead. */
+export const DEFAULT_NEUTRAL: NeutralPose = { fwdX: 0, fwdY: 0 };
+
+/**
+ * Average collected head-pose samples into a neutral baseline. Returns
+ * DEFAULT_NEUTRAL when there are no samples, so an aborted/empty calibration
+ * gracefully degrades to the uncalibrated behaviour.
  */
-export function isLookingAway(s: GazeSignals, t: GazeThresholds): boolean {
+export function averageNeutral(samples: NeutralPose[]): NeutralPose {
+  if (samples.length === 0) return { ...DEFAULT_NEUTRAL };
+  const sum = samples.reduce(
+    (acc, s) => ({ fwdX: acc.fwdX + s.fwdX, fwdY: acc.fwdY + s.fwdY }),
+    { fwdX: 0, fwdY: 0 },
+  );
+  return { fwdX: sum.fwdX / samples.length, fwdY: sum.fwdY / samples.length };
+}
+
+/**
+ * Decide whether the candidate is "looking away" from one frame's signals.
+ * Head pose is primary and measured RELATIVE to `neutral` (the calibrated
+ * facing-forward pose) so a candidate who naturally sits slightly off-angle
+ * isn't perpetually flagged. Nose-ratio is the fallback when the pose matrix is
+ * unavailable; eye-gaze (iris blendshapes, already self-relative) is
+ * OR-combined so eyes pointed off-screen count even with a still head.
+ */
+export function isLookingAway(
+  s: GazeSignals,
+  t: GazeThresholds,
+  neutral: NeutralPose = DEFAULT_NEUTRAL,
+): boolean {
   let away = false;
   if (s.fwdX !== null && s.fwdY !== null) {
-    away = Math.abs(s.fwdX) > t.poseYaw || Math.abs(s.fwdY) > t.posePitch;
+    away =
+      Math.abs(s.fwdX - neutral.fwdX) > t.poseYaw ||
+      Math.abs(s.fwdY - neutral.fwdY) > t.posePitch;
   } else if (s.horiz !== null && s.vert !== null) {
     away = s.horiz < t.horizLow || s.horiz > t.horizHigh || s.vert < t.vertLow || s.vert > t.vertHigh;
   }
