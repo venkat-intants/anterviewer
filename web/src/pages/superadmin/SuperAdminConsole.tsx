@@ -25,7 +25,7 @@ function HrPanel({ company }: { company: Company }) {
   const qc = useQueryClient();
   const [email, setEmail] = useState('');
   const [fullName, setFullName] = useState('');
-  const [password, setPassword] = useState('1234');
+  const [password, setPassword] = useState('12345678');
 
   const { data: hrs, isLoading } = useQuery({
     queryKey: ['hr-managers', company.id],
@@ -39,7 +39,7 @@ function HrPanel({ company }: { company: Company }) {
       toast.success(`HR manager ${email} created.`);
       setEmail('');
       setFullName('');
-      setPassword('1234');
+      setPassword('12345678');
       void qc.invalidateQueries({ queryKey: ['hr-managers', company.id] });
       void qc.invalidateQueries({ queryKey: ['companies'] });
     },

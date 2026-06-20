@@ -65,7 +65,7 @@ class CreateHrBody(BaseModel):
     email: EmailStr
     full_name: str = Field(min_length=1, max_length=200)
     # Default per product spec; the HR is forced to change it on first login.
-    password: str = Field(default="1234", min_length=4, max_length=128)
+    password: str = Field(default="12345678", min_length=8, max_length=128)
 
 
 class HrManagerResponse(BaseModel):
@@ -188,7 +188,7 @@ async def create_hr_manager(
 ) -> HrManagerResponse:
     """Create an HR manager scoped to a company (super_admin only).
 
-    The HR is created with the given (default '1234') password and
+    The HR is created with the given (default '12345678') password and
     must_change_password=true, forcing a reset on first login.
     """
     await _company_or_404(db, company_id)

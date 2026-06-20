@@ -86,7 +86,7 @@ async def test_create_hr_manager_happy_path() -> None:
     with patch("app.routers.admin_hr._hash_password", new=AsyncMock(return_value="hashed")):
         resp = await create_hr_manager(
             company_id,
-            CreateHrBody(email="hr@gmail.com", full_name="HR", password="1234"),
+            CreateHrBody(email="hr@gmail.com", full_name="HR", password="12345678"),
             _super_admin(),
             db,
         )

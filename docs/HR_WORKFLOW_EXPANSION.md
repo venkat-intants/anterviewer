@@ -57,7 +57,7 @@ exist today), and future-dated scheduling.
 | D3 | **Exam service** | Start as an **`assessment` module** inside a service (cheapest/fastest); split into its own microservice later if load needs it | Avoids a 5th always-on service (per-session cost cap ≤₹12); same code can be extracted later |
 | D4 | **Email** | Implement **Resend** (in `shared/email/`), SMTP fallback from existing config | Tier-1 stack choice; needed for invites/reminders |
 | D5 | **Exam grading** | MCQ = instant deterministic grading; optional short-answer = reuse Gemini scorer | MCQ needs no LLM (free, instant); LLM only if you add written questions |
-| D6 | **Default password** | Allowed (`1234` for demo) but force **change-on-first-login** + store only bcrypt hash | Security: a shared default is fine to bootstrap, not to leave |
+| D6 | **Default password** | `12345678` (demo bootstrap) + force **change-on-first-login** + store only bcrypt hash | Security: a shared default is fine to bootstrap, not to leave; 8 chars satisfies the login rule |
 
 Roles after this work: `super_admin` (you) → `hr_manager` → `candidate` (applicant).
 `admin` (existing analytics admin) stays for platform ops.
