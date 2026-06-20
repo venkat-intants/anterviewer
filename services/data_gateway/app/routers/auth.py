@@ -54,6 +54,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db_session
 from app.dependencies import get_auth_provider_dep, get_current_user
+from app.rate_limit import rate_limit
 
 log = structlog.get_logger(__name__)
 
@@ -240,6 +241,7 @@ def _set_auth_cookies(response: Response, refresh_token: str, max_age: int) -> s
     status_code=status.HTTP_201_CREATED,
     response_model=AuthTokensResponse,
     summary="Register a new candidate account",
+    dependencies=[rate_limit("auth", settings.rate_limit_login_per_minute)],
 )
 async def register(
     body: RegisterBody,
@@ -289,6 +291,7 @@ async def register(
     status_code=status.HTTP_200_OK,
     response_model=AuthTokensResponse,
     summary="Authenticate with email + password",
+    dependencies=[rate_limit("auth", settings.rate_limit_login_per_minute)],
 )
 async def login(
     body: LoginBody,
