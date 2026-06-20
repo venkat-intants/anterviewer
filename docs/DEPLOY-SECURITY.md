@@ -45,12 +45,14 @@ Anything that was pasted into a chat, screen-shared, or put in a local `.env` th
 These are generated locally and must be **identical across all services** that share them. `data_gateway` ISSUES the JWT; `interview_core`, `feedback_billing`, `admin_ops`, and the **worker** VALIDATE it — they must use the **same** `JWT_SECRET` or every cross-service call 401s.
 
 ```
-JWT_SECRET=25281f4916db5ef35893947b96c91b5c1b6c42be60b53bf48b1e6cff3327de78
+# Generate locally — NEVER commit the result:  python -c "import secrets; print(secrets.token_hex(32))"
+JWT_SECRET=<paste-your-freshly-generated-64-hex-value>
 ```
-Set `JWT_SECRET` to the value above on **ALL FIVE** Railway services (data_gateway, interview_core, feedback_billing, admin_ops, worker). Byte-for-byte identical.
+Set `JWT_SECRET` to your generated value on **ALL FIVE** Railway services (data_gateway, interview_core, feedback_billing, admin_ops, worker). Byte-for-byte identical.
 
 ```
-CONSENT_IP_SALT=b38e8634113433007dd9796c53c1841786160e87ba84b121348965c0a71b247e
+# Generate locally — NEVER commit the result:  python -c "import secrets; print(secrets.token_hex(32))"
+CONSENT_IP_SALT=<paste-your-freshly-generated-64-hex-value>
 ```
 Set `CONSENT_IP_SALT` on **`data_gateway` only** (it is the only service that writes the DPDP consent ledger and sha256-hashes client IPs). No other service reads it.
 

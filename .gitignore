@@ -160,3 +160,6 @@ services/interview_core/interview_test.html
 
 # MediaPipe proctoring assets — vendored locally by web/scripts/fetch-mediapipe.mjs (npm run setup:mediapipe)
 web/public/mediapipe/
+
+# stray duplicate git repo — never commit
+cls/

@@ -57,8 +57,12 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        service: [data_gateway, interview_core]
+        # All four services are gated. data_gateway owns the schema (alembic);
+        # the others read the same DB, so the data_gateway migrations are run
+        # for them before their tests (see the migration step's `!= data_gateway`
+        # condition). Gating feedback_billing + admin_ops closes the prior gap
+        # where scoring/PDF and analytics/DPDP-erasure could regress unchecked.
+        service: [data_gateway, interview_core, feedback_billing, admin_ops]
 
     services:
       postgres:
@@ -273,8 +277,8 @@ jobs:
         if: matrix.service == 'data_gateway'
         run: poetry run alembic upgrade head
 
-      - name: Run alembic migrations (data_gateway schema, for interview_core)
-        if: matrix.service == 'interview_core'
+      - name: Run alembic migrations (data_gateway schema, for non-owning services)
+        if: matrix.service != 'data_gateway'
         working-directory: services/data_gateway
         run: |
           pip install --quiet "poetry==1.8.3"
