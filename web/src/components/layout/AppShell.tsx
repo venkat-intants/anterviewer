@@ -19,6 +19,8 @@ import {
   ClipboardList,
   TrendingUp,
   Upload,
+  Building2,
+  Users,
 } from 'lucide-react';
 import { logout } from '@/api/auth';
 import { useAuth } from '@/context/AuthContext';
@@ -86,6 +88,26 @@ function DesktopNavLink({ item }: { item: NavItem }) {
     >
       {item.icon}
       {t(item.labelKey)}
+    </NavLink>
+  );
+}
+
+/** Like DesktopNavLink but with a literal label (HR-workflow links, not yet i18n'd). */
+function PlainNavLink({ to, label, icon }: { to: string; label: string; icon: React.ReactNode }) {
+  return (
+    <NavLink
+      to={to}
+      className={({ isActive }) =>
+        cn(
+          'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+          isActive
+            ? 'bg-primary/10 text-primary'
+            : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+        )
+      }
+    >
+      {icon}
+      {label}
     </NavLink>
   );
 }
@@ -162,6 +184,8 @@ function MobileNav() {
   const { t } = useTranslation();
   const { user, clearAuth } = useAuth();
   const isAdmin = user?.roles.includes('admin') ?? false;
+  const isSuperAdmin = user?.roles.includes('super_admin') ?? false;
+  const isHr = user?.roles.includes('hr_manager') ?? false;
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -253,6 +277,26 @@ function MobileNav() {
               ))}
             </>
           )}
+          {isSuperAdmin && (
+            <button
+              type="button"
+              onClick={() => closeAndNavigate('/superadmin')}
+              className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <Building2 className="h-4 w-4" />
+              Super Admin
+            </button>
+          )}
+          {isHr && (
+            <button
+              type="button"
+              onClick={() => closeAndNavigate('/hr')}
+              className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <Users className="h-4 w-4" />
+              Hiring
+            </button>
+          )}
         </nav>
 
         <Separator />
@@ -320,6 +364,22 @@ function TopBar() {
               {ADMIN_NAV_ITEMS.map((item) => (
                 <DesktopNavLink key={item.to} item={item} />
               ))}
+            </>
+          )}
+          {user?.roles.includes('super_admin') && (
+            <>
+              <span className="mx-1 h-4 w-px bg-border" aria-hidden="true" />
+              <PlainNavLink
+                to="/superadmin"
+                label="Super Admin"
+                icon={<Building2 className="h-4 w-4" />}
+              />
+            </>
+          )}
+          {user?.roles.includes('hr_manager') && (
+            <>
+              <span className="mx-1 h-4 w-px bg-border" aria-hidden="true" />
+              <PlainNavLink to="/hr" label="Hiring" icon={<Users className="h-4 w-4" />} />
             </>
           )}
         </nav>

@@ -75,6 +75,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 full_name: me.full_name,
                 email: me.email,
                 roles: me.roles,
+                must_change_password: me.must_change_password,
               });
             } catch {
               // Could not fetch profile — token still valid, user stays null

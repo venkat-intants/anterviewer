@@ -37,11 +37,13 @@ Access token: Bearer header only — never in a cookie.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import secrets
 import uuid
 from typing import Annotated
 
+import bcrypt
 import structlog
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response, status
 from pydantic import BaseModel, EmailStr, Field
@@ -113,6 +115,9 @@ class MeResponse(BaseModel):
     # B-031 — whether the user has a resume on file (drives the upload UI state).
     # Boolean only — the resume text/key are PII and never returned here.
     has_resume: bool = False
+    # HR workflow — true when the account still has its bootstrap password and
+    # must reset it before doing anything else (drives the force-change redirect).
+    must_change_password: bool = False
 
 
 class UserProfileUpdate(BaseModel):
@@ -457,7 +462,7 @@ async def me(
     # B-031: also surface whether a resume is on file (boolean only — never the text).
     result = await db.execute(
         text(
-            "SELECT linkedin_url, github_url, resume_s3_key "
+            "SELECT linkedin_url, github_url, resume_s3_key, must_change_password "
             "FROM users WHERE id = :uid"
         ),
         {"uid": uuid.UUID(current_user.user_id)},
@@ -466,6 +471,7 @@ async def me(
     linkedin_url: str | None = row[0] if row else None
     github_url: str | None = row[1] if row else None
     has_resume: bool = bool(row[2]) if row else False
+    must_change_password: bool = bool(row[3]) if row else False
 
     log.info("auth.me", user_id=current_user.user_id)
     return MeResponse(
@@ -476,6 +482,7 @@ async def me(
         linkedin_url=linkedin_url,
         github_url=github_url,
         has_resume=has_resume,
+        must_change_password=must_change_password,
     )
 
 
@@ -539,3 +546,41 @@ async def update_profile(
         linkedin_url=linkedin_url,
         github_url=github_url,
     )
+
+
+class ChangePasswordBody(BaseModel):
+    new_password: str = Field(min_length=8, description="New password (min 8 chars)")
+
+
+@router.post(
+    "/change-password",
+    status_code=status.HTTP_200_OK,
+    response_model=OkResponse,
+    summary="Set a new password and clear the must-change flag",
+)
+async def change_password(
+    body: ChangePasswordBody,
+    current_user: CurrentUserDep,
+    db: DbSessionDep,
+) -> OkResponse:
+    """Set the authenticated user's password and clear must_change_password.
+
+    Used by HR managers (created with a bootstrap password) to set a real one on
+    first login, but available to any authenticated user.
+    """
+    rounds: int = settings.password_hash_rounds
+    new_hash = await asyncio.to_thread(
+        lambda: bcrypt.hashpw(
+            body.new_password.encode(), bcrypt.gensalt(rounds=rounds)
+        ).decode()
+    )
+    await db.execute(
+        text(
+            "UPDATE users SET password_hash = :pw, must_change_password = false, "
+            "updated_at = now() WHERE id = :uid"
+        ),
+        {"pw": new_hash, "uid": uuid.UUID(current_user.user_id)},
+    )
+    await db.commit()
+    log.info("auth.password_changed", user_id=current_user.user_id)
+    return OkResponse()

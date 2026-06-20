@@ -74,3 +74,15 @@ export async function logout(_token?: string): Promise<LogoutResponse> {
   }
   return apiPost<LogoutResponse>('/auth/logout', {});
 }
+
+/**
+ * Set a new password and clear the must-change flag (HR workflow).
+ * Used after an HR manager logs in with the bootstrap password.
+ */
+export async function changePassword(newPassword: string): Promise<{ ok: boolean }> {
+  if (USE_MOCK) {
+    await simulateDelay(300);
+    return { ok: true };
+  }
+  return apiPost<{ ok: boolean }>('/auth/change-password', { new_password: newPassword });
+}

@@ -21,6 +21,8 @@ export interface MeResponse {
   email: string;
   roles: string[];
   has_resume: boolean;
+  /** HR workflow — true when the account still has its bootstrap password. */
+  must_change_password?: boolean;
 }
 
 export interface LogoutResponse {
@@ -43,6 +45,8 @@ export interface AuthUser {
   full_name: string;
   email: string;
   roles: string[];
+  /** HR workflow — drives the force-password-change redirect on first login. */
+  must_change_password?: boolean;
 }
 
 export interface AuthState {

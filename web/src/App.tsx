@@ -2,11 +2,14 @@
 // Authenticated routes are wrapped in AppShell (layout route).
 // Public routes render without the shell.
 import { Suspense, lazy } from 'react';
-import { Routes, Route, Outlet } from 'react-router-dom';
+import { Routes, Route, Outlet, Navigate, useLocation } from 'react-router-dom';
 import ProtectedRoute from './components/ProtectedRoute';
 import AdminRoute from './components/AdminRoute';
+import SuperAdminRoute from './components/SuperAdminRoute';
+import HRRoute from './components/HRRoute';
 import ErrorBoundary from './components/ErrorBoundary';
 import AppShell from './components/layout/AppShell';
+import { useAuth } from './context/AuthContext';
 
 // ── Public pages ──────────────────────────────────────────────────────────────
 const Landing = lazy(() => import('./pages/Landing'));
@@ -34,6 +37,11 @@ const AdminInterviews = lazy(() => import('./pages/admin/AdminInterviews'));
 const AdminInterviewDetail = lazy(() => import('./pages/admin/AdminInterviewDetail'));
 const AdminAnalytics = lazy(() => import('./pages/admin/AdminAnalytics'));
 
+// ── HR workflow pages ─────────────────────────────────────────────────────────
+const ChangePassword = lazy(() => import('./pages/ChangePassword'));
+const SuperAdminConsole = lazy(() => import('./pages/superadmin/SuperAdminConsole'));
+const HRConsole = lazy(() => import('./pages/hr/HRConsole'));
+
 function PageLoader() {
   return (
     <div className="min-h-screen flex items-center justify-center">
@@ -46,8 +54,15 @@ function PageLoader() {
   );
 }
 
-/** Layout wrapper: renders <AppShell> around whichever child route matches */
+/** Layout wrapper: renders <AppShell> around whichever child route matches.
+ *  Enforces the bootstrap-password reset: an account with must_change_password
+ *  is bounced to /change-password before it can reach any shell page. */
 function ShellLayout() {
+  const { user } = useAuth();
+  const location = useLocation();
+  if (user?.must_change_password && location.pathname !== '/change-password') {
+    return <Navigate to="/change-password" replace />;
+  }
   return (
     <AppShell>
       <Outlet />
@@ -80,6 +95,23 @@ export default function App() {
             <Route path="/interview/:sessionId" element={<Interview />} />
             <Route path="/interview/:sessionId/complete" element={<InterviewComplete />} />
             <Route path="/scorecard/:scorecardId" element={<Scorecard />} />
+
+            {/* Forced bootstrap-password reset — standalone, no shell */}
+            <Route path="/change-password" element={<ChangePassword />} />
+          </Route>
+
+          {/* Super-admin console — manage companies + HR managers */}
+          <Route element={<SuperAdminRoute />}>
+            <Route element={<ShellLayout />}>
+              <Route path="/superadmin" element={<SuperAdminConsole />} />
+            </Route>
+          </Route>
+
+          {/* HR manager console */}
+          <Route element={<HRRoute />}>
+            <Route element={<ShellLayout />}>
+              <Route path="/hr" element={<HRConsole />} />
+            </Route>
           </Route>
 
           {/* Admin-only routes — inside AppShell for consistent navigation */}

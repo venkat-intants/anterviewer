@@ -78,9 +78,20 @@ export default function Login() {
         full_name: me.full_name,
         email: me.email,
         roles: me.roles,
+        must_change_password: me.must_change_password,
       };
       setAuth(loginRes.access_token, user);
-      void navigate('/dashboard', { replace: true });
+      // Force a bootstrap-password reset first; otherwise land on the area that
+      // matches the account's role.
+      if (me.must_change_password) {
+        void navigate('/change-password', { replace: true });
+      } else if (me.roles.includes('super_admin')) {
+        void navigate('/superadmin', { replace: true });
+      } else if (me.roles.includes('hr_manager')) {
+        void navigate('/hr', { replace: true });
+      } else {
+        void navigate('/dashboard', { replace: true });
+      }
     },
     onError: (err: unknown) => {
       const message = err instanceof Error ? err.message : t('error.generic');
