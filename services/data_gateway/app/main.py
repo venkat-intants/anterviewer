@@ -38,6 +38,7 @@ from app.dependencies import set_auth_provider
 from app.health import router as health_router
 from app.redis_client import close_redis, get_redis, init_redis
 from app.retention import purge_expired_sessions
+from app.routers.admin_hr import router as admin_hr_router
 from app.routers.auth import router as auth_router
 from app.routers.consent import router as consent_router
 from app.routers.jd import router as jd_router
@@ -175,6 +176,7 @@ app.add_middleware(
 
 app.include_router(health_router)
 app.include_router(auth_router)
+app.include_router(admin_hr_router)
 app.include_router(consent_router)
 app.include_router(jobs_router)
 app.include_router(resume_router)

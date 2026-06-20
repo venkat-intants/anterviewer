@@ -63,6 +63,14 @@ class User(Base):
     resume_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     resume_s3_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # HR workflow (Phase 0) — multi-tenant scoping + forced first-login reset.
+    # company_id is NULL for super_admin / platform users.
+    company_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("companies.id", ondelete="SET NULL"), nullable=True
+    )
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
@@ -98,6 +106,29 @@ class UserRole(Base):
 
     user: Mapped[User] = relationship("User", back_populates="user_roles")
     role: Mapped[Role] = relationship("Role", back_populates="user_roles")
+
+
+class Company(Base):
+    """A tenant company (HR workflow — Phase 0).
+
+    Each HR manager and all of their applicants / exams / jobs belong to one
+    company. Created and managed by super-admins.
+    """
+
+    __tablename__ = "companies"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    slug: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
 
 
 class DpdpConsent(Base):

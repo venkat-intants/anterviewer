@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 import structlog
@@ -83,3 +84,27 @@ async def get_current_user(
         email="",
         roles=roles,
     )
+
+
+# ---------------------------------------------------------------------------
+# Role-based access control (HR workflow — Phase 0)
+# ---------------------------------------------------------------------------
+
+
+def require_role(*allowed: str) -> Callable[[User], Awaitable[User]]:
+    """Dependency factory: require the caller to hold at least one of *allowed* roles.
+
+    Usage:
+        SuperAdminDep = Annotated[User, Depends(require_role("super_admin"))]
+        @router.post(..., dependencies=[Depends(require_role("super_admin"))])
+    """
+
+    async def _dep(user: Annotated[User, Depends(get_current_user)]) -> User:
+        if not set(allowed) & set(user.roles):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Insufficient permissions for this action.",
+            )
+        return user
+
+    return _dep
