@@ -167,7 +167,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     # "Cookie" is a forbidden CORS header name (browsers always send it, never
     # include it in preflight allow-lists — doing so is spec-invalid and ignored).
     # X-CSRF-Token is a custom request header set by JS for the double-submit
