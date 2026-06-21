@@ -195,3 +195,65 @@ async def internal_score(
         composite_score=composite,
         scores=scores,
     )
+
+
+# ---------------------------------------------------------------------------
+# Resume ATS scoring (HR workflow Phase 1)
+# ---------------------------------------------------------------------------
+
+
+class ResumeScoreRequest(BaseModel):
+    """Request body for POST /score-resume — ATS-score a resume against a role."""
+
+    resume_text: str = Field(..., min_length=1, description="Extracted resume text")
+    job_title: str = Field(default="General Role", min_length=1)
+    level: str = Field(default="mid", description="entry | mid | senior")
+    jd_text: str = Field(default="", description="Job description — optional, improves accuracy")
+
+
+class ResumeScoreResponse(BaseModel):
+    overall: int
+    breakdown: dict[str, int]
+    strengths: list[str]
+    concerns: list[str]
+    recommendation: str
+    summary: str
+
+
+@router.post(
+    "/score-resume",
+    status_code=status.HTTP_200_OK,
+    response_model=ResumeScoreResponse,
+    summary="ATS-score an applicant resume against a role (stateless)",
+)
+async def internal_score_resume(
+    body: ResumeScoreRequest,
+    _jwt_payload: Annotated[dict[str, Any], Depends(_require_jwt)],
+    app_settings: Annotated[Settings, Depends(_get_settings)],
+) -> ResumeScoreResponse:
+    """ATS-score a resume. Stateless — returns the score for the caller to persist."""
+    from app.resume_scorer import ResumeScoringError, score_resume
+
+    try:
+        result = await score_resume(
+            resume_text=body.resume_text,
+            job_title=body.job_title,
+            level=body.level,
+            jd_text=body.jd_text,
+            settings=app_settings,
+        )
+    except ResumeScoringError as exc:
+        log.error("score.resume_error", error=exc.message)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Resume scoring failed: {exc.message}",
+        ) from exc
+
+    return ResumeScoreResponse(
+        overall=result["overall"],
+        breakdown=result["breakdown"],
+        strengths=result["strengths"],
+        concerns=result["concerns"],
+        recommendation=result["recommendation"],
+        summary=result["summary"],
+    )
