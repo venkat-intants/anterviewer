@@ -12,14 +12,18 @@ import {
   RefreshCw,
   ChevronDown,
   Star,
+  FileText,
+  X,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   listApplicants,
-  uploadApplicant,
+  bulkUploadApplicants,
   updateApplicantStatus,
   rescoreApplicant,
   type Applicant,
   type ApplicantStatus,
+  type BulkUploadResult,
 } from '@/api/applicants';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
@@ -209,13 +213,16 @@ function ApplicantRow({ a }: { a: Applicant }) {
 }
 
 // ── Page ─────────────────────────────────────────────────────────────────────
+const MAX_BULK_FILES = 25;
+
 export default function Applicants() {
   const qc = useQueryClient();
-  const [file, setFile] = useState<File | null>(null);
-  const [fullName, setFullName] = useState('');
+  const [files, setFiles] = useState<File[]>([]);
   const [jobTitle, setJobTitle] = useState('');
   const [level, setLevel] = useState('mid');
   const [jd, setJd] = useState('');
+  const [progress, setProgress] = useState(0);
+  const [lastResult, setLastResult] = useState<BulkUploadResult | null>(null);
 
   const { data: applicants, isLoading } = useQuery({
     queryKey: ['hr', 'applicants'],
@@ -225,39 +232,68 @@ export default function Applicants() {
   const uploadMut = useMutation({
     mutationFn: () => {
       const fd = new FormData();
-      fd.append('file', file as File);
-      fd.append('full_name', fullName.trim());
+      files.forEach((f) => fd.append('files', f));
       fd.append('target_job_title', jobTitle.trim());
       fd.append('target_level', level);
       if (jd.trim()) fd.append('target_jd_text', jd.trim());
-      return uploadApplicant(fd);
+      setProgress(0);
+      return bulkUploadApplicants(fd, setProgress);
     },
-    onSuccess: (a) => {
-      toast.success(`${a.full_name} added — ATS ${a.ats_overall ?? '—'}/100`);
-      setFile(null);
-      setFullName('');
-      setJobTitle('');
+    onSuccess: (res) => {
+      setLastResult(res);
+      if (res.created_count > 0) {
+        toast.success(
+          `${res.created_count} resume${res.created_count === 1 ? '' : 's'} added & scored` +
+            (res.failed_count > 0 ? ` · ${res.failed_count} skipped` : ''),
+        );
+      } else {
+        toast.error('No resumes could be processed — see details below.');
+      }
+      setFiles([]);
       setJd('');
       void qc.invalidateQueries({ queryKey: ['hr', 'applicants'] });
     },
     onError: (e: unknown) => toast.error(e instanceof Error ? e.message : 'Upload failed'),
   });
 
+  function addFiles(selected: FileList | null) {
+    if (!selected) return;
+    const incoming = Array.from(selected).filter((f) => f.type === 'application/pdf');
+    setFiles((prev) => {
+      // de-dupe by name+size, cap at MAX_BULK_FILES
+      const seen = new Set(prev.map((f) => `${f.name}:${f.size}`));
+      const merged = [...prev];
+      for (const f of incoming) {
+        const key = `${f.name}:${f.size}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          merged.push(f);
+        }
+      }
+      if (merged.length > MAX_BULK_FILES) {
+        toast.error(`Max ${MAX_BULK_FILES} resumes per batch — extra files ignored.`);
+      }
+      return merged.slice(0, MAX_BULK_FILES);
+    });
+  }
+
   function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!file) return toast.error('Choose a PDF resume.');
-    if (!fullName.trim() || !jobTitle.trim()) return toast.error('Name and role are required.');
+    if (files.length === 0) return toast.error('Choose one or more PDF resumes.');
+    if (!jobTitle.trim()) return toast.error('The role to screen for is required.');
     uploadMut.mutate();
   }
 
   const list = applicants ?? [];
+  const pending = uploadMut.isPending;
 
   return (
     <div className="max-w-3xl space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-foreground">Resume screening</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Upload applicant resumes — each is AI-scored against the role, then ranked.
+          Drop in many resumes at once — each candidate&apos;s name &amp; email are read
+          straight from the resume, AI-scored against the role, then ranked.
         </p>
       </div>
 
@@ -266,27 +302,22 @@ export default function Applicants() {
         <CardHeader className="pb-3">
           <CardTitle className="text-base flex items-center gap-2">
             <Upload className="h-4 w-4 text-primary" aria-hidden="true" />
-            Add applicant
+            Bulk upload resumes
           </CardTitle>
-          <CardDescription>PDF resume, candidate name, and the role to screen for.</CardDescription>
+          <CardDescription>
+            Pick the role once, then select up to {MAX_BULK_FILES} PDF resumes — names are
+            extracted automatically.
+          </CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={onSubmit} className="space-y-3">
             <div className="grid gap-3 sm:grid-cols-2">
-              <Input
-                placeholder="Candidate full name"
-                value={fullName}
-                onChange={(e) => setFullName(e.target.value)}
-                aria-label="Candidate full name"
-              />
               <Input
                 placeholder="Role (e.g. Blockchain Engineer)"
                 value={jobTitle}
                 onChange={(e) => setJobTitle(e.target.value)}
                 aria-label="Target role"
               />
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2">
               <select
                 className={inputCls}
                 value={level}
@@ -297,26 +328,123 @@ export default function Applicants() {
                 <option value="mid">Mid level</option>
                 <option value="senior">Senior level</option>
               </select>
+            </div>
+
+            {/* File picker */}
+            <label
+              className={cn(
+                'flex cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed',
+                'border-input bg-background px-4 py-6 text-center transition-colors hover:border-primary/50',
+              )}
+            >
+              <FileText className="h-6 w-6 text-muted-foreground" aria-hidden="true" />
+              <span className="text-sm font-medium text-foreground">
+                Click to choose PDF resumes
+              </span>
+              <span className="text-xs text-muted-foreground">
+                Select multiple files · up to {MAX_BULK_FILES} per batch
+              </span>
               <input
                 type="file"
                 accept="application/pdf"
-                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-                className="text-sm file:mr-3 file:rounded-md file:border-0 file:bg-primary file:px-3 file:py-2 file:text-sm file:font-medium file:text-primary-foreground"
-                aria-label="Resume PDF"
+                multiple
+                className="sr-only"
+                onChange={(e) => {
+                  addFiles(e.target.files);
+                  e.target.value = ''; // allow re-picking the same file
+                }}
+                aria-label="Resume PDFs"
               />
-            </div>
+            </label>
+
+            {/* Selected files */}
+            {files.length > 0 && (
+              <div className="rounded-md border border-border bg-muted/30 p-2">
+                <div className="mb-1 flex items-center justify-between px-1">
+                  <span className="text-xs font-medium text-muted-foreground">
+                    {files.length} resume{files.length === 1 ? '' : 's'} selected
+                  </span>
+                  <button
+                    type="button"
+                    className="text-xs text-muted-foreground hover:text-foreground"
+                    onClick={() => setFiles([])}
+                  >
+                    Clear all
+                  </button>
+                </div>
+                <ul className="max-h-32 space-y-0.5 overflow-y-auto">
+                  {files.map((f, i) => (
+                    <li
+                      key={`${f.name}:${f.size}:${i}`}
+                      className="flex items-center gap-2 rounded px-1 py-0.5 text-xs text-foreground"
+                    >
+                      <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                      <span className="min-w-0 flex-1 truncate">{f.name}</span>
+                      <span className="shrink-0 text-muted-foreground">
+                        {(f.size / 1024).toFixed(0)} KB
+                      </span>
+                      <button
+                        type="button"
+                        aria-label={`Remove ${f.name}`}
+                        className="shrink-0 text-muted-foreground hover:text-rose-600"
+                        onClick={() => setFiles((prev) => prev.filter((_, j) => j !== i))}
+                      >
+                        <X className="h-3.5 w-3.5" aria-hidden="true" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             <textarea
               className={cn(inputCls, 'min-h-[64px] resize-y')}
-              placeholder="Job description (optional — improves scoring accuracy)"
+              placeholder="Job description (optional — applied to the whole batch, improves scoring accuracy)"
               value={jd}
               onChange={(e) => setJd(e.target.value)}
               aria-label="Job description"
             />
-            <Button type="submit" disabled={uploadMut.isPending} className="gap-1.5">
+
+            {pending && (
+              <div className="space-y-1">
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-1.5 rounded-full bg-primary transition-all"
+                    style={{ width: `${progress < 100 ? progress : 100}%` }}
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {progress < 100
+                    ? `Uploading ${progress}%…`
+                    : `Scoring ${files.length || 'the'} resume${files.length === 1 ? '' : 's'} — this can take a moment…`}
+                </p>
+              </div>
+            )}
+
+            <Button type="submit" disabled={pending || files.length === 0} className="gap-1.5">
               <Upload className="h-4 w-4" aria-hidden="true" />
-              {uploadMut.isPending ? 'Uploading & scoring…' : 'Upload & score'}
+              {pending
+                ? 'Processing…'
+                : `Upload & score${files.length > 0 ? ` ${files.length} resume${files.length === 1 ? '' : 's'}` : ''}`}
             </Button>
           </form>
+
+          {/* Per-file failure summary from the last batch */}
+          {lastResult && lastResult.failed_count > 0 && (
+            <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-2.5 text-xs">
+              <p className="mb-1 flex items-center gap-1.5 font-medium text-amber-800">
+                <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+                {lastResult.failed_count} file{lastResult.failed_count === 1 ? '' : 's'} skipped
+              </p>
+              <ul className="space-y-0.5 text-amber-700">
+                {lastResult.failed.map((f, i) => (
+                  <li key={i} className="truncate">
+                    <span className="font-medium">{f.filename}</span> — {f.error}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </CardContent>
       </Card>
 

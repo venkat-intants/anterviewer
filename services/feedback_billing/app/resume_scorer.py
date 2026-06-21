@@ -53,6 +53,8 @@ Level : {{LEVEL}}
 
 ## Output STRICT JSON (no markdown, no code fences)
 {
+  "candidate_name": "<the candidate's full name from the resume, or empty string>",
+  "candidate_email": "<the candidate's email from the resume, or empty string>",
   "overall": <int 0-100>,
   "breakdown": {
     "skills_match": <int 0-100>,
@@ -67,6 +69,8 @@ Level : {{LEVEL}}
 }
 
 Rules:
+- Extract candidate_name and candidate_email verbatim from the resume (usually
+  the header). Use an empty string if absent — never invent them.
 - "overall" is a HOLISTIC fit score (not merely the average of sub-scores).
 - Ground all claims in the resume; if key info is missing, say so and let it
   lower the relevant sub-score.
@@ -174,6 +178,8 @@ async def score_resume(
         recommendation = "moderate_fit"
 
     result = {
+        "candidate_name": str(parsed.get("candidate_name", "")).strip(),
+        "candidate_email": str(parsed.get("candidate_email", "")).strip(),
         "overall": overall,
         "breakdown": breakdown,
         "strengths": [str(s) for s in (parsed.get("strengths") or [])][:5],

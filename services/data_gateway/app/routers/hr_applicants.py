@@ -23,7 +23,7 @@ from typing import Annotated, Any
 
 import structlog
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel
 from shared.auth.base import User
 from sqlalchemy import select, text
@@ -40,6 +40,7 @@ log = structlog.get_logger(__name__)
 router = APIRouter(prefix="/hr", tags=["hr-applicants"])
 
 _MAX_RESUME_BYTES = 5 * 1024 * 1024  # 5 MB
+_MAX_BULK_FILES = 25  # per batch; large batches should move to an async queue (Phase 5)
 _VALID_STATUSES = {"new", "shortlisted", "rejected"}
 
 DbSessionDep = Annotated[AsyncSession, Depends(get_db_session)]
@@ -97,6 +98,13 @@ class StatusUpdate(BaseModel):
     status: str
 
 
+class BulkUploadResult(BaseModel):
+    created: list[ApplicantOut]
+    failed: list[dict[str, str]]
+    created_count: int
+    failed_count: int
+
+
 def _to_out(a: Applicant) -> ApplicantOut:
     # resume_text / s3_key are PII — never returned in the list/detail payload.
     return ApplicantOut(
@@ -138,6 +146,90 @@ async def _get_owned(db: AsyncSession, company_id: uuid.UUID, applicant_id: uuid
     if a is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Applicant not found.")
     return a
+
+
+def _name_from_filename(filename: str) -> str:
+    """Best-effort readable name from a filename (used only if the scorer cannot
+    extract a name from the resume itself)."""
+    base = filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    if base.lower().endswith(".pdf"):
+        base = base[:-4]
+    base = base.replace("_", " ").replace("-", " ").strip()
+    return base[:200] or "Unnamed candidate"
+
+
+async def _ingest_resume(
+    *,
+    db: AsyncSession,
+    company_id: uuid.UUID,
+    hr_uid: uuid.UUID,
+    raw: bytes,
+    fallback_name: str,
+    job_title: str,
+    level: str,
+    jd_text: str | None,
+) -> Applicant:
+    """Extract → store → score → persist ONE resume.
+
+    The candidate's name + email are auto-extracted from the resume by the scorer
+    (so the score happens *before* insert and the extracted name lands on the
+    initial row). Falls back to ``fallback_name`` if extraction yields nothing or
+    the scorer is unavailable. Raises ``ValueError`` (bad PDF / DB) or a botocore
+    error (storage) so the caller can record it as a per-file failure.
+    """
+    try:
+        resume_text = _extract_pdf_text(raw)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("could not read the PDF (encrypted or not text-based)") from exc
+
+    applicant_id = uuid.uuid4()
+    s3_key = f"applicants/{company_id}/{applicant_id}.pdf"
+    await _upload_to_s3(raw, s3_key)  # BotoCoreError / ClientError propagate to caller
+
+    full_name = fallback_name
+    email: str | None = None
+    score: dict[str, Any] | None = None
+    try:
+        score = await score_resume_remote(
+            resume_text=resume_text,
+            job_title=job_title,
+            level=level,
+            jd_text=jd_text,
+            acting_user_id=str(hr_uid),
+        )
+        if score.get("candidate_name"):
+            full_name = str(score["candidate_name"]).strip()[:200] or fallback_name
+        if score.get("candidate_email"):
+            email = str(score["candidate_email"]).strip()[:320] or None
+    except ResumeScoreError as exc:
+        log.warning("hr.applicant.bulk.score_unavailable", error=str(exc))
+
+    now = datetime.now(tz=UTC)
+    applicant = Applicant(
+        id=applicant_id,
+        company_id=company_id,
+        created_by_user_id=hr_uid,
+        full_name=full_name,
+        email=email,
+        target_job_title=job_title,
+        target_level=level,
+        target_jd_text=jd_text,
+        resume_text=resume_text,
+        resume_s3_key=s3_key,
+        status="new",
+        created_at=now,
+        updated_at=now,
+    )
+    if score is not None:
+        _apply_score(applicant, score)
+    db.add(applicant)
+    try:
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        await db.rollback()
+        await _delete_from_s3(s3_key)
+        raise ValueError("could not save the applicant") from exc
+    return applicant
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +324,94 @@ async def create_applicant(
         scored=applicant.ats_overall is not None,
     )
     return _to_out(applicant)
+
+
+@router.post(
+    "/applicants/bulk",
+    status_code=status.HTTP_201_CREATED,
+    response_model=BulkUploadResult,
+    summary="Bulk-upload many resumes for one role (names auto-extracted)",
+)
+async def bulk_upload_applicants(
+    files: Annotated[list[UploadFile], File(description="One or more PDF resumes")],
+    target_job_title: Annotated[str, Form()],
+    ctx: HrCtxDep,
+    db: DbSessionDep,
+    target_level: Annotated[str, Form()] = "mid",
+    target_jd_text: Annotated[str | None, Form()] = None,
+) -> BulkUploadResult:
+    """Upload many resumes at once for a SINGLE role.
+
+    For each resume the candidate's name + email are auto-extracted from the
+    resume (no manual entry), then it is stored and ATS-scored. A bad/empty/oversized
+    file is reported in ``failed`` without aborting the rest of the batch. Processing
+    is sequential per file (the scorer is the slow step) — large batches should move
+    to an async queue (Phase 5).
+    """
+    hr_uid, company_id = ctx
+    if not files:
+        raise HTTPException(status_code=400, detail="No files were uploaded.")
+    if len(files) > _MAX_BULK_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Up to {_MAX_BULK_FILES} resumes per batch — you sent {len(files)}.",
+        )
+
+    job_title = target_job_title.strip() or "General Role"
+    level = target_level.strip() or "mid"
+
+    created: list[ApplicantOut] = []
+    failed: list[dict[str, str]] = []
+    for f in files:
+        fname = f.filename or "resume.pdf"
+        # Browsers usually send application/pdf; some send octet-stream — allow both
+        # and let _extract_pdf_text reject anything that is not actually a PDF.
+        if f.content_type not in ("application/pdf", "application/octet-stream"):
+            failed.append({"filename": fname, "error": "not a PDF"})
+            continue
+        try:
+            raw = await f.read()
+        except Exception:  # noqa: BLE001
+            failed.append({"filename": fname, "error": "could not read upload"})
+            continue
+        if not raw:
+            failed.append({"filename": fname, "error": "empty file"})
+            continue
+        if len(raw) > _MAX_RESUME_BYTES:
+            failed.append({"filename": fname, "error": "over 5 MB"})
+            continue
+        try:
+            applicant = await _ingest_resume(
+                db=db,
+                company_id=company_id,
+                hr_uid=hr_uid,
+                raw=raw,
+                fallback_name=_name_from_filename(fname),
+                job_title=job_title,
+                level=level,
+                jd_text=target_jd_text,
+            )
+            created.append(_to_out(applicant))
+        except (ValueError, BotoCoreError, ClientError) as exc:
+            await db.rollback()
+            failed.append({"filename": fname, "error": str(exc)[:140]})
+        except Exception as exc:  # noqa: BLE001 — one bad file must not kill the batch
+            await db.rollback()
+            log.error("hr.applicant.bulk.unexpected", error_type=type(exc).__name__)
+            failed.append({"filename": fname, "error": "unexpected error"})
+
+    log.info(
+        "hr.applicant.bulk.complete",
+        company_id=str(company_id),
+        created=len(created),
+        failed=len(failed),
+    )
+    return BulkUploadResult(
+        created=created,
+        failed=failed,
+        created_count=len(created),
+        failed_count=len(failed),
+    )
 
 
 @router.get("/applicants", response_model=list[ApplicantOut])

@@ -212,6 +212,8 @@ class ResumeScoreRequest(BaseModel):
 
 
 class ResumeScoreResponse(BaseModel):
+    candidate_name: str = ""
+    candidate_email: str = ""
     overall: int
     breakdown: dict[str, int]
     strengths: list[str]
@@ -250,6 +252,8 @@ async def internal_score_resume(
         ) from exc
 
     return ResumeScoreResponse(
+        candidate_name=result.get("candidate_name", ""),
+        candidate_email=result.get("candidate_email", ""),
         overall=result["overall"],
         breakdown=result["breakdown"],
         strengths=result["strengths"],

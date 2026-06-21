@@ -47,6 +47,30 @@ export function uploadApplicant(
   return uploadWithProgress<Applicant>(`${API_BASE}/hr/applicants`, form, onProgress);
 }
 
+export interface BulkUploadResult {
+  created: Applicant[];
+  failed: { filename: string; error: string }[];
+  created_count: number;
+  failed_count: number;
+}
+
+/**
+ * Bulk-upload many resumes for ONE role. The candidate name + email are
+ * auto-extracted from each resume server-side (no manual entry). Append each
+ * PDF under the `files` key, plus target_job_title and optionally
+ * target_level / target_jd_text.
+ */
+export function bulkUploadApplicants(
+  form: FormData,
+  onProgress?: (pct: number) => void,
+): Promise<BulkUploadResult> {
+  return uploadWithProgress<BulkUploadResult>(
+    `${API_BASE}/hr/applicants/bulk`,
+    form,
+    onProgress,
+  );
+}
+
 export function updateApplicantStatus(
   id: string,
   status: ApplicantStatus,
