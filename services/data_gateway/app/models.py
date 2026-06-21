@@ -131,6 +131,44 @@ class Company(Base):
     )
 
 
+class Applicant(Base):
+    """An applicant being screened by an HR manager (HR workflow — Phase 1).
+
+    Multi-tenant: every row belongs to one company; all HR queries filter by
+    company_id. The role screened for is denormalized (target_*). The ATS score
+    comes from feedback_billing's resume scorer.
+    """
+
+    __tablename__ = "applicants"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
+    )
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    full_name: Mapped[str] = mapped_column(Text, nullable=False)
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_job_title: Mapped[str] = mapped_column(Text, nullable=False)
+    target_level: Mapped[str] = mapped_column(Text, default="mid", nullable=False)
+    target_jd_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resume_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resume_s3_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ats_overall: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    ats_breakdown: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    ats_strengths: Mapped[list[Any] | None] = mapped_column(JSONB, nullable=True)
+    ats_concerns: Mapped[list[Any] | None] = mapped_column(JSONB, nullable=True)
+    ats_recommendation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ats_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, default="new", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+
+
 class DpdpConsent(Base):
     """DPDP Act 2023 consent ledger entry.
 

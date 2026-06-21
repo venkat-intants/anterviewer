@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     rate_limit_login_per_minute: int = 5
     rate_limit_api_per_minute: int = 60
 
+    # feedback_billing base URL — data_gateway calls /internal/score-resume here
+    # to ATS-score applicant resumes (HR workflow Phase 1).
+    feedback_billing_url: str = "http://localhost:8003"
+
     # --- DPDP consent ledger (S3-011) ---
     # sha256(raw_ip + consent_ip_salt) is stored instead of raw IP.
     # Required — no default — forces explicit secret management.
