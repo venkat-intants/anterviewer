@@ -41,6 +41,7 @@ const AdminAnalytics = lazy(() => import('./pages/admin/AdminAnalytics'));
 const ChangePassword = lazy(() => import('./pages/ChangePassword'));
 const SuperAdminConsole = lazy(() => import('./pages/superadmin/SuperAdminConsole'));
 const HRConsole = lazy(() => import('./pages/hr/HRConsole'));
+const Applicants = lazy(() => import('./pages/hr/Applicants'));
 
 function PageLoader() {
   return (
@@ -111,6 +112,7 @@ export default function App() {
           <Route element={<HRRoute />}>
             <Route element={<ShellLayout />}>
               <Route path="/hr" element={<HRConsole />} />
+              <Route path="/hr/applicants" element={<Applicants />} />
             </Route>
           </Route>
 

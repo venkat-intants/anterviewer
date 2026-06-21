@@ -21,6 +21,7 @@ import {
   Upload,
   Building2,
   Users,
+  FileSearch,
 } from 'lucide-react';
 import { logout } from '@/api/auth';
 import { useAuth } from '@/context/AuthContext';
@@ -288,14 +289,24 @@ function MobileNav() {
             </button>
           )}
           {isHr && (
-            <button
-              type="button"
-              onClick={() => closeAndNavigate('/hr')}
-              className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <Users className="h-4 w-4" />
-              Hiring
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => closeAndNavigate('/hr')}
+                className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Users className="h-4 w-4" />
+                Hiring
+              </button>
+              <button
+                type="button"
+                onClick={() => closeAndNavigate('/hr/applicants')}
+                className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <FileSearch className="h-4 w-4" />
+                Applicants
+              </button>
+            </>
           )}
         </nav>
 
@@ -380,6 +391,11 @@ function TopBar() {
             <>
               <span className="mx-1 h-4 w-px bg-border" aria-hidden="true" />
               <PlainNavLink to="/hr" label="Hiring" icon={<Users className="h-4 w-4" />} />
+              <PlainNavLink
+                to="/hr/applicants"
+                label="Applicants"
+                icon={<FileSearch className="h-4 w-4" />}
+              />
             </>
           )}
         </nav>
