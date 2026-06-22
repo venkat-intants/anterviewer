@@ -22,6 +22,7 @@ import {
   Building2,
   Users,
   FileSearch,
+  Video,
 } from 'lucide-react';
 import { logout } from '@/api/auth';
 import { useAuth } from '@/context/AuthContext';
@@ -314,6 +315,14 @@ function MobileNav() {
                 <ClipboardList className="h-4 w-4" />
                 Exams
               </button>
+              <button
+                type="button"
+                onClick={() => closeAndNavigate('/hr/interviews')}
+                className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Video className="h-4 w-4" />
+                Interviews
+              </button>
             </>
           )}
         </nav>
@@ -408,6 +417,11 @@ function TopBar() {
                 to="/hr/exams"
                 label="Exams"
                 icon={<ClipboardList className="h-4 w-4" />}
+              />
+              <PlainNavLink
+                to="/hr/interviews"
+                label="Interviews"
+                icon={<Video className="h-4 w-4" />}
               />
             </>
           )}

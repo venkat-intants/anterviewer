@@ -42,6 +42,8 @@ const STAGES: Stage[] = [
     title: 'AI interview',
     desc: 'Schedule the avatar interview for shortlisted applicants.',
     phase: 'Phase 3',
+    to: '/hr/interviews',
+    live: true,
   },
   {
     icon: <Trophy className="h-5 w-5" />,
