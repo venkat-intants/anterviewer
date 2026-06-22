@@ -72,6 +72,19 @@ class Settings(BaseSettings):
     # to ATS-score applicant resumes (HR workflow Phase 1).
     feedback_billing_url: str = "http://localhost:8003"
 
+    # --- Exam magic-link (HR workflow Phase 2) ---
+    # SEPARATE signing secret — NEVER reuse jwt_secret. A leaked exam secret must
+    # not be able to forge user sessions. Required, no default (explicit secret mgmt).
+    exam_link_secret: str
+    # Base URL the candidate's browser hits; the HR mint builds {base}/exam#<token>.
+    exam_link_base_url: str = "http://localhost:5173"
+    # Magic-link lifetime in HOURS (not days) — short windows limit a leaked link.
+    exam_link_ttl_hours: int = 72
+    # Grace window (seconds) added to the server-side time-limit deadline at submit.
+    exam_submit_grace_seconds: int = 30
+    # Cap on the submitted-answers payload size (DoS guard).
+    exam_max_answers: int = 500
+
     # --- DPDP consent ledger (S3-011) ---
     # sha256(raw_ip + consent_ip_salt) is stored instead of raw IP.
     # Required — no default — forces explicit secret management.

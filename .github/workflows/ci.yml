@@ -133,6 +133,11 @@ jobs:
       CONSENT_IP_SALT: ci-consent-ip-salt-placeholder-not-real-32-hex
 
       # -----------------------------------------------------------------------
+      # Exam magic-link HMAC secret (Phase 2; non-secret CI placeholder)
+      # -----------------------------------------------------------------------
+      EXAM_LINK_SECRET: ci-exam-link-secret-placeholder-not-real-32-hex
+
+      # -----------------------------------------------------------------------
       # Trusted proxy count (0 = no reverse proxy in CI)
       # -----------------------------------------------------------------------
       TRUSTED_PROXY_COUNT: "0"
@@ -466,6 +471,7 @@ jobs:
       AUTH_PROVIDER: local
 
       CONSENT_IP_SALT: ci-consent-ip-salt-placeholder-not-real-32-hex
+      EXAM_LINK_SECRET: ci-exam-link-secret-placeholder-not-real-32-hex
       TRUSTED_PROXY_COUNT: "0"
 
       # LLM — real key required for E2E (avatar + voice pipeline)

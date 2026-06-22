@@ -25,7 +25,9 @@ from sqlalchemy import (
     NUMERIC,
     TIMESTAMP,
     Boolean,
+    CheckConstraint,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     SmallInteger,
     String,
@@ -167,6 +169,196 @@ class Applicant(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True
     )
+
+
+# ---------------------------------------------------------------------------
+# MCQ exam portal (migration e6f7a8b9c0d1 — HR workflow Phase 2)
+#
+# Relationships are intentionally OMITTED: the routers query explicitly with
+# select()/where() (as hr_applicants does) and DB-level ON DELETE CASCADE handles
+# child cleanup — this avoids any mapper-config ambiguity from the composite FKs.
+# Timestamps are set by the application (repo convention); the migration carries
+# matching server_defaults as a raw-SQL safety net.
+# ---------------------------------------------------------------------------
+
+
+class Exam(Base):
+    """An MCQ exam authored by an HR manager, scoped to one company.
+
+    status: 'draft' | 'published' | 'closed' (only 'published' is takeable).
+    pass_threshold: percent 0-100; passed = score_percent >= pass_threshold.
+    time_limit_seconds: optional overall budget; NULL = untimed. Enforced
+        SERVER-SIDE at submit (started_at + time_limit_seconds + grace).
+    allow_retake: when True an applicant may have >1 submitted attempt (gated
+        in-app; attempt_no is server-computed, never client-supplied).
+    """
+
+    __tablename__ = "exams"
+    __table_args__ = (
+        UniqueConstraint("id", "company_id", name="uq_exams_id_company"),
+        CheckConstraint(
+            "pass_threshold BETWEEN 0 AND 100", name="ck_exams_pass_threshold_range"
+        ),
+        CheckConstraint("status IN ('draft','published','closed')", name="ck_exams_status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
+    )
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_job_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pass_threshold: Mapped[int] = mapped_column(SmallInteger, default=60, nullable=False)
+    time_limit_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    allow_retake: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    status: Mapped[str] = mapped_column(Text, default="draft", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class ExamQuestion(Base):
+    """An ordered MCQ. correct_index is NEVER serialized to an applicant — the
+    take endpoint selects only id/prompt/options/points/position; grading reads
+    correct_index server-side only. company_id is pinned to the exam by a
+    composite FK so it cannot drift cross-tenant.
+    """
+
+    __tablename__ = "exam_questions"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["exam_id", "company_id"], ["exams.id", "exams.company_id"],
+            name="fk_exam_questions_exam", ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "jsonb_array_length(options) BETWEEN 2 AND 6",
+            name="ck_exam_questions_options_count",
+        ),
+        CheckConstraint("points >= 1", name="ck_exam_questions_points_positive"),
+        CheckConstraint(
+            "correct_index >= 0 AND correct_index < jsonb_array_length(options)",
+            name="ck_exam_questions_correct_index_range",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    exam_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
+    )
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    options: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
+    correct_index: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    points: Mapped[int] = mapped_column(SmallInteger, default=1, nullable=False)
+    position: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class ExamAssignment(Base):
+    """Pre-assignment of an applicant to an exam, carrying a HASHED magic-link token.
+
+    Applicants are NOT logged-in users; access is via an opaque random token.
+    token_hash = hmac_sha256(raw_token, exam_link_secret). The RAW token lives
+    ONLY in the shared URL. Every take request re-resolves THIS row by token_hash
+    and checks status NOT IN ('revoked','expired') AND expires_at > now() — so
+    revocation, single-use (consumed_at) and rotation are real.
+    """
+
+    __tablename__ = "exam_assignments"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["exam_id", "company_id"], ["exams.id", "exams.company_id"],
+            name="fk_exam_assignments_exam", ondelete="CASCADE",
+        ),
+        UniqueConstraint("token_hash", name="uq_exam_assignments_token_hash"),
+        UniqueConstraint("id", "company_id", name="uq_exam_assignments_id_company"),
+        CheckConstraint(
+            "status IN ('invited','started','completed','expired','revoked')",
+            name="ck_exam_assignments_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
+    )
+    exam_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    applicant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("applicants.id", ondelete="CASCADE"), nullable=False
+    )
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(Text, default="invited", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class ExamAttempt(Base):
+    """An applicant's server-graded attempt.
+
+    answers: {question_id(str): selected_index(int)} (Pydantic-validated, bounded).
+    graded_snapshot: {question_id: {correct_index, points}} frozen at submit so
+        later question edits never change a graded result or its audit recompute.
+    score_raw/score_max: Integer (no overflow). score_percent: 0-100.
+    passed: score_percent >= exams.pass_threshold — computed server-side, the
+        single source of truth (the UI never recomputes pass/fail).
+    attempt_no: server-computed max(attempt_no)+1; never client-supplied.
+    status: 'in_progress' | 'submitted' | 'expired'.
+    """
+
+    __tablename__ = "exam_attempts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["exam_id", "company_id"], ["exams.id", "exams.company_id"],
+            name="fk_exam_attempts_exam", ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "exam_id", "applicant_id", "attempt_no", name="uq_exam_attempts_exam_applicant_no"
+        ),
+        CheckConstraint(
+            "score_percent IS NULL OR (score_percent BETWEEN 0 AND 100)",
+            name="ck_exam_attempts_percent_range",
+        ),
+        CheckConstraint(
+            "status IN ('in_progress','submitted','expired')", name="ck_exam_attempts_status"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
+    )
+    exam_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    applicant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("applicants.id", ondelete="CASCADE"), nullable=False
+    )
+    assignment_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("exam_assignments.id", ondelete="RESTRICT"), nullable=True
+    )
+    attempt_no: Mapped[int] = mapped_column(SmallInteger, default=1, nullable=False)
+    answers: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    graded_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    score_raw: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    score_max: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    score_percent: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    status: Mapped[str] = mapped_column(Text, default="in_progress", nullable=False)
+    started_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    submitted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
 
 class DpdpConsent(Base):
