@@ -11,6 +11,7 @@
 
 import { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { requestFullscreen, isFullscreenSupported } from '@/features/interview/useFullscreen';
 import type { Language } from '../types/interview';
 
 interface InterviewIntroProps {
@@ -33,6 +34,9 @@ export default function InterviewIntro({ language, onDone }: InterviewIntroProps
   cameraConsentRef.current = cameraConsent;
   // Guard: prevent onDone being called more than once if multiple events fire.
   const doneCalledRef = useRef(false);
+  // True when a fullscreen request was denied — the interview is gated on
+  // fullscreen, so we surface a retry hint instead of proceeding.
+  const [fsDenied, setFsDenied] = useState(false);
 
   const safeDone = useCallback(() => {
     if (doneCalledRef.current) return;
@@ -40,13 +44,35 @@ export default function InterviewIntro({ language, onDone }: InterviewIntroProps
     onDone(cameraConsentRef.current);
   }, [onDone]);
 
-  function handleBegin() {
+  // Begin: the interview runs in fullscreen, which can ONLY be requested from a
+  // user gesture (this click). If the candidate denies it, we do not start —
+  // they must allow fullscreen and click again.
+  async function handleBegin() {
+    const entered = await requestFullscreen();
+    // Block only if fullscreen is supported but the candidate refused it. On a
+    // browser without the Fullscreen API we proceed (can't enforce it).
+    if (!entered && isFullscreenSupported()) {
+      setFsDenied(true);
+      return;
+    }
+    setFsDenied(false);
     setStarted(true);
     videoRef.current?.play().catch(() => {
       // If play() rejects (e.g. jsdom or permission policy), the video won't
       // play but the UI stays in "started" state. onEnded or onError will
       // still fire if appropriate; otherwise the candidate can click "Skip".
     });
+  }
+
+  // Skip: same fullscreen gate, then go straight to the live session.
+  async function handleSkip() {
+    const entered = await requestFullscreen();
+    if (!entered && isFullscreenSupported()) {
+      setFsDenied(true);
+      return;
+    }
+    setFsDenied(false);
+    safeDone();
   }
 
   // Src: default to English if the language is not one of the known clips.
@@ -116,7 +142,7 @@ export default function InterviewIntro({ language, onDone }: InterviewIntroProps
           {!started && (
             <button
               type="button"
-              onClick={handleBegin}
+              onClick={() => void handleBegin()}
               aria-label={t('interviewIntro.beginLabel')}
               className="w-full flex items-center justify-center gap-2 rounded-xl bg-indigo-500 hover:bg-indigo-400 active:bg-indigo-600 text-white font-semibold px-6 py-3.5 text-base shadow-lg transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:ring-offset-2 focus:ring-offset-indigo-900"
               data-testid="begin-button"
@@ -141,13 +167,28 @@ export default function InterviewIntro({ language, onDone }: InterviewIntroProps
 
           <button
             type="button"
-            onClick={safeDone}
+            onClick={() => void handleSkip()}
             aria-label={t('interviewIntro.skipLabel')}
             className="text-sm text-indigo-300 hover:text-white underline underline-offset-2 transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:ring-offset-2 focus:ring-offset-indigo-900 rounded"
             data-testid="skip-button"
           >
             {t('interviewIntro.skipButton')}
           </button>
+
+          {/* Fullscreen gate: required to start; denial shows a retry hint. */}
+          {fsDenied ? (
+            <p
+              className="text-sm text-amber-300 text-center"
+              role="alert"
+              data-testid="fullscreen-denied"
+            >
+              {t('interviewIntro.fullscreenRequired')}
+            </p>
+          ) : (
+            <p className="text-xs text-indigo-300/80 text-center">
+              {t('interviewIntro.fullscreenNote')}
+            </p>
+          )}
         </div>
       </div>
     </div>

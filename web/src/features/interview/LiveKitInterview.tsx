@@ -13,9 +13,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Mic, MicOff, Video, VideoOff, PhoneOff, Loader2, AlertCircle, Clock, ShieldCheck } from 'lucide-react';
+import { Mic, MicOff, Video, VideoOff, PhoneOff, Loader2, AlertCircle, Clock, ShieldCheck, Maximize } from 'lucide-react';
 import { useLiveKitInterview } from '@/hooks/useLiveKitInterview';
 import { useProctoring } from '@/features/interview/useProctoring';
+import { useFullscreen, requestFullscreen, exitFullscreen } from '@/features/interview/useFullscreen';
 import type { LiveKitStatus } from '@/hooks/useLiveKitInterview';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -68,6 +69,21 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
     videoRef: localVideoRef,
     enabled: cameraConsented && isConnectedForProctoring,
   });
+
+  // Fullscreen guard — the interview runs in fullscreen (entered at the intro
+  // gate). Leaving it mid-interview is a task-switch: useProctoring already emits
+  // a `fullscreen_exit` integrity event on the same `fullscreenchange`, and we
+  // block the session behind a re-entry overlay below until the candidate is back.
+  const { isFullscreen, supported: fullscreenSupported } = useFullscreen();
+
+  // Always drop out of fullscreen when leaving the interview (End, natural
+  // completion, or any unmount) so the candidate isn't stranded fullscreen on
+  // the results page.
+  useEffect(() => {
+    return () => {
+      void exitFullscreen();
+    };
+  }, []);
 
   // Resolve translated status labels — memoised so the object is only rebuilt
   // when the active locale changes, not on every 1-second timer tick.
@@ -214,6 +230,32 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
           <Loader2 className="h-10 w-10 animate-spin text-zinc-400" aria-hidden="true" />
           <p className="text-sm text-zinc-300">{t('interview.connectingOverlayTitle')}</p>
           <p className="text-xs text-zinc-500">{t('interview.connectingOverlaySub')}</p>
+        </div>
+      )}
+
+      {/* ── Fullscreen re-entry gate (z-40, above EVERYTHING) ─────────────── */}
+      {/* Leaving fullscreen mid-interview is treated as a task switch (logged as */}
+      {/* a fullscreen_exit integrity event). The interview is blocked until the   */}
+      {/* candidate returns to fullscreen — re-entry needs a user gesture, so we   */}
+      {/* surface a button rather than forcing it programmatically.                */}
+      {isConnected && fullscreenSupported && !isFullscreen && (
+        <div
+          className={cn(
+            'absolute inset-0 z-40 flex flex-col items-center justify-center',
+            'gap-4 px-6 text-center bg-black/90 backdrop-blur-md',
+          )}
+          role="alertdialog"
+          aria-modal="true"
+        >
+          <AlertCircle className="h-10 w-10 text-amber-400" aria-hidden="true" />
+          <p className="max-w-md text-base font-semibold text-white">
+            {t('interview.fullscreenExitTitle')}
+          </p>
+          <p className="max-w-md text-sm text-zinc-400">{t('interview.fullscreenExitSub')}</p>
+          <Button onClick={() => void requestFullscreen()} variant="secondary" className="gap-2">
+            <Maximize className="h-4 w-4" aria-hidden="true" />
+            {t('interview.returnFullscreen')}
+          </Button>
         </div>
       )}
 

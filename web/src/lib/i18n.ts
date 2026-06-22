@@ -209,6 +209,10 @@ const en = {
       warn_gaze_away: 'Please look at the screen and focus on the interview.',
       warn_multiple_faces: 'More than one person is visible — please be alone for the interview.',
       endButton: 'End',
+      fullscreenExitTitle: 'You left fullscreen',
+      fullscreenExitSub:
+        'The interview must stay in fullscreen, and leaving it is recorded as leaving the interview. Return to fullscreen to continue.',
+      returnFullscreen: 'Return to fullscreen',
     },
     // Interview complete
     interviewComplete: {
@@ -345,6 +349,10 @@ const en = {
       skipButton: 'Skip',
       cameraConsent:
         'Turn on my camera for this interview. Your video stays on your device and is used only for interview integrity — you can turn it off anytime.',
+      fullscreenRequired:
+        'Fullscreen is required to start. Please allow fullscreen, then click Begin again.',
+      fullscreenNote:
+        'The interview runs in fullscreen — leaving fullscreen during the interview is recorded.',
     },
     // Errors
     error: {
@@ -534,6 +542,10 @@ const hi = {
       warn_gaze_away: 'कृपया स्क्रीन की ओर देखें और इंटरव्यू पर ध्यान दें।',
       warn_multiple_faces: 'एक से अधिक व्यक्ति दिख रहे हैं — कृपया इंटरव्यू के लिए अकेले रहें।',
       endButton: 'समाप्त',
+      fullscreenExitTitle: 'आपने फ़ुलस्क्रीन छोड़ दिया',
+      fullscreenExitSub:
+        'इंटरव्यू फ़ुलस्क्रीन में ही चलना चाहिए, और इसे छोड़ना इंटरव्यू छोड़ने के रूप में रिकॉर्ड किया जाता है। जारी रखने के लिए फ़ुलस्क्रीन में लौटें।',
+      returnFullscreen: 'फ़ुलस्क्रीन में लौटें',
     },
     interviewComplete: {
       title: 'इंटरव्यू पूरा हुआ',
@@ -659,6 +671,10 @@ const hi = {
       skipButton: 'छोड़ें',
       cameraConsent:
         'इस इंटरव्यू के लिए मेरा कैमरा चालू करें। आपका वीडियो आपके डिवाइस पर ही रहता है और केवल इंटरव्यू की अखंडता के लिए उपयोग होता है — आप इसे कभी भी बंद कर सकते हैं।',
+      fullscreenRequired:
+        'शुरू करने के लिए फ़ुलस्क्रीन आवश्यक है। कृपया फ़ुलस्क्रीन की अनुमति दें, फिर "इंटरव्यू शुरू करें" पर दोबारा क्लिक करें।',
+      fullscreenNote:
+        'इंटरव्यू फ़ुलस्क्रीन में चलता है — इंटरव्यू के दौरान फ़ुलस्क्रीन छोड़ना रिकॉर्ड किया जाता है।',
     },
     error: {
       generic: 'कुछ गड़बड़ हुई। कृपया फिर कोशिश करें।',
@@ -847,6 +863,10 @@ const te = {
       warn_gaze_away: 'దయచేసి స్క్రీన్‌ను చూడండి, ఇంటర్వ్యూపై దృష్టి పెట్టండి.',
       warn_multiple_faces: 'ఒకరి కంటే ఎక్కువ మంది కనిపిస్తున్నారు — దయచేసి ఇంటర్వ్యూ కోసం ఒంటరిగా ఉండండి.',
       endButton: 'ముగించు',
+      fullscreenExitTitle: 'మీరు ఫుల్‌స్క్రీన్ నుండి బయటకు వచ్చారు',
+      fullscreenExitSub:
+        'ఇంటర్వ్యూ ఫుల్‌స్క్రీన్‌లోనే కొనసాగాలి, దాన్ని వదిలివేయడం ఇంటర్వ్యూ నుండి నిష్క్రమించినట్లు రికార్డ్ చేయబడుతుంది. కొనసాగించడానికి ఫుల్‌స్క్రీన్‌కి తిరిగి రండి.',
+      returnFullscreen: 'ఫుల్‌స్క్రీన్‌కి తిరిగి వెళ్లండి',
     },
     interviewComplete: {
       title: 'ఇంటర్వ్యూ పూర్తయింది',
@@ -972,6 +992,10 @@ const te = {
       skipButton: 'దాటవేయండి',
       cameraConsent:
         'ఈ ఇంటర్వ్యూ కోసం నా కెమెరాను ఆన్ చేయండి. మీ వీడియో మీ పరికరంలోనే ఉంటుంది మరియు ఇంటర్వ్యూ సమగ్రత కోసం మాత్రమే ఉపయోగించబడుతుంది — మీరు దీన్ని ఎప్పుడైనా ఆఫ్ చేయవచ్చు.',
+      fullscreenRequired:
+        'ప్రారంభించడానికి ఫుల్‌స్క్రీన్ అవసరం. దయచేసి ఫుల్‌స్క్రీన్‌ను అనుమతించి, మళ్లీ "ఇంటర్వ్యూ ప్రారంభించండి" క్లిక్ చేయండి.',
+      fullscreenNote:
+        'ఇంటర్వ్యూ ఫుల్‌స్క్రీన్‌లో నడుస్తుంది — ఇంటర్వ్యూ సమయంలో ఫుల్‌స్క్రీన్ వదిలివేయడం రికార్డ్ చేయబడుతుంది.',
     },
     error: {
       generic: 'ఏదో తప్పు జరిగింది. దయచేసి మళ్ళీ ప్రయత్నించండి.',
