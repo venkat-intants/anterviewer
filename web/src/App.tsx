@@ -17,6 +17,8 @@ const Login = lazy(() => import('./pages/Login'));
 const Register = lazy(() => import('./pages/Register'));
 const GoogleCallback = lazy(() => import('./pages/GoogleCallback'));
 const NotFound = lazy(() => import('./pages/NotFound'));
+// Public applicant exam-taking page (magic-link, no login).
+const PublicExam = lazy(() => import('./pages/PublicExam'));
 
 // ── Authenticated shell pages ─────────────────────────────────────────────────
 const Dashboard = lazy(() => import('./pages/Dashboard'));
@@ -42,6 +44,9 @@ const ChangePassword = lazy(() => import('./pages/ChangePassword'));
 const SuperAdminConsole = lazy(() => import('./pages/superadmin/SuperAdminConsole'));
 const HRConsole = lazy(() => import('./pages/hr/HRConsole'));
 const Applicants = lazy(() => import('./pages/hr/Applicants'));
+const Exams = lazy(() => import('./pages/hr/Exams'));
+const ExamEditor = lazy(() => import('./pages/hr/ExamEditor'));
+const ExamResults = lazy(() => import('./pages/hr/ExamResults'));
 
 function PageLoader() {
   return (
@@ -81,6 +86,8 @@ export default function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
           <Route path="/auth/google/callback" element={<GoogleCallback />} />
+          {/* Public applicant exam — magic-link token in the URL #fragment */}
+          <Route path="/exam" element={<PublicExam />} />
 
           {/* Authenticated routes rendered INSIDE AppShell */}
           <Route element={<ProtectedRoute />}>
@@ -113,6 +120,9 @@ export default function App() {
             <Route element={<ShellLayout />}>
               <Route path="/hr" element={<HRConsole />} />
               <Route path="/hr/applicants" element={<Applicants />} />
+              <Route path="/hr/exams" element={<Exams />} />
+              <Route path="/hr/exams/:examId" element={<ExamEditor />} />
+              <Route path="/hr/exams/:examId/results" element={<ExamResults />} />
             </Route>
           </Route>
 

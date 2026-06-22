@@ -34,6 +34,8 @@ const STAGES: Stage[] = [
     title: 'MCQ exam',
     desc: 'Author a timed exam, set a pass threshold, auto-grade applicants.',
     phase: 'Phase 2',
+    to: '/hr/exams',
+    live: true,
   },
   {
     icon: <Video className="h-5 w-5" />,

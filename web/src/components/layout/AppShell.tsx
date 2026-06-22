@@ -306,6 +306,14 @@ function MobileNav() {
                 <FileSearch className="h-4 w-4" />
                 Applicants
               </button>
+              <button
+                type="button"
+                onClick={() => closeAndNavigate('/hr/exams')}
+                className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <ClipboardList className="h-4 w-4" />
+                Exams
+              </button>
             </>
           )}
         </nav>
@@ -395,6 +403,11 @@ function TopBar() {
                 to="/hr/applicants"
                 label="Applicants"
                 icon={<FileSearch className="h-4 w-4" />}
+              />
+              <PlainNavLink
+                to="/hr/exams"
+                label="Exams"
+                icon={<ClipboardList className="h-4 w-4" />}
               />
             </>
           )}
