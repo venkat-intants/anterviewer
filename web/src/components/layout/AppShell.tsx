@@ -323,6 +323,14 @@ function MobileNav() {
                 <Video className="h-4 w-4" />
                 Interviews
               </button>
+              <button
+                type="button"
+                onClick={() => closeAndNavigate('/hr/pipeline')}
+                className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <TrendingUp className="h-4 w-4" />
+                Pipeline
+              </button>
             </>
           )}
         </nav>
@@ -422,6 +430,11 @@ function TopBar() {
                 to="/hr/interviews"
                 label="Interviews"
                 icon={<Video className="h-4 w-4" />}
+              />
+              <PlainNavLink
+                to="/hr/pipeline"
+                label="Pipeline"
+                icon={<TrendingUp className="h-4 w-4" />}
               />
             </>
           )}

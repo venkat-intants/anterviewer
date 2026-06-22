@@ -45,6 +45,7 @@ from app.routers.exam_take import router as exam_take_router
 from app.routers.hr_applicants import router as hr_applicants_router
 from app.routers.hr_exams import router as hr_exams_router
 from app.routers.hr_interviews import router as hr_interviews_router
+from app.routers.hr_pipeline import router as hr_pipeline_router
 from app.routers.interview_take import router as interview_take_router
 from app.routers.jd import router as jd_router
 from app.routers.jobs import router as jobs_router
@@ -191,6 +192,7 @@ app.include_router(hr_exams_router)
 app.include_router(exam_take_router)
 app.include_router(hr_interviews_router)
 app.include_router(interview_take_router)
+app.include_router(hr_pipeline_router)
 app.include_router(consent_router)
 app.include_router(jobs_router)
 app.include_router(resume_router)

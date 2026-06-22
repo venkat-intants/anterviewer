@@ -41,7 +41,7 @@ router = APIRouter(prefix="/hr", tags=["hr-applicants"])
 
 _MAX_RESUME_BYTES = 5 * 1024 * 1024  # 5 MB
 _MAX_BULK_FILES = 25  # per batch; large batches should move to an async queue (Phase 5)
-_VALID_STATUSES = {"new", "shortlisted", "rejected"}
+_VALID_STATUSES = {"new", "shortlisted", "rejected", "interviewed", "hired"}
 
 DbSessionDep = Annotated[AsyncSession, Depends(get_db_session)]
 

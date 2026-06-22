@@ -50,6 +50,10 @@ const Exams = lazy(() => import('./pages/hr/Exams'));
 const ExamEditor = lazy(() => import('./pages/hr/ExamEditor'));
 const ExamResults = lazy(() => import('./pages/hr/ExamResults'));
 const HRInterviews = lazy(() => import('./pages/hr/HRInterviews'));
+const HRPipeline = lazy(() => import('./pages/hr/HRPipeline'));
+const HRAnalyticsPage = lazy(() =>
+  import('./pages/hr/HRAnalytics').then((m) => ({ default: m.HRAnalyticsPage })),
+);
 
 function PageLoader() {
   return (
@@ -129,6 +133,8 @@ export default function App() {
               <Route path="/hr/exams/:examId" element={<ExamEditor />} />
               <Route path="/hr/exams/:examId/results" element={<ExamResults />} />
               <Route path="/hr/interviews" element={<HRInterviews />} />
+              <Route path="/hr/pipeline" element={<HRPipeline />} />
+              <Route path="/hr/analytics" element={<HRAnalyticsPage />} />
             </Route>
           </Route>
 

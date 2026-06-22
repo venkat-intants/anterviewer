@@ -50,6 +50,8 @@ const STAGES: Stage[] = [
     title: 'Results & decision',
     desc: 'One pipeline view: resume → exam → interview → hire decision.',
     phase: 'Phase 4',
+    to: '/hr/pipeline',
+    live: true,
   },
 ];
 
