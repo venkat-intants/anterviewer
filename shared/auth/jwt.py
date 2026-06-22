@@ -40,12 +40,18 @@ def issue_access_token(
     *,
     issuer: str = _DEFAULT_ISSUER,
     audience: str = _DEFAULT_AUDIENCE,
+    extra_claims: dict[str, Any] | None = None,
 ) -> str:
     """Sign and return a JWT access token.
 
     Includes required S3-005 claims: iss, aud, jti.
     The jti (JWT ID) is a fresh uuid4.hex per call — used for replay prevention
     via a Redis blocklist in interview_core.
+
+    extra_claims: optional additional claims (e.g. a ``session_id`` binding for a
+        guest interview token). They are added via setdefault so they can NEVER
+        override a standard claim (sub/roles/iss/aud/exp/jti) — defence against a
+        caller accidentally forging identity through extra_claims.
     """
     now = datetime.now(tz=UTC)
     claims: dict[str, Any] = {
@@ -57,6 +63,8 @@ def issue_access_token(
         "aud": audience,
         "jti": uuid.uuid4().hex,
     }
+    for key, value in (extra_claims or {}).items():
+        claims.setdefault(key, value)
     result: str = jwt.encode(claims, secret, algorithm=algorithm)
     return result
 

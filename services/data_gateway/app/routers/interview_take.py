@@ -1,0 +1,304 @@
+"""Applicant interview magic-link redemption — HR workflow Phase 3 (PUBLIC, no login).
+
+An applicant opens an interview magic link (token in the URL #fragment, sent as the
+X-Interview-Token header) and is dropped into the EXISTING avatar interview without
+an account. LAZY provisioning happens here on first redeem:
+  1. mint a 'guest_candidate' users row (password_hash NULL, company pinned, the
+     applicant's resume_text copied so the worker grounds the prompt),
+  2. record the applicant's OWN DPDP consent (they tick a box on the landing page),
+  3. create the interview sessions row for that guest,
+  4. issue a SHORT-LIVED guest access token bound to that one session_id.
+
+HARD GUARANTEES:
+  - Every failure is a uniform 404 (never reveals existence; folds not-yet-scheduled in).
+  - Single-use: a consumed invite 404s on re-redeem.
+  - The guest token's role is 'guest_candidate' ONLY (rejected by candidate/HR routes)
+    and carries a session_id claim interview_core binds to one room.
+  - Consent is the applicant's own act (consent_granted flag) — no server-asserted consent.
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import UTC, datetime
+from typing import Annotated
+
+import structlog
+from fastapi import APIRouter, Header, HTTPException, status
+from pydantic import BaseModel
+from shared.auth.jwt import issue_access_token
+from sqlalchemy import or_, select, text
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import settings
+from app.interview_link import hash_interview_token
+from app.models import Applicant, InterviewInvite, Job
+from app.routers.hr_applicants import DbSessionDep
+
+log = structlog.get_logger(__name__)
+
+router = APIRouter(prefix="/interview-invite", tags=["interview-take"])
+
+_NOT_AVAILABLE = HTTPException(
+    status_code=status.HTTP_404_NOT_FOUND, detail="Interview link not available."
+)
+_DEFAULT_AVATAR = "anna"  # hardcoded — no data_gateway -> interview_core import (m5)
+
+
+class InviteInfoOut(BaseModel):
+    applicant_name: str
+    job_title: str
+    level: str
+    language: str
+    status: str
+    already_completed: bool
+    scheduled_at: str | None
+
+
+class RedeemIn(BaseModel):
+    consent_granted: bool = False
+
+
+class RedeemOut(BaseModel):
+    session_id: str
+    access_token: str
+    language: str
+    user_id: str
+    full_name: str
+    email: str | None
+    roles: list[str]
+
+
+async def _scorecard_exists(db: AsyncSession, session_id: uuid.UUID | None) -> bool:
+    if session_id is None:
+        return False
+    row = await db.scalar(
+        text("SELECT 1 FROM scorecards WHERE session_id = :sid LIMIT 1"), {"sid": session_id}
+    )
+    return row is not None
+
+
+@router.get("", response_model=InviteInfoOut)
+async def preview_invite(
+    db: DbSessionDep,
+    x_interview_token: Annotated[str | None, Header(alias="X-Interview-Token")] = None,
+) -> InviteInfoOut:
+    """Intro-card preview for the applicant. Never issues a token. 404 if unknown."""
+    if not x_interview_token:
+        raise _NOT_AVAILABLE
+    th = hash_interview_token(x_interview_token, settings.interview_link_secret)
+    inv = await db.scalar(
+        select(InterviewInvite).where(
+            InterviewInvite.token_hash == th, InterviewInvite.deleted_at.is_(None)
+        )
+    )
+    if inv is None:
+        raise _NOT_AVAILABLE
+    applicant = await db.scalar(
+        select(Applicant).where(
+            Applicant.id == inv.applicant_id, Applicant.company_id == inv.company_id
+        )
+    )
+    job = await db.scalar(select(Job).where(Job.id == inv.job_id))
+    if applicant is None or job is None:
+        raise _NOT_AVAILABLE
+    completed = inv.status == "completed" or await _scorecard_exists(db, inv.session_id)
+    return InviteInfoOut(
+        applicant_name=applicant.full_name,
+        job_title=job.title,
+        level=job.level,
+        language=inv.language,
+        status=inv.status,
+        already_completed=completed,
+        scheduled_at=inv.scheduled_at.isoformat() if inv.scheduled_at else None,
+    )
+
+
+@router.post("/redeem", response_model=RedeemOut)
+async def redeem_invite(
+    body: RedeemIn,
+    db: DbSessionDep,
+    x_interview_token: Annotated[str | None, Header(alias="X-Interview-Token")] = None,
+) -> RedeemOut:
+    """Redeem the magic link: provision guest+session, record consent, issue token."""
+    if not x_interview_token:
+        raise _NOT_AVAILABLE
+    now = datetime.now(tz=UTC)
+    th = hash_interview_token(x_interview_token, settings.interview_link_secret)
+
+    # Resolve + LOCK the invite. Uniform 404 on any failure; scheduled_at folded in
+    # (an early token simply 404s — no 425 enumeration). with_for_update serializes
+    # concurrent redeems of the SAME token (the loser re-reads status='consumed' -> 404).
+    inv = await db.scalar(
+        select(InterviewInvite)
+        .where(
+            InterviewInvite.token_hash == th,
+            InterviewInvite.deleted_at.is_(None),
+            InterviewInvite.status.notin_(("revoked", "expired", "completed", "consumed")),
+            InterviewInvite.expires_at > now,
+            or_(InterviewInvite.scheduled_at.is_(None), InterviewInvite.scheduled_at <= now),
+        )
+        .with_for_update()
+    )
+    if inv is None:
+        raise _NOT_AVAILABLE
+
+    # Tenant-scoped applicant + active job (M4: a tenant-owned job must match company).
+    applicant = await db.scalar(
+        select(Applicant).where(
+            Applicant.id == inv.applicant_id,
+            Applicant.company_id == inv.company_id,
+            Applicant.deleted_at.is_(None),
+        )
+    )
+    job = await db.scalar(select(Job).where(Job.id == inv.job_id, Job.is_active.is_(True)))
+    if applicant is None or job is None:
+        raise _NOT_AVAILABLE
+    if job.created_by_user_id is not None:
+        owner_company = await db.scalar(
+            text("SELECT company_id FROM users WHERE id = :uid"),
+            {"uid": job.created_by_user_id},
+        )
+        if owner_company is not None and owner_company != inv.company_id:
+            raise _NOT_AVAILABLE
+
+    # Consent is the applicant's OWN act (landing-page checkbox).
+    if not body.consent_granted:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Consent is required to begin the interview.",
+        )
+
+    # --- provision-or-reuse the guest user (one per applicant) ---
+    guest_user_id = applicant.user_id
+    if guest_user_id is None:
+        guest_user_id = uuid.uuid4()
+        guest_email = f"invite+{guest_user_id}@guest.intants.local"
+        try:
+            await db.execute(
+                text(
+                    "INSERT INTO users (id, email, password_hash, full_name, company_id, "
+                    "resume_text, preferred_language, is_active, must_change_password, "
+                    "created_at, updated_at) VALUES "
+                    "(:id, :email, NULL, :fn, :cid, :rt, :lang, true, false, :now, :now)"
+                ),
+                {
+                    "id": guest_user_id, "email": guest_email, "fn": applicant.full_name,
+                    "cid": inv.company_id, "rt": applicant.resume_text or "",
+                    "lang": inv.language, "now": now,
+                },
+            )
+            await db.execute(
+                text(
+                    "INSERT INTO user_roles (user_id, role_id, assigned_at) VALUES "
+                    "(:uid, (SELECT id FROM roles WHERE name = 'guest_candidate'), :now)"
+                ),
+                {"uid": guest_user_id, "now": now},
+            )
+            await db.execute(
+                text("UPDATE applicants SET user_id = :uid, updated_at = :now WHERE id = :aid"),
+                {"uid": guest_user_id, "aid": applicant.id, "now": now},
+            )
+            await db.flush()
+        except IntegrityError:
+            # Lost a race (uq_applicants_user_id) — reuse the winner's guest user.
+            await db.rollback()
+            guest_user_id = await db.scalar(
+                select(Applicant.user_id).where(Applicant.id == inv.applicant_id)
+            )
+            if guest_user_id is None:
+                raise _NOT_AVAILABLE from None
+            # Re-lock the invite after rollback dropped our transaction.
+            inv = await db.scalar(
+                select(InterviewInvite)
+                .where(InterviewInvite.id == inv.id, InterviewInvite.status == "invited")
+                .with_for_update()
+            )
+            if inv is None:
+                raise _NOT_AVAILABLE from None
+
+    # --- record the applicant's DPDP consent against the guest user (idempotent) ---
+    has_consent = await db.scalar(
+        text(
+            "SELECT 1 FROM dpdp_consent_ledger WHERE user_id = :uid "
+            "AND consent_type = 'interview_voice_recording' AND purpose = 'interview' "
+            "AND granted = TRUE AND revoked_at IS NULL LIMIT 1"
+        ),
+        {"uid": guest_user_id},
+    )
+    if not has_consent:
+        await db.execute(
+            text(
+                "INSERT INTO dpdp_consent_ledger "
+                "(id, user_id, consent_type, granted, granted_at, purpose, evidence) VALUES "
+                "(:id, :uid, 'interview_voice_recording', true, :now, 'interview', "
+                "CAST(:ev AS jsonb))"
+            ),
+            {
+                "id": uuid.uuid4(), "uid": guest_user_id, "now": now,
+                "ev": json.dumps(
+                    {
+                        "source": "interview_invite_landing",
+                        "applicant_id": str(applicant.id),
+                        "company_id": str(inv.company_id),
+                        "consented_at_iso": now.isoformat(),
+                    }
+                ),
+            },
+        )
+
+    # --- provision-or-reuse the session ---
+    session_id = inv.session_id
+    if session_id is None:
+        session_id = uuid.uuid4()
+        avatar = inv.avatar_id or _DEFAULT_AVATAR
+        await db.execute(
+            text(
+                "INSERT INTO sessions (id, user_id, job_id, language, status, started_at, "
+                'metadata, presenter_id, created_at, updated_at) VALUES '
+                "(:id, :uid, :jid, :lang, 'created', :now, CAST(:meta AS jsonb), :pid, :now, :now)"
+            ),
+            {
+                "id": session_id, "uid": guest_user_id, "jid": inv.job_id,
+                "lang": inv.language, "now": now, "pid": avatar,
+                "meta": json.dumps(
+                    {"source": "hr_invite", "applicant_id": str(applicant.id),
+                     "company_id": str(inv.company_id)}
+                ),
+            },
+        )
+
+    # --- single-use flip + bind ---
+    inv.guest_user_id = guest_user_id
+    inv.session_id = session_id
+    inv.status = "consumed"
+    inv.consumed_at = now
+    inv.updated_at = now
+    await db.commit()
+
+    # Short-lived guest token: role guest_candidate ONLY + session_id binding claim.
+    access_token = issue_access_token(
+        str(guest_user_id),
+        ["guest_candidate"],
+        settings.jwt_secret,
+        algorithm=settings.jwt_algorithm,
+        issuer=settings.jwt_issuer,
+        audience=settings.jwt_audience,
+        extra_claims={"session_id": str(session_id)},
+    )
+    log.info(
+        "interview.invite.redeemed",
+        company_id=str(inv.company_id),
+        session_id=str(session_id),
+    )
+    return RedeemOut(
+        session_id=str(session_id),
+        access_token=access_token,
+        language=inv.language,
+        user_id=str(guest_user_id),
+        full_name=applicant.full_name,
+        email=None,
+        roles=["guest_candidate"],
+    )

@@ -85,6 +85,16 @@ class Settings(BaseSettings):
     # Cap on the submitted-answers payload size (DoS guard).
     exam_max_answers: int = 500
 
+    # --- Interview invite magic-link (HR workflow Phase 3) ---
+    # SEPARATE signing secret — NEVER reuse jwt_secret OR exam_link_secret. A
+    # leaked interview secret must forge neither user sessions nor exam links.
+    interview_link_secret: str
+    # Public base URL the candidate's browser hits; mint builds {base}/interview-invite#<token>.
+    interview_link_base_url: str = "http://localhost:5173"
+    # Magic-link lifetime in HOURS. Short — the issued guest access token cannot be
+    # revoked once minted (no jti denylist), so the link must die fast + be single-use.
+    interview_link_ttl_hours: int = 48
+
     # --- DPDP consent ledger (S3-011) ---
     # sha256(raw_ip + consent_ip_salt) is stored instead of raw IP.
     # Required — no default — forces explicit secret management.

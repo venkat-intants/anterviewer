@@ -44,6 +44,8 @@ from app.routers.consent import router as consent_router
 from app.routers.exam_take import router as exam_take_router
 from app.routers.hr_applicants import router as hr_applicants_router
 from app.routers.hr_exams import router as hr_exams_router
+from app.routers.hr_interviews import router as hr_interviews_router
+from app.routers.interview_take import router as interview_take_router
 from app.routers.jd import router as jd_router
 from app.routers.jobs import router as jobs_router
 from app.routers.resume import router as resume_router
@@ -176,7 +178,9 @@ app.add_middleware(
     # CSRF pattern on /auth/refresh — it MUST appear here so the preflight passes.
     # X-Exam-Token: the applicant's magic-link token, sent by the public exam
     # take page (no login) on /exam calls.
-    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "X-Exam-Token"],
+    allow_headers=[
+        "Authorization", "Content-Type", "X-CSRF-Token", "X-Exam-Token", "X-Interview-Token"
+    ],
 )
 
 app.include_router(health_router)
@@ -185,6 +189,8 @@ app.include_router(admin_hr_router)
 app.include_router(hr_applicants_router)
 app.include_router(hr_exams_router)
 app.include_router(exam_take_router)
+app.include_router(hr_interviews_router)
+app.include_router(interview_take_router)
 app.include_router(consent_router)
 app.include_router(jobs_router)
 app.include_router(resume_router)

@@ -150,6 +150,10 @@ class Applicant(Base):
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
+    # Phase 3: the minted guest_candidate user (erasure trace + redeem idempotency).
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     full_name: Mapped[str] = mapped_column(Text, nullable=False)
     email: Mapped[str | None] = mapped_column(Text, nullable=True)
     target_job_title: Mapped[str] = mapped_column(Text, nullable=False)
@@ -356,6 +360,66 @@ class ExamAttempt(Base):
     status: Mapped[str] = mapped_column(Text, default="in_progress", nullable=False)
     started_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
     submitted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class InterviewInvite(Base):
+    """HR invitation that drops an applicant into the EXISTING avatar interview
+    (HR workflow Phase 3, LAZY-PROVISION model).
+
+    At mint time only this opaque-token row exists. On the applicant's FIRST
+    redeem we create a 'guest_candidate' users row (password_hash NULL, company_id
+    pinned, the applicant's resume_text copied so the worker grounds the prompt),
+    a sessions row for that guest, and the applicant's own DPDP consent
+    (purpose='interview', consent_type='interview_voice_recording'). token_hash =
+    hmac_sha256(raw, interview_link_secret); the raw token lives only in the URL.
+
+    status: invited -> consumed (single-use, set on first redeem) -> completed
+            (a scorecard exists for the session) | expired | revoked.
+    No relationships (explicit select() per repo convention); DB CASCADE handles cleanup.
+    """
+
+    __tablename__ = "interview_invites"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["applicant_id", "company_id"], ["applicants.id", "applicants.company_id"],
+            name="fk_interview_invites_applicant", ondelete="CASCADE",
+        ),
+        UniqueConstraint("token_hash", name="uq_interview_invites_token_hash"),
+        UniqueConstraint("session_id", name="uq_interview_invites_session"),
+        UniqueConstraint("id", "company_id", name="uq_interview_invites_id_company"),
+        CheckConstraint(
+            "status IN ('invited','consumed','completed','expired','revoked')",
+            name="ck_interview_invites_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
+    )
+    applicant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("jobs.id", ondelete="RESTRICT"), nullable=False
+    )
+    guest_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True
+    )
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    language: Mapped[str] = mapped_column(Text, default="en", nullable=False)
+    avatar_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    scheduled_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(Text, default="invited", nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)

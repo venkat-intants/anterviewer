@@ -61,3 +61,23 @@ async def get_current_user(
 
 
 CurrentUserDep = Annotated[dict[str, Any], Depends(get_current_user)]
+
+
+async def get_non_guest_user(current_user: CurrentUserDep) -> dict[str, Any]:
+    """Reject a token whose ONLY role is ``guest_candidate`` (Phase 3, B7).
+
+    A magic-link interview guest is bound to exactly one pre-created session; it
+    must never be able to self-mint or list sessions (which would let a leaked
+    guest token amplify cost / enumerate other sessions). Any token carrying a
+    real role alongside guest_candidate (shouldn't happen) still passes.
+    """
+    roles = current_user.get("roles") or []
+    if "guest_candidate" in roles and not (set(roles) - {"guest_candidate"}):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Guest interview tokens cannot create or list sessions.",
+        )
+    return current_user
+
+
+NonGuestUserDep = Annotated[dict[str, Any], Depends(get_non_guest_user)]

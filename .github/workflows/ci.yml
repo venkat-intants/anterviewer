@@ -136,6 +136,7 @@ jobs:
       # Exam magic-link HMAC secret (Phase 2; non-secret CI placeholder)
       # -----------------------------------------------------------------------
       EXAM_LINK_SECRET: ci-exam-link-secret-placeholder-not-real-32-hex
+      INTERVIEW_LINK_SECRET: ci-interview-link-secret-placeholder-not-real-32hex
 
       # -----------------------------------------------------------------------
       # Trusted proxy count (0 = no reverse proxy in CI)
@@ -472,6 +473,7 @@ jobs:
 
       CONSENT_IP_SALT: ci-consent-ip-salt-placeholder-not-real-32-hex
       EXAM_LINK_SECRET: ci-exam-link-secret-placeholder-not-real-32-hex
+      INTERVIEW_LINK_SECRET: ci-interview-link-secret-placeholder-not-real-32hex
       TRUSTED_PROXY_COUNT: "0"
 
       # LLM — real key required for E2E (avatar + voice pipeline)

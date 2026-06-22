@@ -78,6 +78,19 @@ async def create_room_token(
 
     user_id_str: str = current_user["sub"]
 
+    # 0. Guest binding (Phase 3, B7): a magic-link guest token carries a
+    #    session_id claim and may join ONLY that one session — even though the
+    #    ownership check below would also pass (the guest IS the session's user),
+    #    this binds the token at the transport layer so a guest token can never be
+    #    pointed at another session id.
+    roles = current_user.get("roles") or []
+    if "guest_candidate" in roles and current_user.get("session_id") != str(session_id):
+        log.info("rooms.token.guest_session_mismatch", session_id=str(session_id))
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This guest token is not valid for this session.",
+        )
+
     # 1. Session must exist.
     result = await db.execute(
         select(InterviewSession).where(InterviewSession.id == session_id)

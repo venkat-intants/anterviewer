@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.avatars import resolve_avatar, valid_avatar_ids
 from app.consent_guard import has_active_consent
 from app.database import get_db_session
-from app.dependencies import CurrentUserDep
+from app.dependencies import NonGuestUserDep
 from app.models import Job
 from app.models import Session as InterviewSession
 
@@ -126,7 +126,7 @@ class SessionListResponse(BaseModel):
     ),
 )
 async def list_sessions(
-    current_user: CurrentUserDep,
+    current_user: NonGuestUserDep,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     page: int = Query(default=1, ge=1, description="Page number, 1-indexed."),
     per_page: int = Query(default=20, ge=1, le=100, description="Items per page (max 100)."),
@@ -274,7 +274,7 @@ async def list_sessions(
 )
 async def create_session(
     body: CreateSessionRequest,
-    current_user: CurrentUserDep,
+    current_user: NonGuestUserDep,
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> CreateSessionResponse:
     """Create a new interview session for the authenticated user.
