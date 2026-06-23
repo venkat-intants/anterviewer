@@ -11,7 +11,9 @@ an account. LAZY provisioning happens here on first redeem:
 
 HARD GUARANTEES:
   - Every failure is a uniform 404 (never reveals existence; folds not-yet-scheduled in).
-  - Single-use: a consumed invite 404s on re-redeem.
+  - Re-enterable within validity: a started ('consumed') invite may be redeemed again to
+    reconnect to the SAME session until a scorecard exists or the link expires; the join
+    window gates only the FIRST start (closing the tab / a mid-interview drop can rejoin).
   - The guest token's role is 'guest_candidate' ONLY (rejected by candidate/HR routes)
     and carries a session_id claim interview_core binds to one room.
   - Consent is the applicant's own act (consent_granted flag) — no server-asserted consent.
@@ -21,14 +23,14 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import structlog
 from fastapi import APIRouter, Header, HTTPException, status
 from pydantic import BaseModel
 from shared.auth.jwt import issue_access_token
-from sqlalchemy import or_, select, text
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -80,6 +82,51 @@ async def _scorecard_exists(db: AsyncSession, session_id: uuid.UUID | None) -> b
     return row is not None
 
 
+async def _session_completed(db: AsyncSession, session_id: uuid.UUID | None) -> bool:
+    """True once the interview itself is finished — the worker flips sessions.status to
+    'completed' at interview-end, BEFORE scoring runs. Keying off this (in addition to
+    the scorecard) blocks re-entry during the scoring lag and even if scoring later
+    fails (no scorecard is ever written). Deliberately NOT triggered by 'abandoned' /
+    'in_progress' — a mid-interview drop MUST stay reconnectable."""
+    if session_id is None:
+        return False
+    st = await db.scalar(text("SELECT status FROM sessions WHERE id = :sid"), {"sid": session_id})
+    return st == "completed"
+
+
+def _issue_guest_token(
+    inv: InterviewInvite,
+    session_id: uuid.UUID,
+    guest_user_id: uuid.UUID,
+    full_name: str,
+) -> RedeemOut:
+    """Mint the short-lived guest token (role guest_candidate ONLY, session_id-bound)
+    and assemble the redeem response. Shared by the first-start and reconnect paths."""
+    access_token = issue_access_token(
+        str(guest_user_id),
+        ["guest_candidate"],
+        settings.jwt_secret,
+        algorithm=settings.jwt_algorithm,
+        issuer=settings.jwt_issuer,
+        audience=settings.jwt_audience,
+        extra_claims={"session_id": str(session_id)},
+    )
+    log.info(
+        "interview.invite.redeemed",
+        company_id=str(inv.company_id),
+        session_id=str(session_id),
+    )
+    return RedeemOut(
+        session_id=str(session_id),
+        access_token=access_token,
+        language=inv.language,
+        user_id=str(guest_user_id),
+        full_name=full_name,
+        email=None,
+        roles=["guest_candidate"],
+    )
+
+
 @router.get("", response_model=InviteInfoOut)
 async def preview_invite(
     db: DbSessionDep,
@@ -122,23 +169,33 @@ async def redeem_invite(
     db: DbSessionDep,
     x_interview_token: Annotated[str | None, Header(alias="X-Interview-Token")] = None,
 ) -> RedeemOut:
-    """Redeem the magic link: provision guest+session, record consent, issue token."""
+    """Redeem the magic link.
+
+    FIRST start (status 'invited'): provision guest+session, record consent, flip to
+    'consumed'. Gated by the join window (settings.interview_join_window_minutes),
+    anchored at scheduled_at — or at this first click when the invite is unscheduled.
+
+    RECONNECT (status 'consumed', not yet scored): reuse the same guest+session and
+    re-issue a fresh guest token. NOT window-gated — supports closing the tab or a
+    mid-interview drop, until a scorecard exists or the link hard-expires.
+    """
     if not x_interview_token:
         raise _NOT_AVAILABLE
     now = datetime.now(tz=UTC)
     th = hash_interview_token(x_interview_token, settings.interview_link_secret)
 
-    # Resolve + LOCK the invite. Uniform 404 on any failure; scheduled_at folded in
-    # (an early token simply 404s — no 425 enumeration). with_for_update serializes
-    # concurrent redeems of the SAME token (the loser re-reads status='consumed' -> 404).
+    # Resolve + LOCK the invite. Allow 'invited' (first start) AND 'consumed' (reconnect
+    # to an already-started session); exclude revoked/expired/completed and hard-expired
+    # links. Uniform 404 on any miss (anti-enumeration). The scheduled_at / window check
+    # moves into the first-start branch below. with_for_update serializes concurrent
+    # redeems of the SAME token.
     inv = await db.scalar(
         select(InterviewInvite)
         .where(
             InterviewInvite.token_hash == th,
             InterviewInvite.deleted_at.is_(None),
-            InterviewInvite.status.notin_(("revoked", "expired", "completed", "consumed")),
+            InterviewInvite.status.in_(("invited", "consumed")),
             InterviewInvite.expires_at > now,
-            or_(InterviewInvite.scheduled_at.is_(None), InterviewInvite.scheduled_at <= now),
         )
         .with_for_update()
     )
@@ -164,12 +221,39 @@ async def redeem_invite(
         if owner_company is not None and owner_company != inv.company_id:
             raise _NOT_AVAILABLE
 
-    # Consent is the applicant's OWN act (landing-page checkbox).
+    # A finished interview is never re-enterable. "Finished" = the worker marked the
+    # session 'completed' (fires at interview-end, before scoring) OR a scorecard exists
+    # (durable backstop if the status write failed or scoring lagged). A mid-interview
+    # 'abandoned' is NOT finished — it stays reconnectable (the whole point of this flow).
+    if await _session_completed(db, inv.session_id) or await _scorecard_exists(db, inv.session_id):
+        raise _NOT_AVAILABLE
+
+    # Consent is the applicant's OWN act (landing-page checkbox) — required on every redeem.
     if not body.consent_granted:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Consent is required to begin the interview.",
         )
+
+    # ---- RECONNECT: already started ('consumed'), not finished, link still valid.
+    # NOT gated by the join window — a candidate who closed the tab or dropped mid-
+    # interview rejoins the SAME session until it completes or the link hard-expires.
+    if inv.status == "consumed":
+        gid = inv.guest_user_id
+        sid = inv.session_id
+        if gid is None or sid is None:
+            raise _NOT_AVAILABLE  # malformed 'consumed' row — fail closed
+        inv.updated_at = now
+        await db.commit()
+        return _issue_guest_token(inv, sid, gid, applicant.full_name)
+
+    # ---- FIRST START (status 'invited'). The join window gates first-start ONLY,
+    # anchored at scheduled_at; an unscheduled invite anchors at this first click (so its
+    # first start is always in-window). Both bounds fold into the uniform 404 (anti-enum).
+    if inv.scheduled_at is not None:
+        window = timedelta(minutes=settings.interview_join_window_minutes)
+        if now < inv.scheduled_at or now > inv.scheduled_at + window:
+            raise _NOT_AVAILABLE
 
     # --- provision-or-reuse the guest user (one per applicant) ---
     guest_user_id = applicant.user_id
@@ -270,35 +354,12 @@ async def redeem_invite(
             },
         )
 
-    # --- single-use flip + bind ---
+    # --- start flip + bind. status 'consumed' now means "started" (reconnectable),
+    # NOT "dead" — a re-redeem returns to this same session until it completes/expires.
     inv.guest_user_id = guest_user_id
     inv.session_id = session_id
     inv.status = "consumed"
     inv.consumed_at = now
     inv.updated_at = now
     await db.commit()
-
-    # Short-lived guest token: role guest_candidate ONLY + session_id binding claim.
-    access_token = issue_access_token(
-        str(guest_user_id),
-        ["guest_candidate"],
-        settings.jwt_secret,
-        algorithm=settings.jwt_algorithm,
-        issuer=settings.jwt_issuer,
-        audience=settings.jwt_audience,
-        extra_claims={"session_id": str(session_id)},
-    )
-    log.info(
-        "interview.invite.redeemed",
-        company_id=str(inv.company_id),
-        session_id=str(session_id),
-    )
-    return RedeemOut(
-        session_id=str(session_id),
-        access_token=access_token,
-        language=inv.language,
-        user_id=str(guest_user_id),
-        full_name=applicant.full_name,
-        email=None,
-        roles=["guest_candidate"],
-    )
+    return _issue_guest_token(inv, session_id, guest_user_id, applicant.full_name)

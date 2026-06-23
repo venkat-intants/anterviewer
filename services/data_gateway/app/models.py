@@ -376,8 +376,11 @@ class InterviewInvite(Base):
     (purpose='interview', consent_type='interview_voice_recording'). token_hash =
     hmac_sha256(raw, interview_link_secret); the raw token lives only in the URL.
 
-    status: invited -> consumed (single-use, set on first redeem) -> completed
-            (a scorecard exists for the session) | expired | revoked.
+    status: invited -> consumed (set on the FIRST start; thereafter re-enterable so the
+            candidate can reconnect to the same session — NOT single-use — until a
+            scorecard exists or the link expires) -> completed (a scorecard exists for
+            the session) | expired | revoked. The join window
+            (settings.interview_join_window_minutes) gates only the first start.
     No relationships (explicit select() per repo convention); DB CASCADE handles cleanup.
     """
 

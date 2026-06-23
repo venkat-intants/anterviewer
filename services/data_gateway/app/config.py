@@ -92,8 +92,14 @@ class Settings(BaseSettings):
     # Public base URL the candidate's browser hits; mint builds {base}/interview-invite#<token>.
     interview_link_base_url: str = "http://localhost:5173"
     # Magic-link lifetime in HOURS. Short — the issued guest access token cannot be
-    # revoked once minted (no jti denylist), so the link must die fast + be single-use.
+    # revoked once minted (no jti denylist), so the link must die fast.
     interview_link_ttl_hours: int = 48
+    # Join window (MINUTES) for the FIRST start, measured from scheduled_at (or from
+    # the first click when the invite is unscheduled). Within the window the link may
+    # be redeemed repeatedly; after it closes a never-started invite is dead. Once
+    # started, the candidate may RECONNECT to the same session until it completes or
+    # the link hard-expires — the window gates first-start only, not reconnects.
+    interview_join_window_minutes: int = 10
 
     # --- DPDP consent ledger (S3-011) ---
     # sha256(raw_ip + consent_ip_salt) is stored instead of raw IP.
