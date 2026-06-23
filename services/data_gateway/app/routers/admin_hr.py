@@ -157,8 +157,10 @@ async def list_companies(current_user: SuperAdminDep, db: DbSessionDep) -> list[
         await db.execute(
             text(
                 "SELECT c.id, c.name, c.slug, c.is_active, c.created_at, "
-                "(SELECT count(*) FROM users u WHERE u.company_id = c.id "
-                " AND u.deleted_at IS NULL) AS hr_count "
+                "(SELECT count(*) FROM users u "
+                " JOIN user_roles ur ON ur.user_id = u.id "
+                " JOIN roles r ON r.id = ur.role_id AND r.name = 'hr_manager' "
+                " WHERE u.company_id = c.id AND u.deleted_at IS NULL) AS hr_count "
                 "FROM companies c WHERE c.deleted_at IS NULL "
                 "ORDER BY c.created_at DESC"
             )
