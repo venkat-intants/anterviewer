@@ -9,7 +9,9 @@ const Card = React.forwardRef<
   <div
     ref={ref}
     className={cn(
-      "rounded-lg border bg-card text-card-foreground shadow-sm",
+      // Apple feature card: 28px radius, Snow white fill on the Fog canvas,
+      // hairline Silver-Mist border. NO shadow — elevation is value-only.
+      "rounded-[28px] border border-border bg-card text-card-foreground",
       className
     )}
     {...props}

@@ -15,6 +15,7 @@ import { toast } from '@/lib/toast';
 import type { AuthUser } from '@/types/auth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import AuthLayout from '@/components/layout/AuthLayout';
 import {
   Form,
   FormControl,
@@ -104,123 +105,117 @@ export default function Login() {
   }
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-primary/5 via-background to-violet-500/5 flex items-center justify-center px-4 py-12">
-      <div className="w-full max-w-md">
-        {/* Brand */}
-        <motion.div
-          initial={{ opacity: 0, y: -12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.4 }}
-          className="text-center mb-8"
-        >
+    <AuthLayout>
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
+      >
+        {/* Heading — compact logo shows on mobile where the brand panel is hidden */}
+        <div className="mb-8">
           <Link
             to="/"
-            className="inline-flex flex-col items-center gap-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
+            className="mb-6 inline-flex h-11 w-11 items-center justify-center rounded-[12px] bg-foreground text-background text-lg font-bold select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:hidden"
+            aria-label="Anterview"
           >
-            <span className="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-primary text-primary-foreground text-xl font-bold shadow-lg shadow-primary/20 select-none">
-              I
-            </span>
+            A
           </Link>
-          <h1 className="mt-4 text-2xl font-bold text-foreground">{t('auth.welcomeBack')}</h1>
-          <p className="mt-1.5 text-sm text-muted-foreground">{t('auth.signInSubtitle')}</p>
-        </motion.div>
+          <h1 className="text-heading font-semibold tracking-tight text-foreground">
+            {t('auth.welcomeBack')}
+          </h1>
+          <p className="mt-2 text-body-sm text-muted-foreground">{t('auth.signInSubtitle')}</p>
+        </div>
 
-        {/* Card */}
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.4, delay: 0.05 }}
-          className="rounded-2xl border border-border bg-card shadow-sm p-8"
-        >
-          <Form {...form}>
-            <form
-              onSubmit={(e) => void form.handleSubmit(onSubmit)(e)}
-              noValidate
-              aria-label="Login form"
-              className="space-y-5"
-            >
-              <FormField
-                control={form.control}
-                name="email"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>{t('auth.email')}</FormLabel>
-                    <FormControl>
-                      <Input
-                        type="email"
-                        autoComplete="email"
-                        placeholder="you@example.com"
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-
-              <FormField
-                control={form.control}
-                name="password"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>{t('auth.password')}</FormLabel>
-                    <FormControl>
-                      <Input
-                        type="password"
-                        autoComplete="current-password"
-                        placeholder="••••••••"
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-
-              <Button
-                type="submit"
-                disabled={mutation.isPending}
-                aria-busy={mutation.isPending}
-                className="w-full"
-              >
-                {mutation.isPending ? t('auth.signingIn') : t('auth.signIn')}
-              </Button>
-            </form>
-          </Form>
-
-          {/* Divider */}
-          <div className="my-6 flex items-center gap-3">
-            <Separator className="flex-1" />
-            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-              {t('auth.orContinueWith')}
-            </span>
-            <Separator className="flex-1" />
-          </div>
-
-          {/* Google SSO — full-page redirect to the backend initiate endpoint */}
-          <Button
-            type="button"
-            variant="outline"
-            className="w-full gap-3"
-            onClick={() => {
-              window.location.assign(googleLoginUrl());
-            }}
+        <Form {...form}>
+          <form
+            onSubmit={(e) => void form.handleSubmit(onSubmit)(e)}
+            noValidate
+            aria-label="Login form"
+            className="space-y-5"
           >
-            <GoogleLogo className="h-5 w-5" />
-            {t('auth.signInWithGoogle')}
-          </Button>
+            <FormField
+              control={form.control}
+              name="email"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('auth.email')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="email"
+                      autoComplete="email"
+                      placeholder="you@example.com"
+                      className="h-11"
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
 
-          <p className="mt-6 text-center text-sm text-muted-foreground">
-            {t('auth.noAccount')}{' '}
-            <Link
-              to="/register"
-              className="font-medium text-primary hover:text-primary/80 focus:outline-none focus:underline underline-offset-4"
+            <FormField
+              control={form.control}
+              name="password"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('auth.password')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="password"
+                      autoComplete="current-password"
+                      placeholder="••••••••"
+                      className="h-11"
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <Button
+              type="submit"
+              disabled={mutation.isPending}
+              aria-busy={mutation.isPending}
+              className="h-11 w-full text-[15px]"
             >
-              {t('auth.createOne')}
-            </Link>
-          </p>
-        </motion.div>
-      </div>
-    </main>
+              {mutation.isPending ? t('auth.signingIn') : t('auth.signIn')}
+            </Button>
+          </form>
+        </Form>
+
+        {/* Divider */}
+        <div className="my-6 flex items-center gap-3">
+          <Separator className="flex-1 bg-border" />
+          <span className="text-micro font-medium text-muted-foreground uppercase tracking-wide">
+            {t('auth.orContinueWith')}
+          </span>
+          <Separator className="flex-1 bg-border" />
+        </div>
+
+        {/* Google SSO — full-page redirect to the backend initiate endpoint */}
+        <Button
+          type="button"
+          variant="outline"
+          className="h-11 w-full gap-3"
+          onClick={() => {
+            window.location.assign(googleLoginUrl());
+          }}
+        >
+          <GoogleLogo className="h-5 w-5" />
+          {t('auth.signInWithGoogle')}
+        </Button>
+
+        <p className="mt-8 text-center text-body-sm text-muted-foreground">
+          {t('auth.noAccount')}{' '}
+          <Link
+            to="/register"
+            className="font-semibold text-primary hover:text-primary/80 focus:outline-none focus:underline underline-offset-4"
+          >
+            {t('auth.createOne')}
+          </Link>
+        </p>
+      </motion.div>
+    </AuthLayout>
   );
 }

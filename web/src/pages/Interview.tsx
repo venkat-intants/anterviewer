@@ -13,6 +13,7 @@
 
 import { useState } from 'react';
 import { useParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import InterviewIntro from '@/components/InterviewIntro';
 import LiveKitInterview from '@/features/interview/LiveKitInterview';
 import { postConsent } from '@/api/consent';
@@ -29,6 +30,7 @@ function resolveLanguage(): Language {
 }
 
 export default function Interview() {
+  const { t } = useTranslation();
   const { sessionId } = useParams<{ sessionId: string }>();
   const [introDone, setIntroDone] = useState(false);
   // Phase A — whether the candidate consented to their camera in the intro.
@@ -55,9 +57,7 @@ export default function Interview() {
   if (!sessionId) {
     return (
       <main className="h-screen flex items-center justify-center bg-background px-4">
-        <p className="text-sm text-muted-foreground">
-          No interview session found. Please start a new interview from the dashboard.
-        </p>
+        <p className="text-body-sm text-mist">{t('interviewPage.missingSession')}</p>
       </main>
     );
   }

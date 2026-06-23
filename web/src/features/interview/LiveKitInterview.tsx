@@ -195,13 +195,13 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
         <div
           className={cn(
             'absolute inset-0 z-10 flex flex-col items-center justify-center',
-            'gap-4 px-6 text-center bg-black/40 backdrop-blur-sm',
+            'gap-4 px-6 text-center bg-black/50 backdrop-blur-sm',
           )}
         >
           {status === 'error' ? (
             <>
-              <AlertCircle className="h-10 w-10 text-red-400" aria-hidden="true" />
-              <p className="max-w-sm text-sm text-zinc-300">
+              <AlertCircle className="h-10 w-10 text-destructive" aria-hidden="true" />
+              <p className="max-w-sm text-body-sm text-mist">
                 {error ?? t('interview.errorFallback')}
               </p>
               <Button onClick={() => void connect()} variant="secondary">
@@ -210,8 +210,8 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
             </>
           ) : (
             <>
-              <Loader2 className="h-10 w-10 animate-spin text-zinc-400" aria-hidden="true" />
-              <p className="text-sm text-zinc-400">{STATUS_LABEL[status]}</p>
+              <Loader2 className="h-10 w-10 animate-spin text-electric-signal" aria-hidden="true" />
+              <p className="text-body-sm text-ash">{STATUS_LABEL[status]}</p>
             </>
           )}
         </div>
@@ -227,9 +227,9 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
             'gap-4 px-6 text-center bg-black/80 backdrop-blur-sm',
           )}
         >
-          <Loader2 className="h-10 w-10 animate-spin text-zinc-400" aria-hidden="true" />
-          <p className="text-sm text-zinc-300">{t('interview.connectingOverlayTitle')}</p>
-          <p className="text-xs text-zinc-500">{t('interview.connectingOverlaySub')}</p>
+          <Loader2 className="h-10 w-10 animate-spin text-electric-signal" aria-hidden="true" />
+          <p className="text-body-sm text-mist">{t('interview.connectingOverlayTitle')}</p>
+          <p className="text-caption text-ash">{t('interview.connectingOverlaySub')}</p>
         </div>
       )}
 
@@ -247,11 +247,11 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
           role="alertdialog"
           aria-modal="true"
         >
-          <AlertCircle className="h-10 w-10 text-amber-400" aria-hidden="true" />
-          <p className="max-w-md text-base font-semibold text-white">
+          <AlertCircle className="h-10 w-10 text-amber-glow" aria-hidden="true" />
+          <p className="max-w-md text-subheading font-semibold text-white">
             {t('interview.fullscreenExitTitle')}
           </p>
-          <p className="max-w-md text-sm text-zinc-400">{t('interview.fullscreenExitSub')}</p>
+          <p className="max-w-md text-body-sm text-ash">{t('interview.fullscreenExitSub')}</p>
           <Button onClick={() => void requestFullscreen()} variant="secondary" className="gap-2">
             <Maximize className="h-4 w-4" aria-hidden="true" />
             {t('interview.returnFullscreen')}
@@ -267,7 +267,7 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
           className={cn(
             'absolute bottom-24 right-4 z-20 sm:bottom-28 sm:right-6',
             'h-32 w-24 sm:h-40 sm:w-32 overflow-hidden rounded-xl',
-            'border border-white/20 bg-black/60 shadow-xl',
+            'border border-white/10 bg-obsidian/80 shadow-elevated',
             'transition-opacity duration-500',
             isCameraEnabled ? 'opacity-100' : 'opacity-0 pointer-events-none',
           )}
@@ -293,18 +293,18 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
         {/* Status pill */}
         <div
           className={cn(
-            'rounded-full bg-white/10 backdrop-blur px-3 py-1.5',
-            'text-sm flex items-center gap-2',
+            'rounded-full bg-white/[0.08] backdrop-blur border border-white/10 px-3 py-1.5',
+            'text-body-sm text-mist flex items-center gap-2',
           )}
         >
           <span
             className={cn(
               'inline-block h-2.5 w-2.5 rounded-full flex-shrink-0',
               isConnected
-                ? 'bg-emerald-400'
+                ? 'bg-vivid-mint'
                 : status === 'error'
-                  ? 'bg-red-500'
-                  : 'bg-amber-400 animate-pulse',
+                  ? 'bg-destructive'
+                  : 'bg-amber-glow animate-pulse',
             )}
             aria-hidden="true"
           />
@@ -316,8 +316,8 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
           {cameraConsented && isConnected && (
             <div
               className={cn(
-                'rounded-full bg-white/10 backdrop-blur px-3 py-1.5',
-                'text-xs flex items-center gap-1.5',
+                'rounded-full bg-white/[0.08] backdrop-blur border border-white/10 px-3 py-1.5',
+                'text-caption text-mist flex items-center gap-1.5',
               )}
               title={
                 proctoringReady
@@ -328,7 +328,7 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
               <ShieldCheck
                 className={cn(
                   'h-3.5 w-3.5 flex-shrink-0',
-                  proctoringReady ? 'text-emerald-400' : 'text-amber-400 animate-pulse',
+                  proctoringReady ? 'text-vivid-mint' : 'text-amber-glow animate-pulse',
                 )}
                 aria-hidden="true"
               />
@@ -342,11 +342,11 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
           {avatarReady && (
             <div
               className={cn(
-                'rounded-full bg-white/10 backdrop-blur px-3 py-1.5',
-                'text-sm flex items-center gap-2',
+                'rounded-full bg-white/[0.08] backdrop-blur border border-white/10 px-3 py-1.5',
+                'text-body-sm text-white flex items-center gap-2',
               )}
             >
-              <Clock className="h-3.5 w-3.5 flex-shrink-0 text-zinc-300" aria-hidden="true" />
+              <Clock className="h-3.5 w-3.5 flex-shrink-0 text-electric-signal" aria-hidden="true" />
               <span className="tabular-nums">{formatElapsed(elapsedSeconds)}</span>
             </div>
           )}
@@ -360,12 +360,12 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
             role="status"
             aria-live="assertive"
             className={cn(
-              'flex items-center gap-2.5 rounded-xl px-4 py-3 shadow-xl',
-              'bg-amber-400/95 text-amber-950 max-w-md',
+              'flex items-center gap-2.5 rounded-xl px-4 py-3 shadow-elevated',
+              'bg-amber-glow/95 text-amber-950 max-w-md',
             )}
           >
             <AlertCircle className="h-5 w-5 flex-shrink-0" aria-hidden="true" />
-            <p className="text-sm font-semibold">{t(`interview.warn_${activeWarning}`)}</p>
+            <p className="text-body-sm font-semibold">{t(`interview.warn_${activeWarning}`)}</p>
           </div>
         </div>
       )}
@@ -373,9 +373,9 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
       {/* ── Calibration banner (z-30) — brief "hold still" at start ──────── */}
       {isConnected && calibrating && !activeWarning && (
         <div className="absolute inset-x-0 top-20 z-30 flex justify-center px-4 pointer-events-none">
-          <div className="flex items-center gap-2.5 rounded-xl bg-white/15 backdrop-blur px-4 py-3 text-white shadow-xl max-w-md">
-            <Loader2 className="h-5 w-5 flex-shrink-0 animate-spin" aria-hidden="true" />
-            <p className="text-sm font-medium">{t('interview.calibrating')}</p>
+          <div className="flex items-center gap-2.5 rounded-xl bg-white/[0.08] backdrop-blur border border-white/10 px-4 py-3 text-mist shadow-elevated max-w-md">
+            <Loader2 className="h-5 w-5 flex-shrink-0 animate-spin text-electric-signal" aria-hidden="true" />
+            <p className="text-body-sm font-medium">{t('interview.calibrating')}</p>
           </div>
         </div>
       )}
@@ -391,8 +391,8 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
         {/* Floating glassy dock pill */}
         <div
           className={cn(
-            'rounded-full bg-white/10 backdrop-blur-md border border-white/15',
-            'shadow-xl px-3 py-2 flex items-center gap-3',
+            'rounded-full bg-obsidian/70 backdrop-blur-md border border-white/10',
+            'shadow-elevated px-3 py-2 flex items-center gap-3',
           )}
         >
           {/* Mic toggle */}
@@ -403,17 +403,17 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
             className={cn(
               'h-11 w-11 rounded-full flex items-center justify-center',
               'transition-colors focus-visible:outline-none focus-visible:ring-2',
-              'focus-visible:ring-white/50 disabled:pointer-events-none disabled:opacity-40',
+              'focus-visible:ring-white/40 disabled:pointer-events-none disabled:opacity-40',
               isMicEnabled
-                ? 'bg-white/20 hover:bg-white/30'
-                : 'bg-red-500/30 hover:bg-red-500/50',
+                ? 'bg-white/10 text-white hover:bg-white/20'
+                : 'bg-destructive/25 hover:bg-destructive/40',
             )}
             aria-label={isMicEnabled ? t('interview.muteMic') : t('interview.unmuteMic')}
           >
             {isMicEnabled ? (
               <Mic className="h-5 w-5" aria-hidden="true" />
             ) : (
-              <MicOff className="h-5 w-5 text-red-300" aria-hidden="true" />
+              <MicOff className="h-5 w-5 text-destructive" aria-hidden="true" />
             )}
           </button>
 
@@ -426,23 +426,23 @@ export default function LiveKitInterview({ sessionId, cameraConsented = false }:
               className={cn(
                 'h-11 w-11 rounded-full flex items-center justify-center',
                 'transition-colors focus-visible:outline-none focus-visible:ring-2',
-                'focus-visible:ring-white/50 disabled:pointer-events-none disabled:opacity-40',
+                'focus-visible:ring-white/40 disabled:pointer-events-none disabled:opacity-40',
                 isCameraEnabled
-                  ? 'bg-white/20 hover:bg-white/30'
-                  : 'bg-red-500/30 hover:bg-red-500/50',
+                  ? 'bg-white/10 text-white hover:bg-white/20'
+                  : 'bg-destructive/25 hover:bg-destructive/40',
               )}
               aria-label={isCameraEnabled ? t('interview.cameraOff') : t('interview.cameraOn')}
             >
               {isCameraEnabled ? (
                 <Video className="h-5 w-5" aria-hidden="true" />
               ) : (
-                <VideoOff className="h-5 w-5 text-red-300" aria-hidden="true" />
+                <VideoOff className="h-5 w-5 text-destructive" aria-hidden="true" />
               )}
             </button>
           )}
 
           {/* Divider */}
-          <div className="h-6 w-px bg-white/20" aria-hidden="true" />
+          <div className="h-6 w-px bg-white/10" aria-hidden="true" />
 
           {/* End interview */}
           <Button

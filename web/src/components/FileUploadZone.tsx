@@ -2,6 +2,7 @@
 // Supports progress reporting, client-side validation, and retry.
 
 import { useCallback, useId, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 export interface FileUploadZoneProps {
   /** Human-readable label, e.g. "Upload Resume" */
@@ -37,6 +38,7 @@ export default function FileUploadZone({
   onUpload,
   existingFileLabel,
 }: FileUploadZoneProps) {
+  const { t } = useTranslation();
   const inputId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
   const [uploadState, setUploadState] = useState<UploadState>({ status: 'idle' });
@@ -46,14 +48,14 @@ export default function FileUploadZone({
     (file: File) => {
       // Client-side PDF check
       if (file.type !== 'application/pdf') {
-        setUploadState({ status: 'error', message: 'Only PDF files are accepted.' });
+        setUploadState({ status: 'error', message: t('fileUpload.onlyPdf') });
         return;
       }
       // Client-side size check
       if (file.size > maxBytes) {
         setUploadState({
           status: 'error',
-          message: `File is too large. Maximum size is ${formatBytes(maxBytes)}.`,
+          message: t('fileUpload.tooLarge', { size: formatBytes(maxBytes) }),
         });
         return;
       }
@@ -67,12 +69,11 @@ export default function FileUploadZone({
           setUploadState({ status: 'success', textLength: result.text_length });
         })
         .catch((err: unknown) => {
-          const message =
-            err instanceof Error ? err.message : 'Upload failed. Please try again.';
+          const message = err instanceof Error ? err.message : t('fileUpload.uploadFailed');
           setUploadState({ status: 'error', message });
         });
     },
-    [maxBytes, onUpload],
+    [maxBytes, onUpload, t],
   );
 
   const handleFileChange = useCallback(
@@ -123,7 +124,7 @@ export default function FileUploadZone({
     <div className="w-full">
       {/* Existing file notice */}
       {existingFileLabel && uploadState.status !== 'success' && (
-        <p className="mb-3 text-sm text-green-700 flex items-center gap-1.5">
+        <p className="mb-3 text-body-sm text-emerald-600 flex items-center gap-1.5">
           <svg
             aria-hidden="true"
             xmlns="http://www.w3.org/2000/svg"
@@ -143,13 +144,13 @@ export default function FileUploadZone({
 
       {/* Success state */}
       {uploadState.status === 'success' && (
-        <div className="rounded-xl border border-green-200 bg-green-50 p-4 flex items-start gap-3">
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 flex items-start gap-3">
           <svg
             aria-hidden="true"
             xmlns="http://www.w3.org/2000/svg"
             viewBox="0 0 20 20"
             fill="currentColor"
-            className="h-5 w-5 text-green-600 shrink-0 mt-0.5"
+            className="h-5 w-5 text-emerald-600 shrink-0 mt-0.5"
           >
             <path
               fillRule="evenodd"
@@ -158,16 +159,18 @@ export default function FileUploadZone({
             />
           </svg>
           <div className="flex-1">
-            <p className="text-sm font-medium text-green-800">
-              {label} processed —{' '}
-              {uploadState.textLength.toLocaleString()} characters extracted
+            <p className="text-body-sm font-medium text-foreground">
+              {t('fileUpload.processed', {
+                label,
+                chars: uploadState.textLength.toLocaleString(),
+              })}
             </p>
             <button
               type="button"
               onClick={handleRetry}
-              className="mt-1 text-xs text-green-700 underline hover:text-green-900 focus:outline-none focus:ring-2 focus:ring-green-500 rounded"
+              className="mt-1 text-caption text-emerald-600 underline underline-offset-2 hover:text-emerald-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
             >
-              Upload a different file
+              {t('fileUpload.uploadDifferent')}
             </button>
           </div>
         </div>
@@ -177,14 +180,14 @@ export default function FileUploadZone({
       {uploadState.status === 'error' && (
         <div
           role="alert"
-          className="rounded-xl border border-red-200 bg-red-50 p-4 flex items-start gap-3 mb-3"
+          className="rounded-xl border border-destructive/30 bg-destructive/10 p-4 flex items-start gap-3 mb-3"
         >
           <svg
             aria-hidden="true"
             xmlns="http://www.w3.org/2000/svg"
             viewBox="0 0 20 20"
             fill="currentColor"
-            className="h-5 w-5 text-red-500 shrink-0 mt-0.5"
+            className="h-5 w-5 text-destructive shrink-0 mt-0.5"
           >
             <path
               fillRule="evenodd"
@@ -193,13 +196,13 @@ export default function FileUploadZone({
             />
           </svg>
           <div className="flex-1">
-            <p className="text-sm text-red-700">{uploadState.message}</p>
+            <p className="text-body-sm text-destructive">{uploadState.message}</p>
             <button
               type="button"
               onClick={handleRetry}
-              className="mt-1 text-xs text-red-700 underline hover:text-red-900 focus:outline-none focus:ring-2 focus:ring-red-500 rounded"
+              className="mt-1 text-caption text-destructive underline underline-offset-2 hover:text-destructive/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
             >
-              Try again
+              {t('fileUpload.tryAgain')}
             </button>
           </div>
         </div>
@@ -224,7 +227,7 @@ export default function FileUploadZone({
           <div
             role="button"
             tabIndex={isUploading ? -1 : 0}
-            aria-label={`${label} — click or drag a PDF here`}
+            aria-label={t('fileUpload.clickOrDrag', { label })}
             aria-disabled={isUploading}
             onDrop={handleDrop}
             onDragOver={handleDragOver}
@@ -232,10 +235,10 @@ export default function FileUploadZone({
             onKeyDown={handleKeyDown}
             onClick={() => !isUploading && inputRef.current?.click()}
             className={[
-              'relative flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-10 text-center transition-colors cursor-pointer',
+              'group relative flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed bg-secondary px-6 py-10 text-center transition-colors cursor-pointer',
               isDraggingOver
-                ? 'border-indigo-400 bg-indigo-50'
-                : 'border-gray-300 bg-gray-50 hover:border-indigo-400 hover:bg-indigo-50',
+                ? 'border-primary/40 bg-accent'
+                : 'border-border hover:border-primary/40 hover:bg-accent',
               isUploading ? 'cursor-not-allowed opacity-70' : '',
             ]
               .filter(Boolean)
@@ -249,7 +252,7 @@ export default function FileUploadZone({
               fill="none"
               stroke="currentColor"
               strokeWidth={1.5}
-              className="h-10 w-10 text-indigo-400"
+              className="h-10 w-10 text-primary transition-transform duration-300 group-hover:-translate-y-0.5"
             >
               <path
                 strokeLinecap="round"
@@ -259,28 +262,28 @@ export default function FileUploadZone({
             </svg>
 
             <div>
-              <p className="text-sm font-medium text-gray-700">
-                {isUploading ? 'Uploading…' : 'Drag and drop or click to browse'}
+              <p className="text-body-sm font-medium text-foreground">
+                {isUploading ? t('fileUpload.uploading') : t('fileUpload.dragDrop')}
               </p>
-              <p className="mt-1 text-xs text-gray-500">
-                PDF only — max {formatBytes(maxBytes)}
+              <p className="mt-1 text-caption text-muted-foreground">
+                {t('fileUpload.pdfMax', { size: formatBytes(maxBytes) })}
               </p>
             </div>
 
             {/* Progress bar */}
             {isUploading && (
-              <div className="w-full max-w-xs" aria-label="Upload progress">
-                <div className="h-2 w-full rounded-full bg-indigo-100 overflow-hidden">
+              <div className="w-full max-w-xs" aria-label={t('fileUpload.uploadProgress')}>
+                <div className="h-2 w-full rounded-full bg-border overflow-hidden">
                   <div
                     role="progressbar"
                     aria-valuenow={uploadState.progress}
                     aria-valuemin={0}
                     aria-valuemax={100}
-                    className="h-2 rounded-full bg-indigo-600 transition-all duration-200"
+                    className="h-2 rounded-full bg-primary transition-all duration-200"
                     style={{ width: `${uploadState.progress}%` }}
                   />
                 </div>
-                <p className="mt-1 text-xs text-indigo-600 text-center">
+                <p className="mt-1 text-caption text-primary text-center tabular-nums">
                   {uploadState.progress}%
                 </p>
               </div>

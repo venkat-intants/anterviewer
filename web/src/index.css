@@ -3,74 +3,84 @@
 @tailwind utilities;
 
 @layer base {
+  /* Superwhisper dark theme — the app is forced dark (see <html class="dark">).
+   * shadcn semantic tokens are remapped to the dark palette:
+   *   --primary  = WHITE  (the action colour; chromatic CTAs are forbidden)
+   *   --ring     = electric-signal #0088ff (focus glow is the one signal blue)
+   *   surfaces   = midnight #000 / obsidian #0f0f10 / charcoal #1c1d1f
+   */
+  /* ── Apple "MacBook Neo" LIGHT theme (the app default) ────────────────────
+   * Gallery-white canvas, value-only elevation (NO shadows), Ink text,
+   * Graphite secondary, and Azure #0071e3 rationed to the primary CTA only.
+   * The dark values live under `.dark` and are scoped to the live interview. */
   :root {
-    /* shadcn/ui design tokens — light mode
-     *
-     * --primary maps to the existing Intants indigo brand:
-     *   indigo-600 (#4f46e5) ≈ HSL 243 75% 59%
-     *   indigo-900 (#312e81) used as foreground on primary backgrounds
-     */
-    --background: 0 0% 100%;
-    --foreground: 222 47% 11%;
+    --background: 240 11% 96%; /* Fog #f5f5f7 — page canvas (one step off white) */
+    --foreground: 240 4% 12%; /* Ink #1d1d1f — primary text */
 
-    --card: 0 0% 100%;
-    --card-foreground: 222 47% 11%;
+    --card: 0 0% 100%; /* Snow #ffffff — card surface (lifts by value, not shadow) */
+    --card-foreground: 240 4% 12%;
 
-    --popover: 0 0% 100%;
-    --popover-foreground: 222 47% 11%;
+    --popover: 0 0% 100%; /* white */
+    --popover-foreground: 240 4% 12%;
 
-    /* Indigo-600 brand primary */
-    --primary: 243 75% 59%;
+    --primary: 211 100% 45%; /* Azure #0071e3 — the SOLE permission-to-act color */
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 210 40% 96%;
-    --secondary-foreground: 222 47% 11%;
+    --secondary: 240 11% 92%; /* Silver Mist #e8e8ed — quiet surface / input fill */
+    --secondary-foreground: 240 4% 12%;
 
-    --muted: 210 40% 96%;
-    --muted-foreground: 215 16% 47%;
+    --muted: 240 11% 96%; /* Fog #f5f5f7 — recessed inset */
+    --muted-foreground: 0 0% 44%; /* Graphite #707070 — secondary text */
 
-    --accent: 210 40% 96%;
-    --accent-foreground: 222 47% 11%;
+    --accent: 240 11% 93%; /* subtle gray hover/active surface */
+    --accent-foreground: 240 4% 12%;
 
-    --destructive: 0 84% 60%;
+    --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 214 32% 91%;
-    --input: 214 32% 91%;
-    --ring: 243 75% 59%;
+    --border: 240 11% 92%; /* Silver Mist #e8e8ed — hairline borders/dividers */
+    --input: 240 11% 92%;
+    --ring: 211 100% 45%; /* Azure focus ring */
 
-    --radius: 0.5rem;
+    --radius: 0.875rem; /* 14px base (cards override to 28px, buttons to pill) */
+
+    /* recharts palette — theme-aware (referenced as var(--chart-*) in JS) */
+    --chart-text: #707070;
+    --chart-grid: #e8e8ed;
+    --chart-primary: #0071e3;
+    --chart-strong: #1d1d1f;
+    --chart-tooltip-bg: #ffffff;
   }
 
+  /* ── Apple DARK theme — user-selectable (html.dark) AND the live interview ──
+   * True-black OLED canvas, ink-dark cards, near-white text, the brighter
+   * Apple dark-mode Azure #0a84ff. */
   .dark {
-    --background: 222 47% 11%;
-    --foreground: 210 40% 98%;
-
-    --card: 222 47% 11%;
-    --card-foreground: 210 40% 98%;
-
-    --popover: 222 47% 11%;
-    --popover-foreground: 210 40% 98%;
-
-    /* Keep indigo brand in dark mode — slightly lighter for contrast */
-    --primary: 243 75% 67%;
+    --background: 0 0% 0%; /* true black */
+    --foreground: 240 11% 96%; /* near-white #f5f5f7 */
+    --card: 240 6% 10%; /* #18181b — lifts off black */
+    --card-foreground: 240 11% 96%;
+    --popover: 240 6% 11%;
+    --popover-foreground: 240 11% 96%;
+    --primary: 211 100% 52%; /* Azure #0a84ff (Apple dark-mode blue) */
     --primary-foreground: 0 0% 100%;
+    --secondary: 240 5% 16%;
+    --secondary-foreground: 240 11% 96%;
+    --muted: 240 5% 14%;
+    --muted-foreground: 240 5% 65%;
+    --accent: 240 5% 18%;
+    --accent-foreground: 240 11% 96%;
+    --destructive: 0 72% 55%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 240 5% 20%;
+    --input: 240 5% 22%;
+    --ring: 211 100% 52%;
 
-    --secondary: 217 33% 17%;
-    --secondary-foreground: 210 40% 98%;
-
-    --muted: 217 33% 17%;
-    --muted-foreground: 215 20% 65%;
-
-    --accent: 217 33% 17%;
-    --accent-foreground: 210 40% 98%;
-
-    --destructive: 0 62% 30%;
-    --destructive-foreground: 210 40% 98%;
-
-    --border: 217 33% 17%;
-    --input: 217 33% 17%;
-    --ring: 243 75% 67%;
+    --chart-text: #9a9aa0;
+    --chart-grid: #2c2c2e;
+    --chart-primary: #0a84ff;
+    --chart-strong: #f5f5f7;
+    --chart-tooltip-bg: #1c1c1e;
   }
 }
 
@@ -78,8 +88,119 @@
   * {
     @apply border-border;
   }
+  html {
+    background-color: #f5f5f7; /* Fog canvas — no dark flash before React mounts */
+  }
+  html.dark {
+    background-color: #000000; /* true-black canvas in dark mode */
+  }
   body {
     @apply bg-background text-foreground;
-    font-feature-settings: "rlig" 1, "calt" 1;
+    font-feature-settings: "cv11" 1, "ss01" 1, "calt" 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  /* The live interview keeps a true-black backdrop under its .dark scope */
+  .dark body,
+  body:has(.dark-root) {
+    background-color: #000000;
+  }
+  ::selection {
+    background: rgb(0 113 227 / 0.20); /* Azure wash */
+  }
+}
+
+/* ── Superwhisper keyframes ───────────────────────────────────────────────────
+ * Defined globally (not in the Tailwind keyframes map) so both the
+ * `animate-*` utilities AND HeroCinematic's raw `animation: voice-bar ...`
+ * inline style resolve against them.
+ */
+@keyframes aurora-drift {
+  0%,
+  100% {
+    transform: translateY(0) scale(1.06);
+  }
+  50% {
+    transform: translateY(-2.5%) scale(1.12);
+  }
+}
+
+@keyframes silhouette-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-14px);
+  }
+}
+
+@keyframes laptop-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(12px);
+  }
+}
+
+@keyframes voice-bar {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+    opacity: 0.65;
+  }
+  50% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+
+/* Cluely landing — buoyant float for the floating interview mockup */
+@keyframes cluely-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-12px);
+  }
+}
+
+/* ── Dark-mode recharts legibility ────────────────────────────────────────────
+ * Chart series colors are baked into the components (azure + categorical, fine
+ * on both themes); only the neutral grid/axis/tooltip need a dark override.
+ * CSS fill/stroke DO apply to SVG, so we retint recharts' own classes. */
+.dark .recharts-cartesian-grid line,
+.dark .recharts-cartesian-axis-line,
+.dark .recharts-cartesian-axis-tick-line,
+.dark .recharts-polar-grid line,
+.dark .recharts-polar-angle-axis-tick-line {
+  stroke: #2c2c2e;
+}
+.dark .recharts-text,
+.dark .recharts-cartesian-axis-tick-value,
+.dark .recharts-polar-angle-axis-tick-value tspan {
+  fill: #9a9aa0;
+}
+.dark .recharts-default-tooltip {
+  background: #1c1c1e !important;
+  border-color: #2c2c2e !important;
+  color: #f5f5f7 !important;
+}
+.dark .recharts-default-tooltip .recharts-tooltip-label,
+.dark .recharts-default-tooltip .recharts-tooltip-item {
+  color: #f5f5f7 !important;
+}
+
+/* Respect users who opt out of motion (WCAG 2.3.3) */
+@media (prefers-reduced-motion: reduce) {
+  .animate-aurora-drift,
+  .animate-silhouette-float,
+  .animate-laptop-float,
+  .animate-cluely-float,
+  .animate-voice-bar {
+    animation: none !important;
   }
 }

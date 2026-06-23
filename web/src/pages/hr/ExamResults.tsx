@@ -19,12 +19,12 @@ function tone(p: number | null): string {
 function Row({ a }: { a: AttemptResult }) {
   const inProgress = a.status === 'in_progress' || a.submitted_at === null;
   return (
-    <div className="flex items-center gap-3 rounded-lg border border-border bg-card p-3">
+    <div className="flex items-center gap-3 rounded-xl border border-border bg-muted/40 p-3 shadow-card">
       <div className="w-12 shrink-0 text-center">
-        <div className={cn('text-xl font-bold leading-none', tone(a.score_percent))}>
+        <div className={cn('text-xl font-semibold leading-none tracking-tight', tone(a.score_percent))}>
           {a.score_percent ?? '—'}
         </div>
-        <div className="text-[10px] text-muted-foreground">%</div>
+        <div className="text-micro text-muted-foreground">%</div>
       </div>
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium text-foreground">{a.applicant_name}</p>
@@ -39,11 +39,11 @@ function Row({ a }: { a: AttemptResult }) {
           <Clock className="h-3 w-3" aria-hidden="true" /> In progress
         </Badge>
       ) : a.passed ? (
-        <Badge variant="default" className="shrink-0 gap-1 bg-emerald-600 text-[11px]">
+        <Badge variant="success" className="shrink-0 gap-1 text-[11px]">
           <CheckCircle2 className="h-3 w-3" aria-hidden="true" /> Passed
         </Badge>
       ) : (
-        <Badge variant="outline" className="shrink-0 gap-1 text-[11px] text-rose-600">
+        <Badge variant="destructive" className="shrink-0 gap-1 text-[11px]">
           <XCircle className="h-3 w-3" aria-hidden="true" /> Failed
         </Badge>
       )}
@@ -63,7 +63,7 @@ export default function ExamResults() {
   const passed = list.filter((a) => a.passed).length;
 
   return (
-    <div className="max-w-3xl space-y-6">
+    <div className="space-y-6">
       <div>
         <Link
           to={`/hr/exams/${examId}`}
@@ -71,19 +71,19 @@ export default function ExamResults() {
         >
           <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" /> Back to exam
         </Link>
-        <h1 className="text-2xl font-bold text-foreground">Results — {exam?.title ?? 'Exam'}</h1>
+        <h1 className="text-heading font-semibold text-foreground">Results — {exam?.title ?? 'Exam'}</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           {list.length} attempt(s) · {passed} passed · pass ≥ {exam?.pass_threshold ?? '—'}%
         </p>
       </div>
 
-      <Card className="shadow-sm">
+      <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">Applicant attempts</CardTitle>
+          <CardTitle className="text-base text-foreground">Applicant attempts</CardTitle>
         </CardHeader>
         <CardContent className="space-y-2">
           {isLoading ? (
-            <Skeleton className="h-16 w-full rounded-lg" />
+            <Skeleton className="h-16 w-full rounded-xl" />
           ) : list.length === 0 ? (
             <p className="py-6 text-center text-sm text-muted-foreground">
               No attempts yet — assign the exam and share the links.

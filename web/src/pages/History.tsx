@@ -73,15 +73,15 @@ function EmptyState() {
   const { t } = useTranslation();
   return (
     <div
-      className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border py-20 text-center gap-4"
+      className="flex flex-col items-center justify-center rounded-3xl border border-dashed border-border bg-muted/40 py-20 text-center gap-4"
       data-testid="history-empty-state"
     >
-      <div className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-muted">
-        <HistoryIcon className="h-7 w-7 text-muted-foreground/50" aria-hidden="true" />
+      <div className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 ring-1 ring-primary/20">
+        <HistoryIcon className="h-7 w-7 text-primary" aria-hidden="true" />
       </div>
       <div>
-        <p className="font-medium text-foreground">{t('history.noInterviewsTitle')}</p>
-        <p className="mt-1 text-sm text-muted-foreground">
+        <p className="text-body font-semibold text-foreground">{t('history.noInterviewsTitle')}</p>
+        <p className="mt-1 text-body-sm text-muted-foreground">
           {t('history.noInterviewsDesc')}
         </p>
       </div>
@@ -103,14 +103,17 @@ function SessionRow({ session }: { session: SessionListItem }) {
   const langLabel = langKey ? t(langKey) : session.language.toUpperCase();
 
   return (
-    <TableRow data-testid={`session-row-${session.session_id}`}>
+    <TableRow
+      data-testid={`session-row-${session.session_id}`}
+      className="border-border hover:bg-muted/40"
+    >
       <TableCell className="font-medium text-foreground">{session.job_title}</TableCell>
-      <TableCell className="text-muted-foreground text-sm">
+      <TableCell className="text-muted-foreground text-body-sm tabular-nums">
         {formatDate(session.created_at)}
       </TableCell>
       <TableCell>
-        <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
-          <Globe className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        <span className="flex items-center gap-1.5 text-body-sm text-muted-foreground">
+          <Globe className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" aria-hidden="true" />
           {langLabel}
         </span>
       </TableCell>
@@ -120,14 +123,14 @@ function SessionRow({ session }: { session: SessionListItem }) {
         </Badge>
       </TableCell>
       <TableCell>
-        <span className="flex items-center gap-1.5 text-sm text-muted-foreground tabular-nums">
-          <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        <span className="flex items-center gap-1.5 text-body-sm text-muted-foreground tabular-nums">
+          <Clock className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" aria-hidden="true" />
           {formatDuration(session.duration_seconds)}
         </span>
       </TableCell>
       <TableCell className="text-right">
         {session.scorecard_id ? (
-          <Button variant="ghost" size="sm" asChild className="gap-1.5 text-primary">
+          <Button variant="ghost" size="sm" asChild className="gap-1.5 text-primary hover:text-primary">
             <Link to={`/scorecard/${session.scorecard_id}`}>
               {t('history.viewScorecard')}
               <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
@@ -150,12 +153,15 @@ function SessionCard({ session }: { session: SessionListItem }) {
 
   return (
     <motion.div variants={fadeUp}>
-      <Card className="shadow-sm" data-testid={`session-card-${session.session_id}`}>
+      <Card
+        className="rounded-xl transition-shadow hover:shadow-card-hover"
+        data-testid={`session-card-${session.session_id}`}
+      >
         <CardContent className="py-4 flex flex-col gap-3">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
               <p className="font-medium text-foreground truncate">{session.job_title}</p>
-              <p className="text-xs text-muted-foreground mt-0.5">
+              <p className="text-caption text-muted-foreground mt-0.5 tabular-nums">
                 {formatDate(session.created_at)}
               </p>
             </div>
@@ -164,13 +170,13 @@ function SessionCard({ session }: { session: SessionListItem }) {
             </Badge>
           </div>
 
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-caption text-muted-foreground">
             <span className="flex items-center gap-1">
-              <Globe className="h-3 w-3" aria-hidden="true" />
+              <Globe className="h-3 w-3 text-muted-foreground/60" aria-hidden="true" />
               {langLabel}
             </span>
-            <span className="flex items-center gap-1">
-              <Clock className="h-3 w-3" aria-hidden="true" />
+            <span className="flex items-center gap-1 tabular-nums">
+              <Clock className="h-3 w-3 text-muted-foreground/60" aria-hidden="true" />
               {formatDuration(session.duration_seconds)}
             </span>
           </div>
@@ -215,7 +221,7 @@ function PaginationBar({
         <ChevronLeft className="h-4 w-4" aria-hidden="true" />
         {t('history.prevPage')}
       </Button>
-      <span className="text-sm text-muted-foreground tabular-nums">
+      <span className="text-body-sm text-muted-foreground tabular-nums">
         {t('history.pageOf', { page, total: totalPages })}
       </span>
       <Button
@@ -268,10 +274,10 @@ export default function History() {
     >
       {/* Page heading */}
       <motion.div variants={fadeUp}>
-        <h1 id="history-heading" className="text-2xl font-bold text-foreground">
+        <h1 id="history-heading" className="text-heading font-semibold text-foreground">
           {t('history.pageTitle')}
         </h1>
-        <p className="mt-1 text-sm text-muted-foreground">
+        <p className="mt-1 text-body-sm text-muted-foreground">
           {t('history.pageDesc')}
         </p>
       </motion.div>
@@ -283,12 +289,12 @@ export default function History() {
         ) : sessions.length === 0 ? (
           <EmptyState />
         ) : (
-          <Card className="shadow-sm">
+          <Card className="shadow-card">
             <CardHeader className="pb-3">
               <div className="flex items-center justify-between">
                 <div>
-                  <CardTitle className="text-base">{t('history.sessionsTitle')}</CardTitle>
-                  <CardDescription className="mt-0.5">
+                  <CardTitle className="text-body-lg font-semibold text-foreground">{t('history.sessionsTitle')}</CardTitle>
+                  <CardDescription className="mt-0.5 text-muted-foreground">
                     {t('history.sessionsTotal', { count: total })}
                   </CardDescription>
                 </div>
@@ -299,13 +305,13 @@ export default function History() {
               <div className="hidden md:block overflow-x-auto">
                 <Table>
                   <TableHeader>
-                    <TableRow>
-                      <TableHead>{t('history.columnRole')}</TableHead>
-                      <TableHead>{t('history.columnDate')}</TableHead>
-                      <TableHead>{t('history.columnLanguage')}</TableHead>
-                      <TableHead>{t('history.columnStatus')}</TableHead>
-                      <TableHead>{t('history.columnDuration')}</TableHead>
-                      <TableHead className="text-right">{t('history.columnScorecard')}</TableHead>
+                    <TableRow className="border-border hover:bg-transparent">
+                      <TableHead className="text-muted-foreground text-xs uppercase tracking-wide">{t('history.columnRole')}</TableHead>
+                      <TableHead className="text-muted-foreground text-xs uppercase tracking-wide">{t('history.columnDate')}</TableHead>
+                      <TableHead className="text-muted-foreground text-xs uppercase tracking-wide">{t('history.columnLanguage')}</TableHead>
+                      <TableHead className="text-muted-foreground text-xs uppercase tracking-wide">{t('history.columnStatus')}</TableHead>
+                      <TableHead className="text-muted-foreground text-xs uppercase tracking-wide">{t('history.columnDuration')}</TableHead>
+                      <TableHead className="text-right text-muted-foreground text-xs uppercase tracking-wide">{t('history.columnScorecard')}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>

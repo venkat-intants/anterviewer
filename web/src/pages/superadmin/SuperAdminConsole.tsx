@@ -48,13 +48,15 @@ function HrPanel({ company }: { company: Company }) {
   });
 
   return (
-    <Card className="shadow-sm">
+    <Card className="shadow-card">
       <CardHeader className="pb-3">
-        <CardTitle className="text-base flex items-center gap-2">
+        <CardTitle className="text-body-lg text-foreground flex items-center gap-2">
           <Users className="h-4 w-4 text-primary" aria-hidden="true" />
           HR managers — {company.name}
         </CardTitle>
-        <CardDescription>Create accounts; they log in and reset the password.</CardDescription>
+        <CardDescription className="text-muted-foreground">
+          Create accounts; they log in and reset the password.
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {/* Create HR form */}
@@ -70,7 +72,7 @@ function HrPanel({ company }: { company: Company }) {
           }}
         >
           <div className="space-y-1">
-            <label htmlFor="hr-email" className="text-xs font-medium text-muted-foreground">
+            <label htmlFor="hr-email" className="text-caption font-medium text-muted-foreground">
               Email
             </label>
             <Input
@@ -82,7 +84,7 @@ function HrPanel({ company }: { company: Company }) {
             />
           </div>
           <div className="space-y-1">
-            <label htmlFor="hr-name" className="text-xs font-medium text-muted-foreground">
+            <label htmlFor="hr-name" className="text-caption font-medium text-muted-foreground">
               Full name
             </label>
             <Input
@@ -97,9 +99,10 @@ function HrPanel({ company }: { company: Company }) {
             {createMut.isPending ? 'Adding…' : 'Add HR'}
           </Button>
         </form>
-        <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <KeyRound className="h-3 w-3" aria-hidden="true" />
-          Default password <code className="rounded bg-muted px-1">{password}</code> — they must
+        <p className="flex items-center gap-1.5 text-caption text-muted-foreground">
+          <KeyRound className="h-3 w-3 text-primary" aria-hidden="true" />
+          Default password{' '}
+          <code className="rounded bg-secondary px-1 text-foreground">{password}</code> — they must
           change it on first login.
         </p>
 
@@ -107,24 +110,24 @@ function HrPanel({ company }: { company: Company }) {
         {isLoading ? (
           <Skeleton className="h-16 w-full rounded-lg" />
         ) : !hrs || hrs.length === 0 ? (
-          <p className="text-sm text-muted-foreground py-2">No HR managers yet.</p>
+          <p className="text-body-sm text-muted-foreground py-2">No HR managers yet.</p>
         ) : (
           <ul className="space-y-2" aria-label="HR manager list">
             {hrs.map((hr) => (
               <li
                 key={hr.user_id}
-                className="flex items-center justify-between rounded-lg border border-border bg-card px-3 py-2"
+                className="flex items-center justify-between rounded-xl border border-border bg-muted/40 px-3 py-2"
               >
                 <div className="min-w-0">
-                  <p className="text-sm font-medium text-foreground truncate">{hr.full_name}</p>
-                  <p className="text-xs text-muted-foreground truncate">{hr.email}</p>
+                  <p className="text-body-sm font-medium text-foreground truncate">{hr.full_name}</p>
+                  <p className="text-caption text-muted-foreground truncate">{hr.email}</p>
                 </div>
                 {hr.must_change_password ? (
                   <Badge variant="outline" className="text-xs shrink-0">
                     pending first login
                   </Badge>
                 ) : (
-                  <Badge variant="secondary" className="text-xs gap-1 shrink-0">
+                  <Badge variant="success" className="text-xs gap-1 shrink-0">
                     <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
                     active
                   </Badge>
@@ -164,10 +167,10 @@ export default function SuperAdminConsole() {
   const selected = companies?.find((c) => c.id === selectedId) ?? null;
 
   return (
-    <div className="max-w-5xl space-y-6">
+    <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-foreground">Super Admin</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
+        <h1 className="text-subheading font-semibold text-foreground">Super Admin</h1>
+        <p className="mt-1 text-body-sm text-muted-foreground">
           Manage companies and their HR managers.
         </p>
       </div>
@@ -175,9 +178,9 @@ export default function SuperAdminConsole() {
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Companies column */}
         <div className="space-y-4">
-          <Card className="shadow-sm">
+          <Card className="shadow-card">
             <CardHeader className="pb-3">
-              <CardTitle className="text-base flex items-center gap-2">
+              <CardTitle className="text-body-lg text-foreground flex items-center gap-2">
                 <Building2 className="h-4 w-4 text-primary" aria-hidden="true" />
                 Companies
               </CardTitle>
@@ -209,7 +212,7 @@ export default function SuperAdminConsole() {
               {isLoading ? (
                 <Skeleton className="h-24 w-full rounded-lg" />
               ) : !companies || companies.length === 0 ? (
-                <p className="text-sm text-muted-foreground py-2">
+                <p className="text-body-sm text-muted-foreground py-2">
                   No companies yet — create your first one above.
                 </p>
               ) : (
@@ -221,15 +224,15 @@ export default function SuperAdminConsole() {
                         onClick={() => setSelectedId(c.id)}
                         whileTap={{ scale: 0.99 }}
                         className={cn(
-                          'w-full text-left flex items-center justify-between rounded-lg border px-3 py-2.5 transition-colors',
+                          'w-full text-left flex items-center justify-between rounded-xl border px-3 py-2.5 transition-colors',
                           c.id === selectedId
-                            ? 'border-primary/40 bg-primary/5'
-                            : 'border-border bg-card hover:border-primary/30 hover:bg-accent',
+                            ? 'border-primary/40 bg-accent'
+                            : 'border-border bg-muted/40 hover:border-border hover:bg-muted/60',
                         )}
                       >
                         <div className="min-w-0">
-                          <p className="text-sm font-medium text-foreground truncate">{c.name}</p>
-                          <p className="text-xs text-muted-foreground truncate">{c.slug}</p>
+                          <p className="text-body-sm font-medium text-foreground truncate">{c.name}</p>
+                          <p className="text-caption text-muted-foreground truncate">{c.slug}</p>
                         </div>
                         <Badge variant="secondary" className="text-xs gap-1 shrink-0">
                           <Users className="h-3 w-3" aria-hidden="true" />
@@ -249,8 +252,8 @@ export default function SuperAdminConsole() {
           {selected ? (
             <HrPanel company={selected} />
           ) : (
-            <Card className="shadow-sm border-dashed">
-              <CardContent className="py-12 text-center text-sm text-muted-foreground">
+            <Card className="border-dashed border-border">
+              <CardContent className="py-12 text-center text-body-sm text-muted-foreground">
                 Select a company to manage its HR managers.
               </CardContent>
             </Card>

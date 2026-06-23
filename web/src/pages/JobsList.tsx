@@ -6,6 +6,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { motion, type Variants } from 'framer-motion';
 import { Briefcase, X } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
@@ -27,11 +28,12 @@ const LANGUAGE_OPTIONS: { value: Language; label: string }[] = [
   { value: 'te', label: 'తెలుగు (Telugu)' },
 ];
 
+// Label resolved via t() at render time so it follows the UI language.
 const LEVEL_OPTIONS = [
-  { value: '', label: 'All levels' },
-  { value: 'entry', label: 'Entry Level' },
-  { value: 'mid', label: 'Mid Level' },
-  { value: 'senior', label: 'Senior Level' },
+  { value: '', labelKey: 'jobs.allLevels' },
+  { value: 'entry', labelKey: 'jobs.levelEntry' },
+  { value: 'mid', labelKey: 'jobs.levelMid' },
+  { value: 'senior', labelKey: 'jobs.levelSenior' },
 ] as const;
 
 type LevelFilter = '' | 'entry' | 'mid' | 'senior';
@@ -51,7 +53,7 @@ const fadeUp: Variants = {
 function JobCardSkeleton() {
   return (
     <div
-      className="rounded-lg border bg-card shadow-sm p-6 flex flex-col gap-4 animate-pulse"
+      className="rounded-2xl border border-border bg-card shadow-card p-6 flex flex-col gap-4 animate-pulse"
       aria-hidden="true"
     >
       <div className="flex items-start justify-between gap-3">
@@ -65,7 +67,7 @@ function JobCardSkeleton() {
       </div>
       <div className="flex items-center justify-between pt-2 border-t border-border">
         <Skeleton className="h-5 w-16 rounded-full" />
-        <Skeleton className="h-8 w-28 rounded-md" />
+        <Skeleton className="h-8 w-28 rounded-[9px]" />
       </div>
     </div>
   );
@@ -74,6 +76,7 @@ function JobCardSkeleton() {
 // ── JobsList page ─────────────────────────────────────────────────────────────
 
 export default function JobsList() {
+  const { t } = useTranslation();
   const { accessToken } = useAuth();
   const navigate = useNavigate();
   const { consented, loading: consentLoading, recordConsent } = useConsent();
@@ -161,9 +164,7 @@ export default function JobsList() {
         setPendingJobId(null);
       }
     } catch (err) {
-      setConsentError(
-        err instanceof Error ? err.message : 'Failed to record consent. Please try again.',
-      );
+      setConsentError(err instanceof Error ? err.message : t('jobs.consentError'));
     } finally {
       setIsSubmittingConsent(false);
     }
@@ -184,8 +185,8 @@ export default function JobsList() {
       <div className="space-y-6">
         {/* Toolbar skeleton */}
         <div className="flex flex-wrap items-center gap-3">
-          <Skeleton className="h-10 w-44 rounded-md" />
-          <Skeleton className="h-10 w-36 rounded-md" />
+          <Skeleton className="h-10 w-44 rounded-[9px]" />
+          <Skeleton className="h-10 w-36 rounded-[9px]" />
         </div>
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 3 }).map((_, i) => (
@@ -201,13 +202,13 @@ export default function JobsList() {
     return (
       <div
         role="alert"
-        className="rounded-xl border border-destructive/30 bg-destructive/5 p-6 flex flex-col sm:flex-row items-start sm:items-center gap-4"
+        className="rounded-3xl border border-destructive/30 bg-destructive/5 p-6 flex flex-col sm:flex-row items-start sm:items-center gap-4"
       >
-        <p className="text-sm text-destructive flex-1">
-          {error instanceof Error ? error.message : 'Failed to load jobs. Please try again.'}
+        <p className="text-body-sm text-destructive flex-1">
+          {error instanceof Error ? error.message : t('jobs.loadError')}
         </p>
         <Button type="button" variant="destructive" size="sm" onClick={() => void refetch()}>
-          Retry
+          {t('jobs.retry')}
         </Button>
       </div>
     );
@@ -226,16 +227,14 @@ export default function JobsList() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.25 }}
           role="alert"
-          className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-start justify-between gap-4 dark:border-amber-800 dark:bg-amber-950/40"
+          className="rounded-2xl border border-amber-600/30 bg-amber-50 px-4 py-3 flex items-start justify-between gap-4"
         >
-          <p className="text-sm text-amber-800 dark:text-amber-300">
-            You must consent to use the interview feature.
-          </p>
+          <p className="text-body-sm text-amber-600">{t('jobs.declineBanner')}</p>
           <button
             type="button"
             onClick={() => setShowDeclineBanner(false)}
-            aria-label="Dismiss"
-            className="shrink-0 rounded text-amber-600 hover:text-amber-800 focus:outline-none focus:ring-2 focus:ring-amber-500 dark:text-amber-400"
+            aria-label={t('jobs.dismiss')}
+            className="shrink-0 rounded text-amber-600/80 hover:text-amber-600 focus:outline-none focus:ring-2 focus:ring-amber-600/50"
           >
             <X className="h-4 w-4" aria-hidden="true" />
           </button>
@@ -246,12 +245,12 @@ export default function JobsList() {
       {startInterviewMutation.isError && (
         <div
           role="alert"
-          className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3"
+          className="rounded-2xl border border-destructive/30 bg-destructive/5 px-4 py-3"
         >
-          <p className="text-sm text-destructive">
+          <p className="text-body-sm text-destructive">
             {startInterviewMutation.error instanceof Error
               ? startInterviewMutation.error.message
-              : 'Failed to start interview. Please try again.'}
+              : t('jobs.startError')}
           </p>
         </div>
       )}
@@ -262,15 +261,15 @@ export default function JobsList() {
             and toHaveValue(); styled to match the design system. */}
         <label
           htmlFor="interview-language"
-          className="text-sm font-medium text-foreground shrink-0"
+          className="text-body-sm font-medium text-muted-foreground shrink-0"
         >
-          Interview language
+          {t('jobs.interviewLanguage')}
         </label>
         <select
           id="interview-language"
           value={selectedLanguage}
           onChange={(e) => setSelectedLanguage(e.target.value as Language)}
-          className="h-10 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+          className="h-10 rounded-[9px] border border-border bg-secondary px-3 py-2 text-body-sm text-foreground ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {LANGUAGE_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>
@@ -281,25 +280,29 @@ export default function JobsList() {
 
         {/* Level filter — native select so there are no Radix empty-value constraints */}
         <label htmlFor="level-filter" className="sr-only">
-          Filter by level
+          {t('jobs.filterByLevel')}
         </label>
         <select
           id="level-filter"
           value={levelFilter}
           onChange={(e) => setLevelFilter(e.target.value as LevelFilter)}
-          className="h-10 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+          className="h-10 rounded-[9px] border border-border bg-secondary px-3 py-2 text-body-sm text-foreground ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {LEVEL_OPTIONS.map((opt) => (
-            <option key={`level-${opt.label}`} value={opt.value}>
-              {opt.label}
+            <option key={`level-${opt.value}`} value={opt.value}>
+              {t(opt.labelKey)}
             </option>
           ))}
         </select>
 
         {/* Count */}
-        <p className="ml-auto text-sm text-muted-foreground">
-          {jobs.length} position{jobs.length !== 1 ? 's' : ''}
-          {levelFilter && <span className="ml-1 text-xs">(filtered from {allJobs.length})</span>}
+        <p className="ml-auto text-body-sm text-muted-foreground">
+          {t('jobs.positionsCount', { count: jobs.length })}
+          {levelFilter && (
+            <span className="ml-1 text-caption">
+              {t('jobs.filteredFrom', { count: allJobs.length })}
+            </span>
+          )}
         </p>
       </div>
 
@@ -307,24 +310,22 @@ export default function JobsList() {
       {jobs.length === 0 && (
         <div
           className={cn(
-            'rounded-xl border border-dashed border-border bg-muted/30',
+            'rounded-2xl border border-dashed border-border bg-muted/40',
             'flex flex-col items-center justify-center py-20 px-6 text-center gap-4',
           )}
         >
-          <div className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-muted">
-            <Briefcase className="h-7 w-7 text-muted-foreground" aria-hidden="true" />
+          <div className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-primary/10">
+            <Briefcase className="h-7 w-7 text-primary" aria-hidden="true" />
           </div>
           <div>
-            <p className="text-sm font-medium text-foreground">No positions found</p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {levelFilter
-                ? 'Try a different level filter or clear it to see all openings.'
-                : 'No open positions are available at the moment.'}
+            <p className="text-body font-semibold text-foreground">{t('jobs.noPositionsTitle')}</p>
+            <p className="mt-1 text-body-sm text-muted-foreground">
+              {levelFilter ? t('jobs.noPositionsFiltered') : t('jobs.noPositionsEmpty')}
             </p>
           </div>
           {levelFilter && (
             <Button type="button" variant="outline" size="sm" onClick={() => setLevelFilter('')}>
-              Clear filter
+              {t('jobs.clearFilter')}
             </Button>
           )}
         </div>

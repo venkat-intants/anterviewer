@@ -27,7 +27,8 @@ const fadeUp: Variants = {
   visible: { opacity: 1, y: 0, transition: { duration: 0.35, ease: [0.22, 1, 0.36, 1] } },
 };
 
-const PALETTE = ['hsl(var(--primary))', '#7c3aed', '#0ea5e9', '#10b981', '#f59e0b'];
+// Light-palette categorical series: Signal-Blue leads, then violet, emerald, amber, rose.
+const PALETTE = ['#0071e3', '#8b5cf6', '#10b981', '#f59e0b', '#ef4444'];
 
 function fmtScore(v: number | null | undefined, max: number): string {
   if (v === null || v === undefined) return '—';
@@ -53,19 +54,19 @@ function MetricTile({
   loading?: boolean;
 }) {
   return (
-    <Card className="shadow-sm">
+    <Card className="transition-shadow hover:shadow-card-hover">
       <CardContent className="flex items-start gap-3 pb-3 pt-4">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px] bg-secondary text-foreground">
           {icon}
         </div>
         <div className="min-w-0 flex-1">
-          <p className="mb-0.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
             {label}
           </p>
           {loading ? (
             <Skeleton className="h-6 w-12 rounded" />
           ) : (
-            <p className="text-xl font-bold leading-none text-foreground">{value}</p>
+            <p className="text-xl font-semibold leading-none text-foreground">{value}</p>
           )}
           {sub && !loading && <p className="mt-1 text-[11px] text-muted-foreground">{sub}</p>}
         </div>
@@ -87,18 +88,18 @@ function FunnelChart({ a }: { a: HrAnalytics }) {
     return (
       <div className="flex h-[220px] flex-col items-center justify-center gap-3 text-center">
         <BarChart3 className="h-8 w-8 text-muted-foreground/40" aria-hidden="true" />
-        <p className="text-sm text-muted-foreground">No pipeline data yet.</p>
+        <p className="text-body-sm text-muted-foreground">No pipeline data yet.</p>
       </div>
     );
   }
   return (
     <ResponsiveContainer width="100%" height={220}>
       <BarChart data={data} layout="vertical" margin={{ top: 4, right: 24, bottom: 0, left: 8 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" horizontal={false} />
+        <CartesianGrid strokeDasharray="3 3" stroke="#e8e8ed" horizontal={false} />
         <XAxis
           type="number"
           allowDecimals={false}
-          tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }}
+          tick={{ fill: '#707070', fontSize: 11 }}
           tickLine={false}
           axisLine={false}
         />
@@ -106,23 +107,24 @@ function FunnelChart({ a }: { a: HrAnalytics }) {
           type="category"
           dataKey="stage"
           width={84}
-          tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }}
+          tick={{ fill: '#707070', fontSize: 11 }}
           tickLine={false}
           axisLine={false}
         />
         <Tooltip
           contentStyle={{
-            background: 'hsl(var(--card))',
-            border: '1px solid hsl(var(--border))',
-            borderRadius: '8px',
+            background: '#ffffff',
+            border: '1px solid #e8e8ed',
+            borderRadius: '10px',
             fontSize: 12,
+            color: '#1d1d1f',
           }}
           formatter={(value) => [value ?? 0, 'Candidates']}
-          cursor={{ fill: 'hsl(var(--muted))', opacity: 0.4 }}
+          cursor={{ fill: '#f4f4f5', opacity: 0.6 }}
         />
         <Bar dataKey="count" radius={[0, 4, 4, 0]}>
           {data.map((_, i) => (
-            <Cell key={i} fill={PALETTE[i % PALETTE.length]} fillOpacity={0.85} />
+            <Cell key={i} fill={PALETTE[i % PALETTE.length]} fillOpacity={0.9} />
           ))}
         </Bar>
       </BarChart>
@@ -180,16 +182,16 @@ export default function HRAnalytics() {
       </motion.div>
 
       <motion.div variants={fadeUp}>
-        <Card className="shadow-sm">
+        <Card className="rounded-2xl shadow-elevated">
           <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-base">
-              <BarChart3 className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+            <CardTitle className="flex items-center gap-2 text-body-lg font-semibold text-foreground">
+              <BarChart3 className="h-4 w-4 text-primary" aria-hidden="true" />
               Hiring funnel
             </CardTitle>
           </CardHeader>
           <CardContent>
             {isLoading ? (
-              <Skeleton className="h-[220px] w-full rounded-lg" />
+              <Skeleton className="h-[220px] w-full rounded-xl" />
             ) : data ? (
               <FunnelChart a={data} />
             ) : null}
@@ -202,10 +204,10 @@ export default function HRAnalytics() {
 
 export function HRAnalyticsPage() {
   return (
-    <div className="max-w-5xl space-y-6">
+    <div className="space-y-8">
       <div>
-        <h1 className="text-2xl font-bold text-foreground">Hiring analytics</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
+        <h1 className="text-2xl font-semibold tracking-tight text-foreground">Hiring analytics</h1>
+        <p className="mt-2 text-body-sm text-muted-foreground">
           Your company&apos;s funnel — counts at every stage and average scores.
         </p>
       </div>

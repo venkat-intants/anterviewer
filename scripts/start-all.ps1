@@ -200,27 +200,27 @@ Write-Step "Polling interview_core health..."
 Wait-Http -Url "http://localhost:8001/health/live" -Label "interview_core" -TimeoutSecs 30
 
 # ---------------------------------------------------------------------------
-# Step 5 — Start web (Vite dev server, port 5173)
+# Step 5 — Start web (Vite dev server, port 5174)
 # ---------------------------------------------------------------------------
-Write-Step "Starting web (Vite dev server, port 5173)..."
+Write-Step "Starting web (Vite dev server, port 5174)..."
 $webDir = Join-Path $RepoRoot "web"
 # On Windows, npm is npm.cmd — invoke via cmd.exe to ensure correct resolution.
 $webCmd = "cmd.exe /c 'npm.cmd run dev'"
 Start-Service -Name "web" -WorkingDir $webDir -Command $webCmd -LogsDir $logsDir | Out-Null
 
 Write-Step "Polling web dev server..."
-Wait-Http -Url "http://localhost:5173" -Label "web (Vite)" -TimeoutSecs 30
+Wait-Http -Url "http://localhost:5174" -Label "web (Vite)" -TimeoutSecs 30
 
 # ---------------------------------------------------------------------------
 # Success block
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Green
-Write-Host "  All 4 services up -- open http://localhost:5173" -ForegroundColor Green
+Write-Host "  All 4 services up -- open http://localhost:5174" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Service URLs:" -ForegroundColor White
-Write-Host "    web (Vite)        http://localhost:5173" -ForegroundColor White
+Write-Host "    web (Vite)        http://localhost:5174" -ForegroundColor White
 Write-Host "    interview_core    http://localhost:8001   ws://localhost:8001/ws" -ForegroundColor White
 Write-Host "    data_gateway      http://localhost:8002" -ForegroundColor White
 Write-Host "    MinIO console     http://localhost:9001" -ForegroundColor White

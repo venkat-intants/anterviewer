@@ -97,15 +97,15 @@ function EmptyState({ onUploadSuccess }: { onUploadSuccess: () => void }) {
 
   return (
     <div
-      className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border py-16 text-center gap-4"
+      className="flex flex-col items-center justify-center rounded-3xl border border-dashed border-border bg-muted/40 py-16 text-center gap-4"
       data-testid="resume-empty-state"
     >
-      <div className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-muted">
-        <FileText className="h-7 w-7 text-muted-foreground/50" aria-hidden="true" />
+      <div className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-secondary ring-1 ring-border">
+        <FileText className="h-7 w-7 text-primary" aria-hidden="true" />
       </div>
       <div>
-        <p className="font-medium text-foreground">{t('resume.noResumeTitle')}</p>
-        <p className="mt-1 text-sm text-muted-foreground">
+        <p className="text-body font-semibold text-foreground">{t('resume.noResumeTitle')}</p>
+        <p className="mt-1 text-body-sm text-muted-foreground">
           {t('resume.noResumeDesc')}
         </p>
       </div>
@@ -180,8 +180,8 @@ function ResumeVersionRow({
     <motion.div
       variants={fadeUp}
       className={cn(
-        'flex flex-col sm:flex-row sm:items-center gap-3 rounded-lg border border-border bg-card p-4',
-        item.is_current && 'border-primary/30 bg-primary/5',
+        'flex flex-col sm:flex-row sm:items-center gap-3 rounded-xl border border-border bg-white p-4 transition-shadow hover:shadow-card-hover',
+        item.is_current && 'border-primary/30 bg-muted ring-1 ring-primary/10',
       )}
       data-testid={`resume-version-${item.resume_id}`}
     >
@@ -189,8 +189,10 @@ function ResumeVersionRow({
       <div className="flex items-start gap-3 flex-1 min-w-0">
         <div
           className={cn(
-            'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg',
-            item.is_current ? 'bg-primary/15 text-primary' : 'bg-muted text-muted-foreground',
+            'flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px]',
+            item.is_current
+              ? 'bg-secondary text-foreground'
+              : 'bg-secondary text-muted-foreground',
           )}
         >
           <FileText className="h-4 w-4" aria-hidden="true" />
@@ -198,19 +200,19 @@ function ResumeVersionRow({
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <p
-              className="text-sm font-medium text-foreground truncate"
+              className="text-body-sm font-medium text-foreground truncate"
               title={item.filename}
             >
               {item.filename}
             </p>
             {item.is_current && (
-              <Badge variant="default" className="text-xs gap-1">
+              <Badge variant="accent" className="text-xs gap-1">
                 <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
                 {t('resume.currentBadge')}
               </Badge>
             )}
           </div>
-          <p className="mt-0.5 text-xs text-muted-foreground">
+          <p className="mt-0.5 text-caption text-muted-foreground">
             {t('resume.uploaded')} {formatDate(item.uploaded_at)} · {formatBytes(item.text_length)} {t('resume.extracted')}
           </p>
         </div>
@@ -347,14 +349,14 @@ export default function Resume() {
       initial="hidden"
       animate="visible"
       variants={stagger}
-      className="max-w-2xl space-y-6"
+      className="space-y-6"
     >
       {/* Page heading */}
       <motion.div variants={fadeUp}>
-        <h1 id="resume-heading" className="text-2xl font-bold text-foreground">
+        <h1 id="resume-heading" className="text-heading font-semibold text-foreground">
           {t('resume.pageTitle')}
         </h1>
-        <p className="mt-1 text-sm text-muted-foreground">
+        <p className="mt-1 text-body-sm text-muted-foreground">
           {t('resume.pageDesc')}
         </p>
       </motion.div>
@@ -370,30 +372,30 @@ export default function Resume() {
           {/* Current resume highlight */}
           {currentResume && (
             <motion.div variants={fadeUp}>
-              <Card className="shadow-sm border-primary/25 bg-primary/5">
+              <Card className="shadow-elevated border-primary/25 bg-muted ring-1 ring-primary/10">
                 <CardHeader className="pb-3">
-                  <CardTitle className="text-base flex items-center gap-2">
+                  <CardTitle className="text-body-lg font-semibold text-foreground flex items-center gap-2">
                     <CheckCircle2 className="h-4 w-4 text-primary" aria-hidden="true" />
                     {t('resume.activeResumeTitle')}
                   </CardTitle>
-                  <CardDescription>
+                  <CardDescription className="text-muted-foreground">
                     {t('resume.activeResumeDesc')}
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
                   <div className="flex items-center justify-between flex-wrap gap-3">
                     <div className="flex items-center gap-3 min-w-0">
-                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px] bg-secondary text-foreground">
                         <FileText className="h-4 w-4" aria-hidden="true" />
                       </div>
                       <div className="min-w-0">
                         <p
-                          className="text-sm font-medium text-foreground truncate"
+                          className="text-body-sm font-medium text-foreground truncate"
                           title={currentResume.filename}
                         >
                           {currentResume.filename}
                         </p>
-                        <p className="text-xs text-muted-foreground mt-0.5">
+                        <p className="text-caption text-muted-foreground mt-0.5">
                           {t('resume.uploaded')} {formatDate(currentResume.uploaded_at)}
                         </p>
                       </div>
@@ -421,7 +423,7 @@ export default function Resume() {
             <motion.div variants={fadeUp}>
               <div
                 role="alert"
-                className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive"
+                className="flex items-center gap-2 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-body-sm text-destructive"
               >
                 <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
                 {t('resume.currentLoadError')}
@@ -431,13 +433,13 @@ export default function Resume() {
 
           {/* Upload new version */}
           <motion.div variants={fadeUp}>
-            <Card className="shadow-sm">
+            <Card className="shadow-card">
               <CardHeader className="pb-3">
-                <CardTitle className="text-base flex items-center gap-2">
-                  <Upload className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+                <CardTitle className="text-body-lg font-semibold text-foreground flex items-center gap-2">
+                  <Upload className="h-4 w-4 text-primary" aria-hidden="true" />
                   {t('resume.uploadTitle')}
                 </CardTitle>
-                <CardDescription>
+                <CardDescription className="text-muted-foreground">
                   {t('resume.uploadDesc')}
                 </CardDescription>
               </CardHeader>
@@ -456,7 +458,7 @@ export default function Resume() {
 
           {/* Version history */}
           <motion.div variants={fadeUp} className="space-y-3">
-            <h2 className="text-sm font-semibold text-foreground">
+            <h2 className="text-body-sm font-semibold text-foreground">
               {t('resume.versionHistory', { count: resumeList.length })}
             </h2>
             <div className="space-y-2" aria-label="Resume version list">

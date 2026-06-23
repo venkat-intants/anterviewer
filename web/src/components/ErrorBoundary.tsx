@@ -7,6 +7,7 @@
 import { Component } from 'react';
 import type { ReactNode, ErrorInfo } from 'react';
 import { AlertTriangle, RotateCcw } from 'lucide-react';
+import i18n from '@/lib/i18n';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/lib/toast';
 
@@ -53,24 +54,26 @@ export class ErrorBoundary extends Component<Props, State> {
           role="alert"
           aria-live="assertive"
         >
-          <div className="max-w-md w-full text-center space-y-6">
-            <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-destructive/10">
+          <div className="max-w-md w-full text-center space-y-8">
+            <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-xl bg-destructive/10 ring-1 ring-inset ring-destructive/20">
               <AlertTriangle className="h-8 w-8 text-destructive" aria-hidden="true" />
             </div>
-            <div className="space-y-2">
-              <h1 className="text-xl font-semibold text-foreground">Something went wrong</h1>
-              <p className="text-sm text-muted-foreground">
-                An unexpected error occurred. Reload the page to try again.
+            <div className="space-y-3">
+              <h1 className="text-heading font-semibold text-foreground">
+                {i18n.t('error.errorBoundaryTitle')}
+              </h1>
+              <p className="text-body-sm text-muted-foreground">
+                {i18n.t('error.errorBoundaryDesc')}
               </p>
               {import.meta.env.DEV && this.state.errorMessage && (
-                <p className="mt-2 rounded-md bg-muted px-4 py-2 text-left font-mono text-xs text-muted-foreground break-all">
+                <p className="mt-2 rounded-xl border border-border bg-muted/40 px-4 py-2 text-left font-mono text-caption text-muted-foreground break-all">
                   {this.state.errorMessage}
                 </p>
               )}
             </div>
             <Button onClick={this.handleReload} className="gap-2">
               <RotateCcw className="h-4 w-4" aria-hidden="true" />
-              Reload page
+              {i18n.t('error.reload')}
             </Button>
           </div>
         </main>

@@ -31,16 +31,29 @@ function fmtScore(v: number | null): string {
   return v.toFixed(2);
 }
 
-// Brand colour palette — deterministic by index so charts are stable
+// Light categorical palette — Signal-Blue leads, cool secondaries follow.
+// Deterministic by index so series colours stay stable across renders.
 const PALETTE = [
-  'hsl(var(--primary))',
-  '#7c3aed',
-  '#0ea5e9',
-  '#10b981',
-  '#f59e0b',
-  '#ef4444',
-  '#8b5cf6',
+  '#0071e3', // Signal-Blue (primary series)
+  '#8b5cf6', // violet
+  '#10b981', // emerald
+  '#f59e0b', // amber
+  '#ef4444', // rose
+  '#06b6d4', // cyan
+  '#ec4899', // pink
 ];
+
+// Light tooltip styling for recharts surfaces.
+const TOOLTIP_STYLE = {
+  background: '#ffffff',
+  border: '1px solid #e8e8ed',
+  borderRadius: '10px',
+  fontSize: 12,
+  color: '#1d1d1f',
+} as const;
+
+const GRID_STROKE = '#e8e8ed';
+const AXIS_TICK = { fill: '#707070', fontSize: 11 } as const;
 
 // ── Animation ──────────────────────────────────────────────────────────────────
 
@@ -69,7 +82,7 @@ function ChartEmpty({ height = 220 }: { height?: number }) {
       style={{ height }}
     >
       <BarChart3 className="h-8 w-8 text-muted-foreground/40" aria-hidden="true" />
-      <p className="text-sm text-muted-foreground">No data available yet.</p>
+      <p className="text-body-sm text-muted-foreground">No data available yet.</p>
     </div>
   );
 }
@@ -88,10 +101,10 @@ function ByRoleChart({
         layout="vertical"
         margin={{ top: 4, right: 24, bottom: 0, left: 8 }}
       >
-        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" horizontal={false} />
+        <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} horizontal={false} />
         <XAxis
           type="number"
-          tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }}
+          tick={AXIS_TICK}
           tickLine={false}
           axisLine={false}
           allowDecimals={false}
@@ -100,17 +113,13 @@ function ByRoleChart({
           type="category"
           dataKey="job_title"
           width={130}
-          tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }}
+          tick={AXIS_TICK}
           tickLine={false}
           axisLine={false}
         />
         <Tooltip
-          contentStyle={{
-            background: 'hsl(var(--card))',
-            border: '1px solid hsl(var(--border))',
-            borderRadius: '8px',
-            fontSize: 12,
-          }}
+          cursor={{ fill: 'rgba(0,0,0,0.04)' }}
+          contentStyle={TOOLTIP_STYLE}
           formatter={(value, name) => {
             if (name === 'interview_count') return [value ?? 0, 'Interviews'];
             return [`${Number(value ?? 0)} / 10`, 'Avg Score'];
@@ -151,30 +160,26 @@ function ByRoleScoreChart({
   return (
     <ResponsiveContainer width="100%" height={240}>
       <BarChart data={chartData} margin={{ top: 4, right: 16, bottom: 0, left: 0 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+        <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} vertical={false} />
         <XAxis
           dataKey="name"
-          tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }}
+          tick={AXIS_TICK}
           tickLine={false}
           axisLine={false}
         />
         <YAxis
           domain={[0, 10]}
-          tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }}
+          tick={AXIS_TICK}
           tickLine={false}
           axisLine={false}
         />
         <Tooltip
-          contentStyle={{
-            background: 'hsl(var(--card))',
-            border: '1px solid hsl(var(--border))',
-            borderRadius: '8px',
-            fontSize: 12,
-          }}
+          cursor={{ fill: 'rgba(0,0,0,0.04)' }}
+          contentStyle={TOOLTIP_STYLE}
           formatter={(value, name) => [`${Number(value ?? 0).toFixed(2)} / 10`, name]}
         />
         <Legend
-          wrapperStyle={{ fontSize: 11, color: 'hsl(var(--muted-foreground))' }}
+          wrapperStyle={{ fontSize: 11, color: '#707070' }}
         />
         <Bar dataKey="Communication" fill={PALETTE[0]} fillOpacity={0.8} radius={[2, 2, 0, 0]} />
         <Bar dataKey="Technical" fill={PALETTE[1]} fillOpacity={0.8} radius={[2, 2, 0, 0]} />
@@ -218,12 +223,7 @@ function ByLanguagePie({
             ))}
           </Pie>
           <Tooltip
-            contentStyle={{
-              background: 'hsl(var(--card))',
-              border: '1px solid hsl(var(--border))',
-              borderRadius: '8px',
-              fontSize: 12,
-            }}
+            contentStyle={TOOLTIP_STYLE}
             formatter={(value, _name, props) => [
               `${Number(value ?? 0)} interviews · avg ${fmtScore((props.payload as { avg?: number | null } | undefined)?.avg ?? null)} / 10`,
             ]}
@@ -234,7 +234,7 @@ function ByLanguagePie({
       {/* Legend / table */}
       <div className="space-y-1.5">
         {data.map((d, i) => (
-          <div key={d.language} className="flex items-center justify-between text-sm">
+          <div key={d.language} className="flex items-center justify-between text-body-sm">
             <div className="flex items-center gap-2">
               <span
                 className="inline-block h-3 w-3 rounded-sm"
@@ -273,38 +273,34 @@ function DistributionSection({
     <div className="space-y-4">
       <ResponsiveContainer width="100%" height={180}>
         <BarChart data={buckets} margin={{ top: 4, right: 16, bottom: 0, left: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+          <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} vertical={false} />
           <XAxis
             dataKey="label"
-            tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }}
+            tick={AXIS_TICK}
             tickLine={false}
             axisLine={false}
           />
           <YAxis
-            tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }}
+            tick={AXIS_TICK}
             tickLine={false}
             axisLine={false}
             allowDecimals={false}
           />
           <Tooltip
-            contentStyle={{
-              background: 'hsl(var(--card))',
-              border: '1px solid hsl(var(--border))',
-              borderRadius: '8px',
-              fontSize: 12,
-            }}
+            cursor={{ fill: 'rgba(0,0,0,0.04)' }}
+            contentStyle={TOOLTIP_STYLE}
             formatter={(value) => [value ?? 0, 'Interviews']}
           />
-          <Bar dataKey="count" fill="hsl(var(--primary))" fillOpacity={0.8} radius={[4, 4, 0, 0]} />
+          <Bar dataKey="count" fill="#0071e3" fillOpacity={0.85} radius={[4, 4, 0, 0]} />
         </BarChart>
       </ResponsiveContainer>
 
       {/* Per-axis averages */}
-      <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-muted-foreground border-t border-border pt-3">
-        <span>Communication: <strong className="text-foreground">{fmtScore(avgCommunication)}</strong></span>
-        <span>Technical: <strong className="text-foreground">{fmtScore(avgTechnical)}</strong></span>
-        <span>Problem Solving: <strong className="text-foreground">{fmtScore(avgProblemSolving)}</strong></span>
-        <span>Confidence: <strong className="text-foreground">{fmtScore(avgConfidence)}</strong></span>
+      <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-caption text-muted-foreground border-t border-border pt-3">
+        <span>Communication: <strong className="text-foreground font-semibold">{fmtScore(avgCommunication)}</strong></span>
+        <span>Technical: <strong className="text-foreground font-semibold">{fmtScore(avgTechnical)}</strong></span>
+        <span>Problem Solving: <strong className="text-foreground font-semibold">{fmtScore(avgProblemSolving)}</strong></span>
+        <span>Confidence: <strong className="text-foreground font-semibold">{fmtScore(avgConfidence)}</strong></span>
       </div>
     </div>
   );
@@ -354,8 +350,8 @@ export default function AdminAnalytics() {
     <motion.div initial="hidden" animate="visible" variants={stagger} className="space-y-8">
       {/* Page heading */}
       <motion.div variants={fadeUp}>
-        <h1 className="text-2xl font-bold text-foreground">Analytics</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
+        <h1 className="text-heading font-semibold text-foreground">Analytics</h1>
+        <p className="mt-2 text-body-sm text-muted-foreground">
           Aggregated performance data broken down by role, language, and score distribution.
         </p>
       </motion.div>
@@ -363,9 +359,9 @@ export default function AdminAnalytics() {
       {/* Row 1: by-role count + by-role score breakdown */}
       <motion.div variants={fadeUp} className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Interview count by role */}
-        <Card className="shadow-sm">
+        <Card className="transition-shadow hover:shadow-card-hover">
           <CardHeader className="pb-2">
-            <CardTitle className="text-base">Interviews by Role</CardTitle>
+            <CardTitle className="text-subheading font-semibold text-foreground">Interviews by Role</CardTitle>
           </CardHeader>
           <CardContent>
             {roleLoading ? (
@@ -379,9 +375,9 @@ export default function AdminAnalytics() {
         </Card>
 
         {/* Axis-score averages by role */}
-        <Card className="shadow-sm">
+        <Card className="transition-shadow hover:shadow-card-hover">
           <CardHeader className="pb-2">
-            <CardTitle className="text-base">Avg Axis Scores by Role</CardTitle>
+            <CardTitle className="text-subheading font-semibold text-foreground">Avg Axis Scores by Role</CardTitle>
           </CardHeader>
           <CardContent>
             {roleLoading ? (
@@ -398,9 +394,9 @@ export default function AdminAnalytics() {
       {/* Row 2: by-language + score distribution */}
       <motion.div variants={fadeUp} className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* By language */}
-        <Card className="shadow-sm">
+        <Card className="transition-shadow hover:shadow-card-hover">
           <CardHeader className="pb-2">
-            <CardTitle className="text-base">Interviews by Language</CardTitle>
+            <CardTitle className="text-subheading font-semibold text-foreground">Interviews by Language</CardTitle>
           </CardHeader>
           <CardContent>
             {langLoading ? (
@@ -414,9 +410,9 @@ export default function AdminAnalytics() {
         </Card>
 
         {/* Score distribution */}
-        <Card className="shadow-sm">
+        <Card className="transition-shadow hover:shadow-card-hover">
           <CardHeader className="pb-2">
-            <CardTitle className="text-base">Score Distribution</CardTitle>
+            <CardTitle className="text-subheading font-semibold text-foreground">Score Distribution</CardTitle>
           </CardHeader>
           <CardContent>
             {distLoading ? (

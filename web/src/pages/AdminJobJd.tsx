@@ -83,12 +83,12 @@ export default function AdminJobJd() {
       initial="hidden"
       animate="visible"
       variants={fadeUp}
-      className="max-w-2xl mx-auto space-y-6"
+      className="space-y-6"
     >
       {/* Page heading */}
       <div>
-        <h1 className="text-2xl font-bold text-foreground">Upload Job Description</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
+        <h1 className="text-subheading font-semibold text-foreground">Upload Job Description</h1>
+        <p className="mt-1 text-body-sm text-muted-foreground">
           Select a job posting, then upload its PDF job description. The AI will use this to
           generate targeted interview questions.
         </p>
@@ -97,13 +97,13 @@ export default function AdminJobJd() {
       <Separator />
 
       {/* Main card */}
-      <Card className="shadow-sm">
+      <Card className="shadow-card transition-shadow hover:shadow-card-hover">
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
+          <CardTitle className="flex items-center gap-2 text-body-lg text-foreground">
             <FileText className="h-5 w-5 text-primary" aria-hidden="true" />
             Job Description Upload
           </CardTitle>
-          <CardDescription>
+          <CardDescription className="text-muted-foreground">
             PDF only — maximum 10 MB. The document will be parsed and indexed for AI grounding.
           </CardDescription>
         </CardHeader>
@@ -111,12 +111,12 @@ export default function AdminJobJd() {
         <CardContent className="space-y-8">
           {/* ── Job picker ─────────────────────────────────────────────────── */}
           <div className="space-y-2">
-            <label htmlFor="job-select" className="text-sm font-medium text-foreground">
+            <label htmlFor="job-select" className="text-body-sm font-medium text-foreground">
               Job posting
             </label>
 
             {jobsLoading && (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <div className="flex items-center gap-2 text-body-sm text-muted-foreground">
                 <div
                   className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent"
                   role="status"
@@ -172,7 +172,7 @@ export default function AdminJobJd() {
           {/* ── Upload zone ─────────────────────────────────────────────────── */}
           {selectedJobId ? (
             <div className="space-y-3">
-              <p className="text-sm text-muted-foreground">
+              <p className="text-body-sm text-muted-foreground">
                 JD document for{' '}
                 <span className="font-medium text-foreground">{selectedJobTitle}</span>
               </p>
@@ -185,12 +185,12 @@ export default function AdminJobJd() {
               />
             </div>
           ) : (
-            <div className="rounded-xl border-2 border-dashed border-border bg-muted/30 p-10 text-center">
+            <div className="rounded-xl border border-dashed border-border bg-muted/40 p-10 text-center">
               <FileText
                 className="mx-auto h-10 w-10 text-muted-foreground/40 mb-3"
                 aria-hidden="true"
               />
-              <p className="text-sm text-muted-foreground">
+              <p className="text-body-sm text-muted-foreground">
                 Select a job above to enable JD upload
               </p>
             </div>

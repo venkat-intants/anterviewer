@@ -59,19 +59,19 @@ interface StatCardProps {
 
 function StatCard({ icon, label, value, loading, className }: StatCardProps) {
   return (
-    <Card className={cn('shadow-sm', className)}>
+    <Card className={cn('transition-shadow hover:shadow-card-hover', className)}>
       <CardContent className="pt-6 flex items-start gap-4">
-        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary shrink-0">
+        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-secondary text-foreground shrink-0">
           {icon}
         </div>
         <div className="min-w-0">
-          <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide mb-1">
+          <p className="text-caption text-muted-foreground font-medium uppercase tracking-wide mb-1.5">
             {label}
           </p>
           {loading ? (
             <Skeleton className="h-6 w-20 rounded" />
           ) : (
-            <p className="text-xl font-bold text-foreground leading-none">{value}</p>
+            <p className="text-subheading font-semibold text-foreground leading-none">{value}</p>
           )}
         </div>
       </CardContent>
@@ -201,7 +201,7 @@ export default function Dashboard() {
     return (
       <div role="alert" className="flex flex-col items-center justify-center py-24 gap-4">
         <AlertCircle className="h-10 w-10 text-destructive" aria-hidden="true" />
-        <p className="text-sm text-muted-foreground">
+        <p className="text-body-sm text-muted-foreground">
           {error instanceof Error ? error.message : t('dashboard.failedToLoadProfile')}
         </p>
         <Button variant="outline" onClick={() => logoutMutation.mutate()}>
@@ -216,7 +216,7 @@ export default function Dashboard() {
       {/* Welcome header */}
       <motion.div variants={fadeUp} className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-foreground">
+          <h1 className="text-heading font-semibold text-foreground">
             {isLoading ? (
               <Skeleton className="h-8 w-56 rounded" />
             ) : (
@@ -224,7 +224,7 @@ export default function Dashboard() {
             )}
           </h1>
           {!isLoading && userEmail && (
-            <p className="mt-1 text-sm text-muted-foreground">
+            <p className="mt-1.5 text-body-sm text-muted-foreground">
               {t('dashboard.signedInAs')}{' '}
               <span className="font-medium text-foreground">{userEmail}</span>
             </p>
@@ -265,7 +265,7 @@ export default function Dashboard() {
         <StatCard
           icon={
             hasResume ? (
-              <CheckCircle2 className="h-5 w-5 text-green-600" />
+              <CheckCircle2 className="h-5 w-5 text-emerald-600" />
             ) : (
               <FileText className="h-5 w-5" />
             )
@@ -279,18 +279,18 @@ export default function Dashboard() {
                 : t('dashboard.statResumeMissing')
           }
           loading={statsLoading}
-          className={hasResume ? 'border-green-200' : undefined}
+          className={hasResume ? 'border-emerald-300 bg-emerald-50/40' : undefined}
         />
       </motion.div>
 
       {/* Quick actions */}
       <motion.section variants={fadeUp} aria-labelledby="quick-actions-heading">
-        <Card className="shadow-sm">
+        <Card className="bg-card">
           <CardHeader className="pb-3">
-            <CardTitle className="text-base" id="quick-actions-heading">
+            <CardTitle className="text-body-lg text-foreground" id="quick-actions-heading">
               {t('dashboard.quickActionsTitle')}
             </CardTitle>
-            <CardDescription>
+            <CardDescription className="text-muted-foreground">
               {t('dashboard.quickActionsDesc')}
             </CardDescription>
           </CardHeader>
@@ -315,10 +315,12 @@ export default function Dashboard() {
       {/* Recent interviews + Resume — two-column at lg */}
       <motion.div variants={fadeUp} className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Recent interviews */}
-        <Card className="shadow-sm">
+        <Card className="bg-card">
           <CardHeader className="flex-row items-center justify-between space-y-0 pb-3">
             <div>
-              <CardTitle className="text-base">{t('dashboard.recentInterviewsTitle')}</CardTitle>
+              <CardTitle className="text-body-lg text-foreground">
+                {t('dashboard.recentInterviewsTitle')}
+              </CardTitle>
             </div>
             <Button variant="ghost" size="sm" asChild className="gap-1 text-muted-foreground">
               <Link to="/history">
@@ -330,13 +332,13 @@ export default function Dashboard() {
           <CardContent>
             {sessionsLoading ? (
               <div className="space-y-3">
-                <Skeleton className="h-14 w-full rounded-lg" />
-                <Skeleton className="h-14 w-full rounded-lg" />
+                <Skeleton className="h-14 w-full rounded-xl" />
+                <Skeleton className="h-14 w-full rounded-xl" />
               </div>
             ) : recentSessions.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-10 text-center gap-2">
                 <History className="h-8 w-8 text-muted-foreground/40" aria-hidden="true" />
-                <p className="text-sm text-muted-foreground">
+                <p className="text-body-sm text-muted-foreground">
                   {t('dashboard.recentInterviewsEmpty')}
                 </p>
               </div>
@@ -347,22 +349,22 @@ export default function Dashboard() {
                   return (
                     <li
                       key={session.session_id}
-                      className="flex items-start justify-between gap-3 rounded-lg border border-border bg-muted/30 p-3"
+                      className="flex items-start justify-between gap-3 rounded-xl border border-border bg-muted/40 p-3 transition-colors hover:border-primary/30 hover:bg-accent"
                       data-testid={`recent-session-${session.session_id}`}
                     >
                       <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium text-foreground truncate">
+                        <p className="text-body-sm font-medium text-foreground truncate">
                           {session.job_title}
                         </p>
-                        <div className="mt-1 flex items-center gap-2 flex-wrap">
+                        <div className="mt-1.5 flex items-center gap-2 flex-wrap">
                           <Badge variant={variant} className="text-xs">
                             {label}
                           </Badge>
-                          <span className="text-xs text-muted-foreground flex items-center gap-1">
+                          <span className="text-caption text-muted-foreground flex items-center gap-1">
                             <Clock className="h-3 w-3" aria-hidden="true" />
                             {formatDuration(session.duration_seconds)}
                           </span>
-                          <span className="text-xs text-muted-foreground">
+                          <span className="text-caption text-muted-foreground">
                             {formatDate(session.created_at)}
                           </span>
                         </div>
@@ -388,11 +390,13 @@ export default function Dashboard() {
         </Card>
 
         {/* Resume card */}
-        <Card className="shadow-sm">
+        <Card className="bg-card">
           <CardHeader className="flex-row items-center justify-between space-y-0 pb-3">
             <div>
-              <CardTitle className="text-base">{t('dashboard.resumeCardTitle')}</CardTitle>
-              <CardDescription className="mt-1 text-xs">
+              <CardTitle className="text-body-lg text-foreground">
+                {t('dashboard.resumeCardTitle')}
+              </CardTitle>
+              <CardDescription className="mt-1 text-caption text-muted-foreground">
                 {t('dashboard.resumeCardDesc')}
               </CardDescription>
             </div>

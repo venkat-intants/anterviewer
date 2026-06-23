@@ -23,7 +23,7 @@ export default function LanguageSwitcher() {
     <div
       role="group"
       aria-label={t('lang.label')}
-      className="hidden sm:flex items-center rounded-full border border-border bg-muted/50 p-0.5 gap-0.5"
+      className="hidden sm:flex items-center rounded-full border border-border bg-secondary p-0.5 gap-0.5"
     >
       {LANGUAGES.map(({ code, label }) => {
         const isActive = current === code || (code === 'en' && !['hi', 'te'].includes(current));
@@ -37,7 +37,7 @@ export default function LanguageSwitcher() {
             className={cn(
               'rounded-full px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
               isActive
-                ? 'bg-background text-foreground shadow-sm'
+                ? 'bg-white text-foreground shadow-sm'
                 : 'text-muted-foreground hover:text-foreground',
             )}
           >

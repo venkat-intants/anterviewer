@@ -50,9 +50,9 @@ function fmtScore(v: number | null): string {
 }
 
 function scoreColorClass(score: number): string {
-  if (score >= 8) return 'text-green-600';
+  if (score >= 8) return 'text-emerald-600';
   if (score >= 6) return 'text-primary';
-  if (score >= 4) return 'text-amber-500';
+  if (score >= 4) return 'text-amber-600';
   return 'text-destructive';
 }
 
@@ -107,25 +107,26 @@ function ScorecardRadar({ scorecard }: { scorecard: ScorecardDetail }) {
   return (
     <ResponsiveContainer width="100%" height={220}>
       <RadarChart data={data} margin={{ top: 8, right: 24, bottom: 8, left: 24 }}>
-        <PolarGrid stroke="hsl(var(--border))" />
+        <PolarGrid stroke="#e8e8ed" />
         <PolarAngleAxis
           dataKey="dimension"
-          tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }}
+          tick={{ fill: '#707070', fontSize: 11 }}
         />
         <Tooltip
           contentStyle={{
-            background: 'hsl(var(--card))',
-            border: '1px solid hsl(var(--border))',
-            borderRadius: '8px',
+            background: '#ffffff',
+            border: '1px solid #e8e8ed',
+            borderRadius: '10px',
             fontSize: 12,
+            color: '#1d1d1f',
           }}
           formatter={(value) => [`${Number(value ?? 0)} / 10`, 'Score']}
         />
         <Radar
           name="Score"
           dataKey="score"
-          stroke="hsl(var(--primary))"
-          fill="hsl(var(--primary))"
+          stroke="#0071e3"
+          fill="#0071e3"
           fillOpacity={0.15}
           strokeWidth={2}
         />
@@ -161,11 +162,11 @@ function ScoreBarRow({
         aria-controls={panelId}
         className={cn(
           'w-full flex items-center justify-between gap-2 rounded-md -mx-1 px-1 py-1 text-left',
-          'transition-colors hover:bg-muted/60',
-          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
+          'transition-colors hover:bg-muted/40',
+          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40',
         )}
       >
-        <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+        <span className="flex items-center gap-1.5 text-body-sm font-medium text-foreground">
           {label}
           <ChevronDown
             className={cn(
@@ -187,12 +188,12 @@ function ScoreBarRow({
       />
 
       {open && (
-        <div id={panelId} className="mt-1 rounded-lg border border-border bg-muted/40 px-3 py-2.5">
-          <p className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        <div id={panelId} className="mt-1 rounded-xl border border-border bg-muted/40 px-3 py-2.5">
+          <p className="mb-1 flex items-center gap-1.5 text-caption font-semibold uppercase tracking-wide text-primary">
             <Info className="h-3.5 w-3.5" aria-hidden="true" />
             Why this score
           </p>
-          <p className="text-sm leading-relaxed text-foreground">
+          <p className="text-body-sm leading-relaxed text-muted-foreground">
             {hasRationale
               ? rationale
               : 'A detailed rationale is not available for this scorecard (it was scored before per-aspect explanations were added).'}
@@ -218,8 +219,8 @@ const INTEGRITY_LABELS: Record<string, string> = {
 };
 
 function integrityColor(score: number): string {
-  if (score >= 80) return 'text-green-600';
-  if (score >= 60) return 'text-amber-500';
+  if (score >= 80) return 'text-emerald-600';
+  if (score >= 60) return 'text-amber-600';
   return 'text-destructive';
 }
 
@@ -245,41 +246,41 @@ function IntegrityPanel({
   const timeline = events ?? [];
 
   return (
-    <Card className="shadow-sm">
+    <Card className="rounded-2xl transition-shadow hover:shadow-card-hover">
       <CardHeader className="pb-3">
-        <CardTitle className="text-base flex items-center gap-2">
-          <span className="inline-flex h-6 w-6 items-center justify-center rounded bg-primary/10">
+        <CardTitle className="text-subheading font-semibold text-foreground flex items-center gap-2.5">
+          <span className="inline-flex h-7 w-7 items-center justify-center rounded-[9px] bg-primary/10">
             <ShieldCheck className="h-4 w-4 text-primary" aria-hidden="true" />
           </span>
           Interview Integrity
         </CardTitle>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-caption text-muted-foreground">
           AI-assisted flagging for human review — not an automated decision. Webcam
           signals are approximate; review the flags in context.
         </p>
       </CardHeader>
       <CardContent className="space-y-4">
         {score === null || score === undefined ? (
-          <p className="text-sm text-muted-foreground">
+          <p className="text-body-sm text-muted-foreground">
             Proctoring was not enabled for this session.
           </p>
         ) : (
           <>
             <div className="flex items-baseline gap-2">
-              <span className={cn('text-4xl font-extrabold tabular-nums', integrityColor(score))}>
+              <span className={cn('text-heading-lg font-semibold tabular-nums', integrityColor(score))}>
                 {score}
               </span>
-              <span className="text-sm text-muted-foreground">/ 100 integrity</span>
+              <span className="text-body-sm text-muted-foreground">/ 100 integrity</span>
             </div>
 
             {types.length === 0 ? (
-              <p className="text-sm text-green-600">No integrity flags were raised. ✓</p>
+              <p className="text-body-sm text-emerald-600">No integrity flags were raised. ✓</p>
             ) : (
               <ul className="space-y-2" aria-label="Integrity flags">
                 {types.map((t) => (
-                  <li key={t} className="flex items-center justify-between gap-2 text-sm">
-                    <span className="flex items-center gap-2 text-foreground">
-                      <AlertCircle className="h-3.5 w-3.5 text-amber-500 shrink-0" aria-hidden="true" />
+                  <li key={t} className="flex items-center justify-between gap-2 text-body-sm">
+                    <span className="flex items-center gap-2 text-muted-foreground">
+                      <AlertCircle className="h-3.5 w-3.5 text-amber-600 shrink-0" aria-hidden="true" />
                       {INTEGRITY_LABELS[t] ?? t}
                     </span>
                     <span className="text-muted-foreground tabular-nums">
@@ -294,16 +295,16 @@ function IntegrityPanel({
             {/* Time-ordered event timeline (most recent first) */}
             {timeline.length > 0 && (
               <div className="pt-1">
-                <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                <p className="mb-1.5 text-caption font-semibold uppercase tracking-wide text-muted-foreground">
                   Event timeline
                 </p>
                 <ul className="space-y-1 max-h-64 overflow-y-auto" aria-label="Integrity event timeline">
                   {timeline.map((ev, idx) => (
                     <li
                       key={idx}
-                      className="flex items-center justify-between gap-2 rounded-md bg-muted/40 px-2.5 py-1.5 text-xs"
+                      className="flex items-center justify-between gap-2 rounded-md bg-muted/40 px-2.5 py-1.5 text-caption"
                     >
-                      <span className="flex items-center gap-2 text-foreground">
+                      <span className="flex items-center gap-2 text-muted-foreground">
                         <span className="tabular-nums text-muted-foreground">{fmtClock(ev.started_at)}</span>
                         {INTEGRITY_LABELS[ev.event_type] ?? ev.event_type}
                       </span>
@@ -334,12 +335,12 @@ function MetaRow({
   value: React.ReactNode;
 }) {
   return (
-    <div className="flex items-start gap-3 text-sm">
-      <div className="flex h-7 w-7 items-center justify-center rounded-md bg-muted text-muted-foreground shrink-0 mt-0.5">
+    <div className="flex items-start gap-3 text-body-sm">
+      <div className="flex h-7 w-7 items-center justify-center rounded-[9px] bg-secondary text-foreground shrink-0 mt-0.5">
         {icon}
       </div>
       <div className="min-w-0">
-        <p className="text-xs text-muted-foreground font-medium">{label}</p>
+        <p className="text-caption text-muted-foreground font-medium">{label}</p>
         <p className="text-foreground">{value}</p>
       </div>
     </div>
@@ -407,8 +408,8 @@ export default function AdminInterviewDetail() {
         <div className="inline-flex h-12 w-12 items-center justify-center rounded-full bg-destructive/10">
           <AlertCircle className="h-6 w-6 text-destructive" aria-hidden="true" />
         </div>
-        <p className="font-medium text-foreground">Interview not found</p>
-        <p className="text-sm text-muted-foreground">
+        <p className="font-semibold text-foreground">Interview not found</p>
+        <p className="text-body-sm text-muted-foreground">
           {error instanceof Error ? error.message : 'The session could not be loaded.'}
         </p>
         <Button variant="outline" onClick={() => void navigate('/admin/interviews')}>
@@ -429,7 +430,7 @@ export default function AdminInterviewDetail() {
           variant="ghost"
           size="sm"
           onClick={() => void navigate('/admin/interviews')}
-          className="gap-1.5 text-muted-foreground -ml-2"
+          className="gap-1.5 text-muted-foreground hover:text-foreground -ml-2"
           aria-label="Back to interview list"
         >
           <ArrowLeft className="h-4 w-4" aria-hidden="true" />
@@ -440,10 +441,10 @@ export default function AdminInterviewDetail() {
       {/* Page heading */}
       <motion.div variants={fadeUp} className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-foreground">
+          <h1 className="text-heading font-semibold text-foreground">
             {data.candidate_name ?? data.candidate_email}
           </h1>
-          <p className="mt-1 text-sm text-muted-foreground">{data.candidate_email}</p>
+          <p className="mt-1.5 text-body-sm text-muted-foreground">{data.candidate_email}</p>
         </div>
         <Badge variant={statusVariant} className="text-sm px-3 py-1">
           {statusLabel}
@@ -452,9 +453,9 @@ export default function AdminInterviewDetail() {
 
       {/* Session metadata card */}
       <motion.div variants={fadeUp}>
-        <Card className="shadow-sm">
+        <Card className="rounded-2xl transition-shadow hover:shadow-card-hover">
           <CardHeader className="pb-3">
-            <CardTitle className="text-base">Session Details</CardTitle>
+            <CardTitle className="text-subheading font-semibold text-foreground">Session Details</CardTitle>
           </CardHeader>
           <CardContent className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             <MetaRow
@@ -500,18 +501,18 @@ export default function AdminInterviewDetail() {
         <>
           {/* Composite score */}
           <motion.div variants={fadeUp}>
-            <Card className="shadow-sm">
+            <Card className="rounded-2xl bg-muted ring-1 ring-primary/10 shadow-elevated">
               <CardContent className="pt-8 pb-6 text-center space-y-4">
-                <h2 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+                <h2 className="text-caption font-semibold uppercase tracking-widest text-muted-foreground">
                   Overall Score
                 </h2>
                 <div
-                  className={`text-6xl font-extrabold leading-none tabular-nums ${sc.composite_score === null ? 'text-muted-foreground' : scoreColorClass(sc.composite_score)}`}
+                  className={`text-display font-semibold leading-none tabular-nums ${sc.composite_score === null ? 'text-muted-foreground' : scoreColorClass(sc.composite_score)}`}
                   aria-label={`Overall score: ${fmtScore(sc.composite_score)} out of 10`}
                 >
                   {fmtScore(sc.composite_score)}
                 </div>
-                <p className="text-sm text-muted-foreground">out of 10</p>
+                <p className="text-body-sm text-muted-foreground">out of 10</p>
                 <Progress
                   value={Math.round(((sc.composite_score ?? 0) / 10) * 100)}
                   className="mx-auto max-w-xs h-3"
@@ -526,10 +527,10 @@ export default function AdminInterviewDetail() {
 
           {/* Score breakdown */}
           <motion.div variants={fadeUp}>
-            <Card className="shadow-sm">
+            <Card className="rounded-2xl transition-shadow hover:shadow-card-hover">
               <CardHeader className="pb-2">
-                <CardTitle className="text-base">Score Breakdown</CardTitle>
-                <p className="text-xs text-muted-foreground">
+                <CardTitle className="text-subheading font-semibold text-foreground">Score Breakdown</CardTitle>
+                <p className="text-caption text-muted-foreground">
                   Click any aspect to see why it got this score.
                 </p>
               </CardHeader>
@@ -553,11 +554,11 @@ export default function AdminInterviewDetail() {
           {/* Strengths */}
           {sc.strengths && sc.strengths.length > 0 && (
             <motion.div variants={fadeUp}>
-              <Card className="shadow-sm border-green-200/60">
+              <Card className="rounded-2xl transition-shadow hover:shadow-card-hover">
                 <CardHeader className="pb-3">
-                  <CardTitle className="text-base flex items-center gap-2">
-                    <span className="inline-flex h-6 w-6 items-center justify-center rounded bg-green-100">
-                      <CheckCircle2 className="h-4 w-4 text-green-600" aria-hidden="true" />
+                  <CardTitle className="text-subheading font-semibold text-foreground flex items-center gap-2.5">
+                    <span className="inline-flex h-7 w-7 items-center justify-center rounded-[9px] bg-primary/10">
+                      <CheckCircle2 className="h-4 w-4 text-emerald-600" aria-hidden="true" />
                     </span>
                     Key Strengths
                   </CardTitle>
@@ -567,10 +568,10 @@ export default function AdminInterviewDetail() {
                     {sc.strengths.map((s, idx) => (
                       <li key={idx} className="flex gap-2.5">
                         <CheckCircle2
-                          className="h-4 w-4 text-green-500 shrink-0 mt-0.5"
+                          className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5"
                           aria-hidden="true"
                         />
-                        <p className="text-sm text-foreground leading-relaxed">{s}</p>
+                        <p className="text-body-sm text-muted-foreground leading-relaxed">{s}</p>
                       </li>
                     ))}
                   </ul>
@@ -582,10 +583,10 @@ export default function AdminInterviewDetail() {
           {/* Improvements */}
           {sc.improvements && sc.improvements.length > 0 && (
             <motion.div variants={fadeUp}>
-              <Card className="shadow-sm border-amber-200/60">
+              <Card className="rounded-2xl transition-shadow hover:shadow-card-hover">
                 <CardHeader className="pb-3">
-                  <CardTitle className="text-base flex items-center gap-2">
-                    <span className="inline-flex h-6 w-6 items-center justify-center rounded bg-amber-100">
+                  <CardTitle className="text-subheading font-semibold text-foreground flex items-center gap-2.5">
+                    <span className="inline-flex h-7 w-7 items-center justify-center rounded-[9px] bg-primary/10">
                       <TrendingUp className="h-4 w-4 text-amber-600" aria-hidden="true" />
                     </span>
                     Areas for Improvement
@@ -596,11 +597,11 @@ export default function AdminInterviewDetail() {
                     {sc.improvements.map((item, idx) => (
                       <li key={idx} className="flex gap-2.5">
                         <TrendingUp
-                          className="h-4 w-4 text-amber-500 shrink-0 mt-0.5"
+                          className="h-4 w-4 text-amber-600 shrink-0 mt-0.5"
                           aria-hidden="true"
                         />
-                        <p className="text-sm text-foreground leading-relaxed">
-                          <span className="font-semibold">{item.area}:</span>{' '}
+                        <p className="text-body-sm text-muted-foreground leading-relaxed">
+                          <span className="font-semibold text-foreground">{item.area}:</span>{' '}
                           <span className="text-muted-foreground">{item.suggestion}</span>
                         </p>
                       </li>
@@ -614,12 +615,12 @@ export default function AdminInterviewDetail() {
           {/* Summary */}
           {sc.summary && (
             <motion.div variants={fadeUp}>
-              <Card className="shadow-sm">
+              <Card className="rounded-2xl transition-shadow hover:shadow-card-hover">
                 <CardHeader className="pb-3">
-                  <CardTitle className="text-base">Summary</CardTitle>
+                  <CardTitle className="text-subheading font-semibold text-foreground">Summary</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <p className="text-sm text-muted-foreground leading-relaxed">{sc.summary}</p>
+                  <p className="text-body-sm text-muted-foreground leading-relaxed">{sc.summary}</p>
                 </CardContent>
               </Card>
             </motion.div>
@@ -632,20 +633,20 @@ export default function AdminInterviewDetail() {
               <Download className="h-4 w-4" aria-hidden="true" />
               PDF Report (via feedback_billing)
             </Button>
-            <p className="mt-1 text-xs text-muted-foreground">
+            <p className="mt-1.5 text-caption text-muted-foreground">
               Full PDF is generated by feedback_billing — link when available.
             </p>
           </motion.div>
         </>
       ) : (
         <motion.div variants={fadeUp}>
-          <Card className="shadow-sm">
+          <Card className="rounded-2xl">
             <CardContent className="flex flex-col items-center justify-center py-14 text-center gap-3">
               <div className="inline-flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-                <TrendingUp className="h-6 w-6 text-muted-foreground/50" aria-hidden="true" />
+                <TrendingUp className="h-6 w-6 text-muted-foreground/40" aria-hidden="true" />
               </div>
-              <p className="font-medium text-foreground">No scorecard yet</p>
-              <p className="text-sm text-muted-foreground">
+              <p className="font-semibold text-foreground">No scorecard yet</p>
+              <p className="text-body-sm text-muted-foreground">
                 This session has not been scored. Scoring happens when the session completes.
               </p>
             </CardContent>

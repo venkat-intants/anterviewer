@@ -101,7 +101,7 @@ describe('Landing page i18n integration', () => {
 
   it('shows English headline by default', () => {
     renderLandingWithSwitcher();
-    expect(screen.getByRole('heading', { name: /ace your next interview with ai/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /interviews that feel human/i })).toBeInTheDocument();
   });
 
   it('shows Hindi headline after switching to hi', async () => {
@@ -112,14 +112,14 @@ describe('Landing page i18n integration', () => {
 
     await waitFor(() => {
       // Match the unique Devanagari fragment from the Hindi headline:
-      // "AI के साथ अगला इंटरव्यू crack करें"
-      expect(screen.getByRole('heading', { name: /अगला इंटरव्यू/ })).toBeInTheDocument();
+      // "इंटरव्यू जो असली जैसे लगें।"
+      expect(screen.getByRole('heading', { name: /असली जैसे लगें/ })).toBeInTheDocument();
     });
 
-    // Verify the trust badge contains a unique Devanagari fragment:
-    // "Engineering colleges और skill universities पर भरोसेमंद"
+    // Verify the hero subtitle also switched — a unique contiguous Devanagari
+    // fragment from "…सफलता का आत्मविश्वास पाएं।"
     await waitFor(() => {
-      expect(screen.getByText(/भरोसेमंद/)).toBeInTheDocument();
+      expect(screen.getByText(/आत्मविश्वास पाएं/)).toBeInTheDocument();
     });
   });
 });

@@ -154,7 +154,7 @@ function FilterBar({ filters, onFiltersChange, onExport, exporting }: FilterBarP
         }}
       >
         <SelectTrigger className="w-[160px]" aria-label="Sort order">
-          <ArrowUpDown className="h-3.5 w-3.5 mr-1.5 text-muted-foreground" aria-hidden="true" />
+          <ArrowUpDown className="h-3.5 w-3.5 mr-1.5 text-primary" aria-hidden="true" />
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -205,17 +205,17 @@ function LoadingRows() {
 function EmptyState({ hasFilters }: { hasFilters: boolean }) {
   return (
     <div
-      className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border py-20 text-center gap-4"
+      className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-card py-20 text-center gap-4"
       data-testid="interviews-empty-state"
     >
-      <div className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-muted">
-        <ClipboardList className="h-7 w-7 text-muted-foreground/50" aria-hidden="true" />
+      <div className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-muted/60">
+        <ClipboardList className="h-7 w-7 text-muted-foreground/40" aria-hidden="true" />
       </div>
       <div>
-        <p className="font-medium text-foreground">
+        <p className="font-semibold text-foreground">
           {hasFilters ? 'No interviews match your filters' : 'No interviews yet'}
         </p>
-        <p className="mt-1 text-sm text-muted-foreground">
+        <p className="mt-1.5 text-body-sm text-muted-foreground">
           {hasFilters
             ? 'Try adjusting your search or filters.'
             : 'Interview sessions will appear here once candidates start.'}
@@ -237,7 +237,7 @@ function InterviewRow({ item, onClick }: InterviewRowProps) {
 
   return (
     <TableRow
-      className="cursor-pointer hover:bg-muted/50 transition-colors"
+      className="cursor-pointer border-border hover:bg-muted/40 transition-colors"
       onClick={() => onClick(item.session_id)}
       data-testid={`interview-row-${item.session_id}`}
       aria-label={`Interview for ${item.candidate_name ?? item.candidate_email}`}
@@ -252,10 +252,10 @@ function InterviewRow({ item, onClick }: InterviewRowProps) {
       <TableCell className="font-medium text-foreground max-w-[160px] truncate">
         {item.candidate_name ?? <span className="text-muted-foreground">—</span>}
       </TableCell>
-      <TableCell className="text-muted-foreground text-sm max-w-[200px] truncate">
+      <TableCell className="text-muted-foreground text-body-sm max-w-[200px] truncate">
         {item.candidate_email}
       </TableCell>
-      <TableCell className="text-sm text-foreground max-w-[140px] truncate">
+      <TableCell className="text-body-sm text-muted-foreground max-w-[140px] truncate">
         {item.job_title ?? <span className="text-muted-foreground">—</span>}
       </TableCell>
       <TableCell>
@@ -263,16 +263,16 @@ function InterviewRow({ item, onClick }: InterviewRowProps) {
           {label}
         </Badge>
       </TableCell>
-      <TableCell className="text-sm text-muted-foreground whitespace-nowrap">
+      <TableCell className="text-body-sm text-muted-foreground whitespace-nowrap">
         {languageLabel(item.language)}
       </TableCell>
-      <TableCell className="text-sm tabular-nums text-right font-medium">
+      <TableCell className="text-body-sm tabular-nums text-right font-semibold text-foreground">
         {fmtScore(item.composite_score)}
       </TableCell>
-      <TableCell className="text-sm text-muted-foreground whitespace-nowrap">
+      <TableCell className="text-body-sm text-muted-foreground whitespace-nowrap">
         {formatDate(item.created_at)}
       </TableCell>
-      <TableCell className="text-sm text-muted-foreground whitespace-nowrap">
+      <TableCell className="text-body-sm text-muted-foreground whitespace-nowrap">
         {formatDuration(item.duration_seconds)}
       </TableCell>
     </TableRow>
@@ -295,7 +295,7 @@ function PaginationBar({ page, totalPages, total, perPage, onPrev, onNext }: Pag
   const end = Math.min(page * perPage, total);
   return (
     <div className="flex items-center justify-between pt-2 flex-wrap gap-2" aria-label="Pagination">
-      <span className="text-sm text-muted-foreground tabular-nums">
+      <span className="text-body-sm text-muted-foreground tabular-nums">
         {total > 0 ? `${start}–${end} of ${total.toLocaleString()}` : '0 results'}
       </span>
       <div className="flex items-center gap-2">
@@ -310,7 +310,7 @@ function PaginationBar({ page, totalPages, total, perPage, onPrev, onNext }: Pag
           <ChevronLeft className="h-4 w-4" aria-hidden="true" />
           Previous
         </Button>
-        <span className="text-sm text-muted-foreground tabular-nums">
+        <span className="text-body-sm text-muted-foreground tabular-nums">
           {page} / {totalPages}
         </span>
         <Button
@@ -401,8 +401,8 @@ export default function AdminInterviews() {
     <motion.div initial="hidden" animate="visible" variants={stagger} className="space-y-6">
       {/* Page heading */}
       <motion.div variants={fadeUp}>
-        <h1 className="text-2xl font-bold text-foreground">Interviews</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
+        <h1 className="text-heading font-semibold text-foreground">Interviews</h1>
+        <p className="mt-2 text-body-sm text-muted-foreground">
           All candidate interview sessions. Click a row to view full detail.
         </p>
       </motion.div>
@@ -422,23 +422,23 @@ export default function AdminInterviews() {
         {isError && !isLoading ? (
           <div
             role="alert"
-            className="flex flex-col items-center justify-center rounded-xl border border-destructive/20 bg-destructive/5 py-16 gap-3 text-center"
+            className="flex flex-col items-center justify-center rounded-2xl border border-destructive/20 bg-destructive/5 py-16 gap-3 text-center"
           >
             <AlertCircle className="h-8 w-8 text-destructive" aria-hidden="true" />
-            <p className="font-medium text-foreground">Failed to load interviews</p>
-            <p className="text-sm text-muted-foreground">
+            <p className="font-semibold text-foreground">Failed to load interviews</p>
+            <p className="text-body-sm text-muted-foreground">
               {error instanceof Error ? error.message : 'Unknown error'}
             </p>
           </div>
         ) : !isLoading && items.length === 0 ? (
           <EmptyState hasFilters={hasFilters} />
         ) : (
-          <Card className="shadow-sm">
+          <Card className="rounded-2xl shadow-elevated transition-shadow hover:shadow-card-hover">
             <CardHeader className="pb-3">
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <div>
-                  <CardTitle className="text-base">Sessions</CardTitle>
-                  <CardDescription className="mt-0.5">
+                  <CardTitle className="text-subheading font-semibold text-foreground">Sessions</CardTitle>
+                  <CardDescription className="mt-0.5 text-muted-foreground">
                     {isLoading ? 'Loading…' : `${total.toLocaleString()} interview${total !== 1 ? 's' : ''}`}
                   </CardDescription>
                 </div>
@@ -448,15 +448,15 @@ export default function AdminInterviews() {
               <div className="overflow-x-auto">
                 <Table>
                   <TableHeader>
-                    <TableRow>
-                      <TableHead>Name</TableHead>
-                      <TableHead>Email</TableHead>
-                      <TableHead>Role</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead>Language</TableHead>
-                      <TableHead className="text-right">Score</TableHead>
-                      <TableHead>Date</TableHead>
-                      <TableHead>Duration</TableHead>
+                    <TableRow className="border-border hover:bg-transparent">
+                      <TableHead className="text-muted-foreground uppercase text-xs tracking-wide">Name</TableHead>
+                      <TableHead className="text-muted-foreground uppercase text-xs tracking-wide">Email</TableHead>
+                      <TableHead className="text-muted-foreground uppercase text-xs tracking-wide">Role</TableHead>
+                      <TableHead className="text-muted-foreground uppercase text-xs tracking-wide">Status</TableHead>
+                      <TableHead className="text-muted-foreground uppercase text-xs tracking-wide">Language</TableHead>
+                      <TableHead className="text-right text-muted-foreground uppercase text-xs tracking-wide">Score</TableHead>
+                      <TableHead className="text-muted-foreground uppercase text-xs tracking-wide">Date</TableHead>
+                      <TableHead className="text-muted-foreground uppercase text-xs tracking-wide">Duration</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>

@@ -28,7 +28,7 @@ import {
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
+import { Badge, type BadgeProps } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import HrAnalyticsPanel from './HRAnalytics';
 
@@ -38,47 +38,55 @@ function scoreTone(n: number | null): string {
   if (n === null) return 'text-muted-foreground';
   if (n >= 70) return 'text-emerald-600';
   if (n >= 45) return 'text-amber-600';
-  return 'text-rose-600';
+  return 'text-destructive';
 }
 
-function recBadge(rec: string | null): { label: string; cls: string } {
+function recBadgeVariant(rec: string | null): {
+  label: string;
+  variant: BadgeProps['variant'];
+} {
   switch (rec) {
     case 'strong_fit':
-      return { label: 'Strong fit', cls: 'bg-emerald-100 text-emerald-800' };
+      return { label: 'Strong fit', variant: 'success' };
     case 'weak_fit':
-      return { label: 'Weak fit', cls: 'bg-rose-100 text-rose-800' };
+      return { label: 'Weak fit', variant: 'destructive' };
     case 'moderate_fit':
-      return { label: 'Moderate fit', cls: 'bg-amber-100 text-amber-800' };
+      return { label: 'Moderate fit', variant: 'warning' };
     default:
-      return { label: 'Unscored', cls: 'bg-muted text-muted-foreground' };
+      return { label: 'Unscored', variant: 'secondary' };
   }
 }
 
-function interviewBadge(s: string | null): { label: string; cls: string } {
+function interviewBadgeVariant(s: string | null): {
+  label: string;
+  variant: BadgeProps['variant'];
+} {
   switch (s) {
     case 'completed':
-      return { label: 'Completed', cls: 'bg-emerald-100 text-emerald-800' };
+      return { label: 'Completed', variant: 'success' };
     case 'consumed':
-      return { label: 'In progress', cls: 'bg-sky-100 text-sky-800' };
+      return { label: 'In progress', variant: 'accent' };
     case 'revoked':
-      return { label: 'Revoked', cls: 'bg-rose-100 text-rose-800' };
+      return { label: 'Revoked', variant: 'destructive' };
     case 'expired':
-      return { label: 'Expired', cls: 'bg-zinc-200 text-zinc-700' };
+      return { label: 'Expired', variant: 'secondary' };
     case 'invited':
-      return { label: 'Invited', cls: 'bg-amber-100 text-amber-800' };
+      return { label: 'Invited', variant: 'warning' };
     default:
-      return { label: 'Not invited', cls: 'bg-muted text-muted-foreground' };
+      return { label: 'Not invited', variant: 'secondary' };
   }
 }
 
-function statusPill(s: Row['status']): { label: string; cls: string } | null {
+function statusPillVariant(
+  s: Row['status'],
+): { label: string; variant: BadgeProps['variant'] } | null {
   switch (s) {
     case 'hired':
-      return { label: 'Hired', cls: 'bg-emerald-100 text-emerald-800' };
+      return { label: 'Hired', variant: 'success' };
     case 'rejected':
-      return { label: 'Rejected', cls: 'bg-rose-100 text-rose-800' };
+      return { label: 'Rejected', variant: 'destructive' };
     case 'interviewed':
-      return { label: 'Interviewed', cls: 'bg-amber-100 text-amber-800' };
+      return { label: 'Interviewed', variant: 'warning' };
     default:
       return null;
   }
@@ -103,7 +111,7 @@ function StageScore({
 }) {
   return (
     <div className="w-12 shrink-0 text-center">
-      <div className={cn('text-base font-bold leading-none', tone)}>{value ?? '—'}</div>
+      <div className={cn('text-base font-semibold leading-none', tone)}>{value ?? '—'}</div>
       <div className="text-[10px] text-muted-foreground">{unit}</div>
     </div>
   );
@@ -125,35 +133,35 @@ function PipelineRow({ a }: { a: Row }) {
     onError: (e: unknown) => toast.error(e instanceof Error ? e.message : 'Decision failed'),
   });
 
-  const rec = recBadge(a.ats_recommendation);
-  const iv = interviewBadge(a.interview_status);
-  const pill = statusPill(a.status);
+  const rec = recBadgeVariant(a.ats_recommendation);
+  const iv = interviewBadgeVariant(a.interview_status);
+  const pill = statusPillVariant(a.status);
   const canHire = a.status === 'shortlisted' || a.status === 'interviewed';
   const canReject = a.status === 'new' || a.status === 'shortlisted' || a.status === 'interviewed';
 
   return (
-    <div className="rounded-lg border border-border bg-card">
-      <div className="flex items-center gap-3 p-3">
+    <div className="rounded-xl border border-border bg-card transition-shadow hover:border-primary/20 hover:shadow-card-hover">
+      <div className="flex items-center gap-3 p-3.5">
         <StageScore value={a.ats_overall} tone={scoreTone(a.ats_overall)} unit="ATS" />
 
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <p className="truncate text-sm font-medium text-foreground">{a.full_name}</p>
-            <span className={cn('rounded px-1.5 py-0.5 text-[11px] font-medium', rec.cls)}>
+            <Badge variant={rec.variant} className="text-[11px]">
               {rec.label}
-            </span>
+            </Badge>
             {a.status === 'shortlisted' && (
-              <Badge variant="default" className="gap-1 text-[11px]">
+              <Badge variant="accent" className="gap-1 text-[11px]">
                 <Star className="h-3 w-3" aria-hidden="true" /> Shortlisted
               </Badge>
             )}
             {pill && (
-              <span className={cn('rounded px-1.5 py-0.5 text-[11px] font-medium', pill.cls)}>
+              <Badge variant={pill.variant} className="text-[11px]">
                 {pill.label}
-              </span>
+              </Badge>
             )}
           </div>
-          <p className="truncate text-xs text-muted-foreground">
+          <p className="truncate text-caption text-muted-foreground">
             {a.target_job_title} · {a.target_level}
           </p>
         </div>
@@ -173,7 +181,9 @@ function PipelineRow({ a }: { a: Row }) {
             tone={a.interview_score !== null ? 'text-emerald-600' : 'text-muted-foreground'}
             unit="/10"
           />
-          <span className={cn('rounded px-1.5 py-0.5 text-[11px] font-medium', iv.cls)}>{iv.label}</span>
+          <Badge variant={iv.variant} className="text-[11px]">
+            {iv.label}
+          </Badge>
         </div>
 
         {/* Decision actions */}
@@ -182,7 +192,7 @@ function PipelineRow({ a }: { a: Row }) {
             <Button
               variant="ghost"
               size="sm"
-              className="text-emerald-700 hover:bg-emerald-50"
+              className="text-emerald-600 hover:bg-emerald-50 hover:text-emerald-600"
               disabled={decideMut.isPending}
               onClick={() => decideMut.mutate('hired')}
               aria-label="Hire"
@@ -198,7 +208,7 @@ function PipelineRow({ a }: { a: Row }) {
             <Button
               variant="ghost"
               size="sm"
-              className="text-rose-700 hover:bg-rose-50"
+              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
               disabled={decideMut.isPending}
               onClick={() => decideMut.mutate('rejected')}
               aria-label="Reject"
@@ -219,18 +229,18 @@ function PipelineRow({ a }: { a: Row }) {
       </div>
 
       {open && (
-        <div className="space-y-3 border-t border-border px-4 py-3 text-sm">
+        <div className="space-y-3 border-t border-border px-4 py-3.5 text-sm">
           <div className="grid gap-2 text-xs sm:grid-cols-2">
             <div className="flex items-center gap-1.5">
               <span className="w-20 shrink-0 text-muted-foreground">ATS</span>
-              <span className="font-medium">{a.ats_overall ?? '—'}/100</span>
-              <span className={cn('rounded px-1.5 py-0.5 text-[10px] font-medium', rec.cls)}>
+              <span className="font-medium text-foreground">{a.ats_overall ?? '—'}/100</span>
+              <Badge variant={rec.variant} className="text-[10px]">
                 {rec.label}
-              </span>
+              </Badge>
             </div>
             <div className="flex items-center gap-1.5">
               <span className="w-20 shrink-0 text-muted-foreground">Exam</span>
-              <span className="font-medium">{a.best_exam_percent ?? '—'}%</span>
+              <span className="font-medium text-foreground">{a.best_exam_percent ?? '—'}%</span>
               <span className="text-muted-foreground">
                 {a.total_exam_attempts > 0
                   ? `${a.total_exam_attempts} attempt${a.total_exam_attempts === 1 ? '' : 's'} · ${
@@ -241,12 +251,12 @@ function PipelineRow({ a }: { a: Row }) {
             </div>
             <div className="flex items-center gap-1.5 sm:col-span-2">
               <span className="w-20 shrink-0 text-muted-foreground">Interview</span>
-              <span className="font-medium">
+              <span className="font-medium text-foreground">
                 {a.interview_score !== null ? `${a.interview_score.toFixed(1)}/10` : '—'}
               </span>
-              <span className={cn('rounded px-1.5 py-0.5 text-[10px] font-medium', iv.cls)}>
+              <Badge variant={iv.variant} className="text-[10px]">
                 {iv.label}
-              </span>
+              </Badge>
               {a.scorecard_id && (
                 <Link to={`/scorecard/${a.scorecard_id}`}>
                   <Button variant="outline" size="sm" className="h-6 gap-1 px-2 text-[11px]">
@@ -266,7 +276,7 @@ function PipelineRow({ a }: { a: Row }) {
                 </span>
               </label>
               <textarea
-                className="min-h-[40px] w-full resize-y rounded-md border border-input bg-background px-2 py-1.5 text-xs shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                className="min-h-[40px] w-full resize-y rounded-[9px] border border-border bg-secondary px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                 placeholder="Why this decision? (optional)…"
                 value={rationale}
                 onChange={(e) => setRationale(e.target.value)}
@@ -287,7 +297,7 @@ function PipelineRow({ a }: { a: Row }) {
                   <Button
                     size="sm"
                     variant="outline"
-                    className="gap-1.5 text-rose-700"
+                    className="gap-1.5 text-destructive hover:text-destructive"
                     disabled={decideMut.isPending}
                     onClick={() => decideMut.mutate('rejected')}
                   >
@@ -321,13 +331,13 @@ export default function HRPipeline() {
   }
 
   return (
-    <div className="max-w-5xl space-y-6">
+    <div className="space-y-8">
       <div>
-        <h1 className="flex items-center gap-2 text-2xl font-bold text-foreground">
+        <h1 className="flex items-center gap-2.5 text-heading font-semibold text-foreground">
           <TrendingUp className="h-6 w-6 text-primary" aria-hidden="true" />
           Hiring pipeline
         </h1>
-        <p className="mt-1 text-sm text-muted-foreground">
+        <p className="mt-2 text-body-sm text-muted-foreground">
           Every candidate, end to end — resume → exam → interview → decision. Hire or reject
           shortlisted and interviewed candidates.
         </p>
@@ -342,10 +352,10 @@ export default function HRPipeline() {
             type="button"
             onClick={() => pickStage(t.value)}
             className={cn(
-              'rounded-full px-3 py-1 text-xs font-medium transition-colors',
+              'rounded-full px-3.5 py-1.5 text-xs font-medium transition-colors',
               stage === t.value
                 ? 'bg-primary text-primary-foreground'
-                : 'bg-muted text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+                : 'border border-border bg-secondary text-muted-foreground hover:border-primary/30 hover:text-foreground',
             )}
           >
             {t.label}
@@ -353,15 +363,15 @@ export default function HRPipeline() {
         ))}
       </div>
 
-      <div className="space-y-2">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+      <div className="space-y-3">
+        <h2 className="flex items-center gap-2 text-body-sm font-semibold text-foreground">
           <Video className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
           Candidates ({count})
         </h2>
         {isLoading ? (
-          <Skeleton className="h-24 w-full rounded-lg" />
+          <Skeleton className="h-24 w-full rounded-xl" />
         ) : items.length === 0 ? (
-          <p className="py-8 text-center text-sm text-muted-foreground">
+          <p className="py-8 text-center text-body-sm text-muted-foreground">
             {stage === 'all'
               ? 'No candidates yet — screen resumes to start the pipeline.'
               : 'No candidates at this stage.'}
@@ -394,7 +404,7 @@ export default function HRPipeline() {
                 >
                   Previous
                 </Button>
-                <span className="text-xs text-muted-foreground">
+                <span className="text-caption text-muted-foreground">
                   {offset + 1}–{Math.min(offset + PAGE_SIZE, count)} of {count}
                 </span>
                 <Button

@@ -34,8 +34,8 @@ import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 
 const inputCls =
-  'w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm ' +
-  'focus:outline-none focus:ring-2 focus:ring-ring transition-colors';
+  'w-full rounded-[9px] border border-border bg-secondary px-3 py-2 text-sm text-foreground ' +
+  'placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring transition-colors';
 
 function scoreTone(n: number | null): string {
   if (n === null) return 'text-muted-foreground';
@@ -44,16 +44,18 @@ function scoreTone(n: number | null): string {
   return 'text-rose-600';
 }
 
-function recBadge(rec: string | null): { label: string; cls: string } {
+type RecBadgeResult = { label: string; variant: 'success' | 'destructive' | 'warning' | 'secondary' };
+
+function recBadge(rec: string | null): RecBadgeResult {
   switch (rec) {
     case 'strong_fit':
-      return { label: 'Strong fit', cls: 'bg-emerald-100 text-emerald-800' };
+      return { label: 'Strong fit', variant: 'success' };
     case 'weak_fit':
-      return { label: 'Weak fit', cls: 'bg-rose-100 text-rose-800' };
+      return { label: 'Weak fit', variant: 'destructive' };
     case 'moderate_fit':
-      return { label: 'Moderate fit', cls: 'bg-amber-100 text-amber-800' };
+      return { label: 'Moderate fit', variant: 'warning' };
     default:
-      return { label: 'Unscored', cls: 'bg-muted text-muted-foreground' };
+      return { label: 'Unscored', variant: 'secondary' };
   }
 }
 
@@ -86,29 +88,29 @@ function ApplicantRow({ a }: { a: Applicant }) {
   const rec = recBadge(a.ats_recommendation);
 
   return (
-    <div className="rounded-lg border border-border bg-card">
+    <div className="rounded-xl border border-border bg-card shadow-card transition-shadow hover:shadow-card-hover">
       <div className="flex items-center gap-3 p-3">
         {/* Score */}
         <div className="w-12 shrink-0 text-center">
-          <div className={cn('text-xl font-bold leading-none', scoreTone(a.ats_overall))}>
+          <div className={cn('text-xl font-semibold leading-none tracking-tight', scoreTone(a.ats_overall))}>
             {a.ats_overall ?? '—'}
           </div>
-          <div className="text-[10px] text-muted-foreground">ATS</div>
+          <div className="text-[11px] text-muted-foreground">ATS</div>
         </div>
         {/* Identity */}
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
             <p className="text-sm font-medium text-foreground truncate">{a.full_name}</p>
-            <span className={cn('rounded px-1.5 py-0.5 text-[11px] font-medium', rec.cls)}>
+            <Badge variant={rec.variant} className="text-[11px]">
               {rec.label}
-            </span>
+            </Badge>
             {a.status === 'shortlisted' && (
-              <Badge variant="default" className="text-[11px] gap-1">
+              <Badge variant="success" className="text-[11px] gap-1">
                 <Star className="h-3 w-3" aria-hidden="true" /> Shortlisted
               </Badge>
             )}
             {a.status === 'rejected' && (
-              <Badge variant="outline" className="text-[11px] text-rose-600">
+              <Badge variant="destructive" className="text-[11px]">
                 Rejected
               </Badge>
             )}
@@ -123,7 +125,7 @@ function ApplicantRow({ a }: { a: Applicant }) {
           <Button
             variant="ghost"
             size="sm"
-            className="text-emerald-700 hover:bg-emerald-50"
+            className="text-emerald-600 hover:bg-emerald-50 hover:text-emerald-700"
             disabled={statusMut.isPending || a.status === 'shortlisted'}
             onClick={() => statusMut.mutate('shortlisted')}
             aria-label="Shortlist"
@@ -133,7 +135,7 @@ function ApplicantRow({ a }: { a: Applicant }) {
           <Button
             variant="ghost"
             size="sm"
-            className="text-rose-700 hover:bg-rose-50"
+            className="text-rose-600 hover:bg-rose-50 hover:text-rose-700"
             disabled={statusMut.isPending || a.status === 'rejected'}
             onClick={() => statusMut.mutate('rejected')}
             aria-label="Reject"
@@ -163,13 +165,13 @@ function ApplicantRow({ a }: { a: Applicant }) {
                   <span className="w-28 shrink-0 text-xs text-muted-foreground">
                     {BREAKDOWN_LABELS[k] ?? k}
                   </span>
-                  <div className="h-1.5 flex-1 rounded-full bg-muted">
+                  <div className="h-1.5 flex-1 rounded-full bg-border">
                     <div
                       className="h-1.5 rounded-full bg-primary"
                       style={{ width: `${Math.max(0, Math.min(100, v))}%` }}
                     />
                   </div>
-                  <span className="w-7 text-right text-xs font-medium">{v}</span>
+                  <span className="w-7 text-right text-xs font-medium text-foreground">{v}</span>
                 </div>
               ))}
             </div>
@@ -177,7 +179,7 @@ function ApplicantRow({ a }: { a: Applicant }) {
           <div className="grid gap-3 sm:grid-cols-2">
             {a.ats_strengths && a.ats_strengths.length > 0 && (
               <div>
-                <p className="text-xs font-semibold text-emerald-700">Strengths</p>
+                <p className="text-xs font-semibold text-emerald-600">Strengths</p>
                 <ul className="mt-1 list-disc pl-4 text-xs text-muted-foreground space-y-0.5">
                   {a.ats_strengths.map((s, i) => (
                     <li key={i}>{s}</li>
@@ -187,7 +189,7 @@ function ApplicantRow({ a }: { a: Applicant }) {
             )}
             {a.ats_concerns && a.ats_concerns.length > 0 && (
               <div>
-                <p className="text-xs font-semibold text-rose-700">Concerns</p>
+                <p className="text-xs font-semibold text-rose-600">Concerns</p>
                 <ul className="mt-1 list-disc pl-4 text-xs text-muted-foreground space-y-0.5">
                   {a.ats_concerns.map((c, i) => (
                     <li key={i}>{c}</li>
@@ -288,9 +290,9 @@ export default function Applicants() {
   const pending = uploadMut.isPending;
 
   return (
-    <div className="max-w-3xl space-y-6">
+    <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-foreground">Resume screening</h1>
+        <h1 className="text-heading font-semibold text-foreground">Resume screening</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           Drop in many resumes at once — each candidate&apos;s name &amp; email are read
           straight from the resume, AI-scored against the role, then ranked.
@@ -298,9 +300,9 @@ export default function Applicants() {
       </div>
 
       {/* Upload */}
-      <Card className="shadow-sm">
+      <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
+          <CardTitle className="text-base flex items-center gap-2 text-foreground">
             <Upload className="h-4 w-4 text-primary" aria-hidden="true" />
             Bulk upload resumes
           </CardTitle>
@@ -333,11 +335,11 @@ export default function Applicants() {
             {/* File picker */}
             <label
               className={cn(
-                'flex cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed',
-                'border-input bg-background px-4 py-6 text-center transition-colors hover:border-primary/50',
+                'flex cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border-2 border-dashed',
+                'border-border bg-muted/40 px-4 py-6 text-center transition-colors hover:border-primary/50 hover:bg-accent',
               )}
             >
-              <FileText className="h-6 w-6 text-muted-foreground" aria-hidden="true" />
+              <FileText className="h-6 w-6 text-primary" aria-hidden="true" />
               <span className="text-sm font-medium text-foreground">
                 Click to choose PDF resumes
               </span>
@@ -359,7 +361,7 @@ export default function Applicants() {
 
             {/* Selected files */}
             {files.length > 0 && (
-              <div className="rounded-md border border-border bg-muted/30 p-2">
+              <div className="rounded-xl border border-border bg-muted/40 p-2">
                 <div className="mb-1 flex items-center justify-between px-1">
                   <span className="text-xs font-medium text-muted-foreground">
                     {files.length} resume{files.length === 1 ? '' : 's'} selected
@@ -376,17 +378,17 @@ export default function Applicants() {
                   {files.map((f, i) => (
                     <li
                       key={`${f.name}:${f.size}:${i}`}
-                      className="flex items-center gap-2 rounded px-1 py-0.5 text-xs text-foreground"
+                      className="flex items-center gap-2 rounded px-1 py-0.5 text-xs text-muted-foreground"
                     >
-                      <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                      <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" aria-hidden="true" />
                       <span className="min-w-0 flex-1 truncate">{f.name}</span>
-                      <span className="shrink-0 text-muted-foreground">
+                      <span className="shrink-0 text-muted-foreground/60">
                         {(f.size / 1024).toFixed(0)} KB
                       </span>
                       <button
                         type="button"
                         aria-label={`Remove ${f.name}`}
-                        className="shrink-0 text-muted-foreground hover:text-rose-600"
+                        className="shrink-0 text-muted-foreground/60 hover:text-rose-600"
                         onClick={() => setFiles((prev) => prev.filter((_, j) => j !== i))}
                       >
                         <X className="h-3.5 w-3.5" aria-hidden="true" />
@@ -407,7 +409,7 @@ export default function Applicants() {
 
             {pending && (
               <div className="space-y-1">
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-border">
                   <div
                     className="h-1.5 rounded-full bg-primary transition-all"
                     style={{ width: `${progress < 100 ? progress : 100}%` }}
@@ -431,12 +433,12 @@ export default function Applicants() {
 
           {/* Per-file failure summary from the last batch */}
           {lastResult && lastResult.failed_count > 0 && (
-            <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-2.5 text-xs">
-              <p className="mb-1 flex items-center gap-1.5 font-medium text-amber-800">
+            <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-2.5 text-xs">
+              <p className="mb-1 flex items-center gap-1.5 font-medium text-amber-700">
                 <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
                 {lastResult.failed_count} file{lastResult.failed_count === 1 ? '' : 's'} skipped
               </p>
-              <ul className="space-y-0.5 text-amber-700">
+              <ul className="space-y-0.5 text-amber-600">
                 {lastResult.failed.map((f, i) => (
                   <li key={i} className="truncate">
                     <span className="font-medium">{f.filename}</span> — {f.error}
@@ -451,11 +453,11 @@ export default function Applicants() {
       {/* List */}
       <div className="space-y-2">
         <h2 className="text-sm font-semibold text-foreground flex items-center gap-2">
-          <FileSearch className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+          <FileSearch className="h-4 w-4 text-primary" aria-hidden="true" />
           Applicants ({list.length})
         </h2>
         {isLoading ? (
-          <Skeleton className="h-24 w-full rounded-lg" />
+          <Skeleton className="h-24 w-full rounded-xl" />
         ) : list.length === 0 ? (
           <p className="text-sm text-muted-foreground py-6 text-center">
             No applicants yet — upload a resume above to get started.

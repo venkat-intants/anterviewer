@@ -6,6 +6,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
 import { Loader2, AlertCircle, CheckCircle2, XCircle, Clock, ClipboardList } from 'lucide-react';
 import {
@@ -16,6 +17,8 @@ import {
 } from '@/api/publicExam';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Card } from '@/components/ui/card';
 
 function fmt(totalSec: number): string {
   const s = Math.max(0, totalSec);
@@ -25,6 +28,7 @@ function fmt(totalSec: number): string {
 type Phase = 'intro' | 'taking' | 'result';
 
 export default function PublicExam() {
+  const { t } = useTranslation();
   const [token] = useState(() => window.location.hash.replace(/^#/, '').trim());
 
   const examQ = useQuery({
@@ -95,12 +99,13 @@ export default function PublicExam() {
   if (!token || examQ.isError) {
     return (
       <Centered>
-        <AlertCircle className="h-10 w-10 text-amber-500" aria-hidden="true" />
-        <h1 className="text-lg font-semibold text-foreground">This exam link isn&apos;t valid</h1>
-        <p className="max-w-sm text-sm text-muted-foreground">
-          The link may have expired, been revoked, or already been used. Please ask your
-          recruiter for a fresh link.
-        </p>
+        <span className="inline-flex h-12 w-12 items-center justify-center rounded-[9px] bg-amber-50 text-amber-600">
+          <AlertCircle className="h-6 w-6" aria-hidden="true" />
+        </span>
+        <h1 className="text-subheading font-semibold text-foreground">
+          {t('publicExam.invalidTitle')}
+        </h1>
+        <p className="max-w-sm text-body-sm text-muted-foreground">{t('publicExam.invalidDesc')}</p>
       </Centered>
     );
   }
@@ -108,8 +113,8 @@ export default function PublicExam() {
   if (examQ.isLoading || !examQ.data) {
     return (
       <Centered>
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" aria-hidden="true" />
-        <p className="text-sm text-muted-foreground">Loading your exam…</p>
+        <Loader2 className="h-8 w-8 animate-spin text-primary" aria-hidden="true" />
+        <p className="text-body-sm text-muted-foreground">{t('publicExam.loading')}</p>
       </Centered>
     );
   }
@@ -120,11 +125,14 @@ export default function PublicExam() {
   if (phase !== 'result' && exam.already_submitted && !exam.allow_retake) {
     return (
       <Centered>
-        <CheckCircle2 className="h-10 w-10 text-emerald-500" aria-hidden="true" />
-        <h1 className="text-lg font-semibold text-foreground">You&apos;ve already completed this exam</h1>
-        <p className="max-w-sm text-sm text-muted-foreground">
-          Your response has been recorded. You can close this window — your recruiter will be
-          in touch.
+        <span className="inline-flex h-12 w-12 items-center justify-center rounded-[9px] bg-emerald-50 text-emerald-600">
+          <CheckCircle2 className="h-6 w-6" aria-hidden="true" />
+        </span>
+        <h1 className="text-subheading font-semibold text-foreground">
+          {t('publicExam.completedTitle')}
+        </h1>
+        <p className="max-w-sm text-body-sm text-muted-foreground">
+          {t('publicExam.completedDesc')}
         </p>
       </Centered>
     );
@@ -134,27 +142,38 @@ export default function PublicExam() {
   if (phase === 'result' && result) {
     return (
       <Centered>
-        {result.passed ? (
-          <CheckCircle2 className="h-12 w-12 text-emerald-500" aria-hidden="true" />
-        ) : (
-          <XCircle className="h-12 w-12 text-rose-500" aria-hidden="true" />
-        )}
-        <h1 className="text-2xl font-bold text-foreground">{result.score_percent}%</h1>
-        <p className="text-sm text-muted-foreground">
-          {result.score_raw}/{result.score_max} points
-          {result.status === 'expired' ? ' · submitted at time limit' : ''}
-        </p>
-        <p
-          className={cn(
-            'rounded-full px-3 py-1 text-sm font-semibold',
-            result.passed ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800',
-          )}
+        <motion.div
+          initial={{ opacity: 0, scale: 0.92 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ type: 'spring', stiffness: 220, damping: 20 }}
+          className="flex flex-col items-center gap-4"
         >
-          {result.passed ? 'You passed' : 'Not this time'}
-        </p>
-        <p className="max-w-sm text-sm text-muted-foreground">
-          Thank you for completing the exam. You can close this window now.
-        </p>
+          <span
+            className={cn(
+              'inline-flex h-16 w-16 items-center justify-center rounded-3xl',
+              result.passed ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600',
+            )}
+          >
+            {result.passed ? (
+              <CheckCircle2 className="h-8 w-8" aria-hidden="true" />
+            ) : (
+              <XCircle className="h-8 w-8" aria-hidden="true" />
+            )}
+          </span>
+          <h1 className="text-heading-lg font-semibold tracking-heading-lg text-foreground">
+            {result.score_percent}%
+          </h1>
+          <p className="text-body-sm text-muted-foreground">
+            {t('publicExam.points', { raw: result.score_raw, max: result.score_max })}
+            {result.status === 'expired' ? t('publicExam.submittedAtLimit') : ''}
+          </p>
+          <Badge variant={result.passed ? 'success' : 'destructive'}>
+            {result.passed ? t('publicExam.passed') : t('publicExam.notThisTime')}
+          </Badge>
+          <p className="max-w-sm text-body-sm text-muted-foreground">
+            {t('publicExam.resultThanks')}
+          </p>
+        </motion.div>
       </Centered>
     );
   }
@@ -163,41 +182,46 @@ export default function PublicExam() {
   if (phase === 'intro') {
     return (
       <Centered>
-        <span className="inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
-          <ClipboardList className="h-7 w-7" aria-hidden="true" />
-        </span>
-        <h1 className="text-2xl font-bold text-foreground">{exam.title}</h1>
-        {exam.description && (
-          <p className="max-w-md text-sm text-muted-foreground">{exam.description}</p>
-        )}
-        <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
-          <span>{exam.total_questions} questions</span>
-          {exam.time_limit_seconds && (
-            <span className="flex items-center gap-1">
-              <Clock className="h-4 w-4" aria-hidden="true" />
-              {Math.round(exam.time_limit_seconds / 60)} min
-            </span>
-          )}
-        </div>
-        {exam.time_limit_seconds && (
-          <p className="text-xs text-amber-600">
-            The timer starts when you begin and the exam auto-submits when it runs out.
-          </p>
-        )}
-        <Button
-          size="lg"
-          disabled={startMut.isPending}
-          onClick={() => startMut.mutate()}
-          className="gap-2"
+        <motion.div
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
         >
-          {startMut.isPending ? <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" /> : null}
-          Start exam
-        </Button>
-        {startMut.isError && (
-          <p className="text-sm text-rose-600">
-            {startMut.error instanceof Error ? startMut.error.message : 'Could not start.'}
-          </p>
-        )}
+          <Card className="flex w-full max-w-lg flex-col items-center gap-4 p-8 shadow-elevated ring-1 ring-primary/10">
+            <span className="inline-flex h-14 w-14 items-center justify-center rounded-[9px] bg-secondary text-foreground">
+              <ClipboardList className="h-7 w-7" aria-hidden="true" />
+            </span>
+            <h1 className="text-subheading font-semibold text-foreground">{exam.title}</h1>
+            {exam.description && (
+              <p className="max-w-md text-body-sm text-muted-foreground">{exam.description}</p>
+            )}
+            <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-body-sm text-muted-foreground">
+              <span>{t('publicExam.questionsCount', { count: exam.total_questions })}</span>
+              {exam.time_limit_seconds && (
+                <span className="flex items-center gap-1.5">
+                  <Clock className="h-4 w-4 text-primary" aria-hidden="true" />
+                  {t('publicExam.minutes', { count: Math.round(exam.time_limit_seconds / 60) })}
+                </span>
+              )}
+            </div>
+            {exam.time_limit_seconds && (
+              <p className="text-caption text-amber-600">{t('publicExam.timerNote')}</p>
+            )}
+            <Button
+              size="lg"
+              disabled={startMut.isPending}
+              onClick={() => startMut.mutate()}
+              className="mt-1 gap-2"
+            >
+              {startMut.isPending ? <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" /> : null}
+              {t('publicExam.startExam')}
+            </Button>
+            {startMut.isError && (
+              <p className="text-body-sm text-rose-600">
+                {startMut.error instanceof Error ? startMut.error.message : t('publicExam.couldNotStart')}
+              </p>
+            )}
+          </Card>
+        </motion.div>
       </Centered>
     );
   }
@@ -206,18 +230,18 @@ export default function PublicExam() {
   return (
     <div className="min-h-screen bg-background">
       {/* Sticky bar */}
-      <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-border bg-background/90 px-4 py-3 backdrop-blur">
+      <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-border bg-white/80 px-4 py-3 backdrop-blur-xl">
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-foreground">{exam.title}</p>
-          <p className="text-xs text-muted-foreground">
-            {answeredCount}/{questions.length} answered
+          <p className="truncate text-body-sm font-semibold text-foreground">{exam.title}</p>
+          <p className="text-caption text-muted-foreground">
+            {t('publicExam.answered', { answered: answeredCount, total: questions.length })}
           </p>
         </div>
         {remaining !== null && (
           <div
             className={cn(
-              'flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium tabular-nums',
-              remaining <= 30 ? 'bg-rose-100 text-rose-700' : 'bg-muted text-foreground',
+              'flex items-center gap-1.5 rounded-full px-3 py-1.5 text-body-sm font-medium tabular-nums',
+              remaining <= 30 ? 'bg-rose-50 text-rose-600' : 'bg-secondary text-foreground',
             )}
           >
             <Clock className="h-4 w-4" aria-hidden="true" />
@@ -226,59 +250,60 @@ export default function PublicExam() {
         )}
       </div>
 
-      <div className="mx-auto max-w-2xl space-y-4 px-4 py-6">
+      <div className="mx-auto max-w-2xl space-y-4 px-4 py-8">
         {questions.map((q, i) => (
           <motion.div
             key={q.id}
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
-            className="rounded-xl border border-border bg-card p-4"
           >
-            <p className="text-sm font-medium text-foreground">
-              {i + 1}. {q.prompt}
-            </p>
-            <div className="mt-3 space-y-2">
-              {q.options.map((opt, oi) => {
-                const checked = answers[q.id] === oi;
-                return (
-                  <label
-                    key={oi}
-                    className={cn(
-                      'flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2.5 text-sm transition-colors',
-                      checked
-                        ? 'border-primary bg-primary/5 text-foreground'
-                        : 'border-border hover:bg-accent/40',
-                    )}
-                  >
-                    <input
-                      type="radio"
-                      name={q.id}
-                      checked={checked}
-                      onChange={() => setAnswers((prev) => ({ ...prev, [q.id]: oi }))}
-                      className="h-4 w-4 accent-primary"
-                    />
-                    {opt}
-                  </label>
-                );
-              })}
-            </div>
+            <Card className="p-6 transition-shadow hover:shadow-card-hover">
+              <p className="text-body font-medium text-foreground">
+                {i + 1}. {q.prompt}
+              </p>
+              <div className="mt-4 space-y-2">
+                {q.options.map((opt, oi) => {
+                  const checked = answers[q.id] === oi;
+                  return (
+                    <label
+                      key={oi}
+                      className={cn(
+                        'flex cursor-pointer items-center gap-3 rounded-xl border px-3 py-2.5 text-body-sm transition-colors',
+                        checked
+                          ? 'border-primary/60 bg-primary/10 text-foreground'
+                          : 'border-border text-muted-foreground hover:bg-accent',
+                      )}
+                    >
+                      <input
+                        type="radio"
+                        name={q.id}
+                        checked={checked}
+                        onChange={() => setAnswers((prev) => ({ ...prev, [q.id]: oi }))}
+                        className="h-4 w-4 accent-primary"
+                      />
+                      {opt}
+                    </label>
+                  );
+                })}
+              </div>
+            </Card>
           </motion.div>
         ))}
 
         <div className="flex items-center justify-between gap-3 pt-2">
-          <p className="text-xs text-muted-foreground">
+          <p className="text-caption text-muted-foreground">
             {answeredCount < questions.length
-              ? `${questions.length - answeredCount} unanswered`
-              : 'All answered'}
+              ? t('publicExam.unanswered', { count: questions.length - answeredCount })
+              : t('publicExam.allAnswered')}
           </p>
           <Button onClick={doSubmit} disabled={submitMut.isPending} size="lg" className="gap-2">
             {submitMut.isPending ? <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" /> : null}
-            Submit exam
+            {t('publicExam.submitExam')}
           </Button>
         </div>
         {submitMut.isError && (
-          <p className="text-right text-sm text-rose-600">
-            {submitMut.error instanceof Error ? submitMut.error.message : 'Submit failed — try again.'}
+          <p className="text-right text-body-sm text-rose-600">
+            {submitMut.error instanceof Error ? submitMut.error.message : t('publicExam.submitFailed')}
           </p>
         )}
       </div>
@@ -288,8 +313,8 @@ export default function PublicExam() {
 
 function Centered({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center gap-3 bg-background px-6 text-center">
-      {children}
+    <div className="relative flex min-h-screen flex-col items-center justify-center gap-3 overflow-hidden bg-background px-6 text-center">
+      <div className="relative z-10 flex flex-col items-center gap-3">{children}</div>
     </div>
   );
 }

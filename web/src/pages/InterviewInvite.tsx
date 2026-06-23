@@ -7,6 +7,8 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
+import { useTranslation, Trans } from 'react-i18next';
+import { motion } from 'framer-motion';
 import { Loader2, AlertCircle, CheckCircle2, Video, Clock } from 'lucide-react';
 import { getInterviewInvite, redeemInterviewInvite } from '@/api/publicInterview';
 import { useAuth } from '@/context/AuthContext';
@@ -16,13 +18,14 @@ const LANGUAGE_STORAGE_KEY = 'intants:interview-language';
 
 function Centered({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center gap-3 bg-background px-6 text-center">
-      {children}
+    <div className="relative flex min-h-screen flex-col items-center justify-center gap-3 overflow-hidden bg-background px-6 text-center">
+      <div className="relative z-10 flex flex-col items-center gap-3">{children}</div>
     </div>
   );
 }
 
 export default function InterviewInvite() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const { setAuth } = useAuth();
   const [token] = useState(() => window.location.hash.replace(/^#/, '').trim());
@@ -60,11 +63,14 @@ export default function InterviewInvite() {
   if (!token || inviteQ.isError) {
     return (
       <Centered>
-        <AlertCircle className="h-10 w-10 text-amber-500" aria-hidden="true" />
-        <h1 className="text-lg font-semibold text-foreground">This interview link isn&apos;t valid</h1>
-        <p className="max-w-sm text-sm text-muted-foreground">
-          It may have expired, been revoked, or already been used. Please ask your recruiter
-          for a fresh link.
+        <span className="inline-flex h-12 w-12 items-center justify-center rounded-[9px] bg-amber-50 text-amber-600 shadow-sm">
+          <AlertCircle className="h-6 w-6" aria-hidden="true" />
+        </span>
+        <h1 className="text-subheading font-semibold text-foreground">
+          {t('interviewInvite.invalidTitle')}
+        </h1>
+        <p className="max-w-sm text-body-sm text-muted-foreground">
+          {t('interviewInvite.invalidDesc')}
         </p>
       </Centered>
     );
@@ -73,8 +79,8 @@ export default function InterviewInvite() {
   if (inviteQ.isLoading || !inviteQ.data) {
     return (
       <Centered>
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" aria-hidden="true" />
-        <p className="text-sm text-muted-foreground">Loading your interview…</p>
+        <Loader2 className="h-8 w-8 animate-spin text-primary" aria-hidden="true" />
+        <p className="text-body-sm text-muted-foreground">{t('interviewInvite.loading')}</p>
       </Centered>
     );
   }
@@ -84,11 +90,14 @@ export default function InterviewInvite() {
   if (info.already_completed) {
     return (
       <Centered>
-        <CheckCircle2 className="h-10 w-10 text-emerald-500" aria-hidden="true" />
-        <h1 className="text-lg font-semibold text-foreground">You&apos;ve already completed this interview</h1>
-        <p className="max-w-sm text-sm text-muted-foreground">
-          Your interview has been recorded. You can close this window — your recruiter will be
-          in touch.
+        <span className="inline-flex h-12 w-12 items-center justify-center rounded-[9px] bg-emerald-50 text-emerald-600 shadow-sm">
+          <CheckCircle2 className="h-6 w-6" aria-hidden="true" />
+        </span>
+        <h1 className="text-subheading font-semibold text-foreground">
+          {t('interviewInvite.completedTitle')}
+        </h1>
+        <p className="max-w-sm text-body-sm text-muted-foreground">
+          {t('interviewInvite.completedDesc')}
         </p>
       </Centered>
     );
@@ -96,50 +105,60 @@ export default function InterviewInvite() {
 
   return (
     <Centered>
-      <span className="inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
-        <Video className="h-7 w-7" aria-hidden="true" />
-      </span>
-      <h1 className="text-2xl font-bold text-foreground">Your AI interview</h1>
-      <p className="max-w-md text-sm text-muted-foreground">
-        Hi {info.applicant_name} — you&apos;ve been invited to a short voice interview for the{' '}
-        <span className="font-medium text-foreground">{info.job_title}</span> role. You&apos;ll
-        speak with an AI interviewer; it takes about 10 minutes.
-      </p>
-      {info.scheduled_at && (
-        <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Clock className="h-4 w-4" aria-hidden="true" />
-          Scheduled for {new Date(info.scheduled_at).toLocaleString()}
-        </p>
-      )}
-
-      <label className="mt-2 flex max-w-md cursor-pointer items-start gap-3 rounded-xl border border-border bg-card px-4 py-3 text-left">
-        <input
-          type="checkbox"
-          checked={consent}
-          onChange={(e) => setConsent(e.target.checked)}
-          className="mt-0.5 h-4 w-4 accent-primary"
-        />
-        <span className="text-sm text-muted-foreground">
-          I consent to my microphone and camera being used to conduct and assess this interview.
-          My data is processed for hiring purposes; I can withdraw consent (DPDP §11) by contacting
-          the recruiter.
-        </span>
-      </label>
-
-      <Button
-        size="lg"
-        disabled={!consent || redeemMut.isPending}
-        onClick={() => redeemMut.mutate()}
-        className="gap-2"
+      <motion.div
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="flex w-full max-w-lg flex-col items-center gap-4 rounded-2xl border border-border bg-card text-card-foreground p-8 shadow-elevated transition-shadow hover:shadow-card-hover"
       >
-        {redeemMut.isPending ? <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" /> : null}
-        Begin interview
-      </Button>
-      {redeemMut.isError && (
-        <p className="text-sm text-rose-600">
-          {redeemMut.error instanceof Error ? redeemMut.error.message : 'Could not start the interview.'}
+        <span className="inline-flex h-14 w-14 items-center justify-center rounded-[9px] bg-secondary text-foreground">
+          <Video className="h-7 w-7" aria-hidden="true" />
+        </span>
+        <h1 className="text-subheading font-semibold text-foreground">
+          {t('interviewInvite.title')}
+        </h1>
+        <p className="max-w-md text-body-sm text-muted-foreground">
+          <Trans
+            i18nKey="interviewInvite.greeting"
+            values={{ name: info.applicant_name, role: info.job_title }}
+            components={{ 1: <span className="font-medium text-foreground" /> }}
+          />
         </p>
-      )}
+        {info.scheduled_at && (
+          <p className="flex items-center gap-1.5 text-caption text-muted-foreground">
+            <Clock className="h-4 w-4 text-primary" aria-hidden="true" />
+            {t('interviewInvite.scheduledFor', {
+              time: new Date(info.scheduled_at).toLocaleString(),
+            })}
+          </p>
+        )}
+
+        <label className="mt-2 flex max-w-md cursor-pointer items-start gap-3 rounded-xl border border-border bg-muted/40 px-4 py-3 text-left">
+          <input
+            type="checkbox"
+            checked={consent}
+            onChange={(e) => setConsent(e.target.checked)}
+            className="mt-0.5 h-4 w-4 accent-primary"
+          />
+          <span className="text-body-sm text-muted-foreground">{t('interviewInvite.consent')}</span>
+        </label>
+
+        <Button
+          size="lg"
+          disabled={!consent || redeemMut.isPending}
+          onClick={() => redeemMut.mutate()}
+          className="gap-2"
+        >
+          {redeemMut.isPending ? <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" /> : null}
+          {t('interviewInvite.begin')}
+        </Button>
+        {redeemMut.isError && (
+          <p className="text-body-sm text-rose-600">
+            {redeemMut.error instanceof Error
+              ? redeemMut.error.message
+              : t('interviewInvite.startError')}
+          </p>
+        )}
+      </motion.div>
     </Centered>
   );
 }

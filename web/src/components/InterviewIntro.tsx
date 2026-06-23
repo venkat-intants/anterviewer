@@ -81,12 +81,12 @@ export default function InterviewIntro({ language, onDone }: InterviewIntroProps
 
   return (
     <div
-      className="h-screen flex flex-col items-center justify-center bg-gradient-to-br from-indigo-900 to-violet-900 relative overflow-hidden"
+      className="h-screen flex flex-col items-center justify-center bg-aurora relative overflow-hidden"
       data-testid="interview-intro"
     >
-      {/* Background glow — decorative */}
+      {/* Midnight veil — keeps content legible over the darker upper region */}
       <div
-        className="absolute inset-0 bg-gradient-to-br from-indigo-800/40 to-violet-800/40 pointer-events-none"
+        className="absolute inset-0 bg-gradient-to-b from-black/85 via-black/55 to-black/30 pointer-events-none"
         aria-hidden="true"
       />
 
@@ -94,14 +94,14 @@ export default function InterviewIntro({ language, onDone }: InterviewIntroProps
       <div className="relative z-10 w-full max-w-2xl px-4 flex flex-col items-center gap-6">
         {/* Header */}
         <div className="text-center">
-          <span className="text-sm font-semibold text-indigo-300 tracking-wider uppercase">
+          <span className="text-caption font-semibold text-electric-signal tracking-wider uppercase">
             {t('interviewIntro.brand')}
           </span>
-          <h1 className="mt-1 text-2xl font-bold text-white">{t('interviewIntro.meetTitle')}</h1>
+          <h1 className="mt-1 text-heading font-semibold text-white">{t('interviewIntro.meetTitle')}</h1>
         </div>
 
         {/* Video container */}
-        <div className="w-full rounded-2xl overflow-hidden shadow-2xl border border-white/10 bg-black">
+        <div className="w-full rounded-3xl overflow-hidden shadow-elevated border border-white/10 bg-black">
           {/*
            * onError: video 404, decode failure, or codec unsupported — call
            *   onDone so a broken clip never blocks the interview.
@@ -124,15 +124,15 @@ export default function InterviewIntro({ language, onDone }: InterviewIntroProps
         </div>
 
         {/* Camera consent — Phase A (DPDP video_capture) */}
-        <label className="flex items-start gap-3 w-full max-w-md rounded-xl bg-white/5 border border-white/10 px-4 py-3 cursor-pointer">
+        <label className="flex items-start gap-3 w-full max-w-md rounded-xl bg-obsidian/70 backdrop-blur-sm border border-white/10 px-4 py-3 cursor-pointer">
           <input
             type="checkbox"
             checked={cameraConsent}
             onChange={(e) => setCameraConsent(e.target.checked)}
-            className="mt-0.5 h-4 w-4 rounded border-white/30 bg-transparent accent-indigo-500"
+            className="mt-0.5 h-4 w-4 rounded border-white/30 bg-transparent accent-electric-signal"
             data-testid="camera-consent-checkbox"
           />
-          <span className="text-sm text-indigo-100 leading-snug">
+          <span className="text-body-sm text-mist leading-snug">
             {t('interviewIntro.cameraConsent')}
           </span>
         </label>
@@ -144,7 +144,7 @@ export default function InterviewIntro({ language, onDone }: InterviewIntroProps
               type="button"
               onClick={() => void handleBegin()}
               aria-label={t('interviewIntro.beginLabel')}
-              className="w-full flex items-center justify-center gap-2 rounded-xl bg-indigo-500 hover:bg-indigo-400 active:bg-indigo-600 text-white font-semibold px-6 py-3.5 text-base shadow-lg transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:ring-offset-2 focus:ring-offset-indigo-900"
+              className="w-full flex items-center justify-center gap-2 rounded-[9px] bg-primary hover:bg-primary/90 text-primary-foreground font-semibold px-6 py-3.5 text-base shadow-elevated transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:ring-offset-black"
               data-testid="begin-button"
             >
               {t('interviewIntro.beginButton')}
@@ -169,7 +169,7 @@ export default function InterviewIntro({ language, onDone }: InterviewIntroProps
             type="button"
             onClick={() => void handleSkip()}
             aria-label={t('interviewIntro.skipLabel')}
-            className="text-sm text-indigo-300 hover:text-white underline underline-offset-2 transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:ring-offset-2 focus:ring-offset-indigo-900 rounded"
+            className="text-body-sm text-mist hover:text-white underline underline-offset-2 transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:ring-offset-black rounded"
             data-testid="skip-button"
           >
             {t('interviewIntro.skipButton')}
@@ -178,14 +178,14 @@ export default function InterviewIntro({ language, onDone }: InterviewIntroProps
           {/* Fullscreen gate: required to start; denial shows a retry hint. */}
           {fsDenied ? (
             <p
-              className="text-sm text-amber-300 text-center"
+              className="text-body-sm text-amber-glow text-center"
               role="alert"
               data-testid="fullscreen-denied"
             >
               {t('interviewIntro.fullscreenRequired')}
             </p>
           ) : (
-            <p className="text-xs text-indigo-300/80 text-center">
+            <p className="text-caption text-ash text-center">
               {t('interviewIntro.fullscreenNote')}
             </p>
           )}

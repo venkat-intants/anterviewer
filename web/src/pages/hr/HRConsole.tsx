@@ -62,10 +62,10 @@ export default function HRConsole() {
   const name = me?.full_name || user?.full_name || 'there';
 
   return (
-    <div className="max-w-4xl space-y-6">
+    <div className="space-y-8">
       <div>
-        <h1 className="text-2xl font-bold text-foreground">Welcome, {name}</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
+        <h1 className="text-heading font-semibold text-foreground">Welcome, {name}</h1>
+        <p className="mt-2 text-body-sm text-muted-foreground">
           Your hiring pipeline. Each stage activates as we roll it out.
         </p>
       </div>
@@ -75,27 +75,30 @@ export default function HRConsole() {
           const card = (
             <Card
               className={cn(
-                'shadow-sm h-full',
-                s.to && 'cursor-pointer transition-colors hover:border-primary/40 hover:bg-accent/40',
+                'h-full',
+                s.to &&
+                  'cursor-pointer transition-shadow hover:shadow-card-hover hover:border-primary/30',
               )}
             >
               <CardHeader className="pb-2">
                 <div className="flex items-start justify-between gap-2">
-                  <span className="inline-flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <span className="inline-flex h-11 w-11 items-center justify-center rounded-xl bg-secondary text-foreground">
                     {s.icon}
                   </span>
                   {s.live ? (
-                    <Badge variant="default" className="text-xs shrink-0">
+                    <Badge variant="success" className="shrink-0 text-xs">
                       Live
                     </Badge>
                   ) : (
-                    <Badge variant="outline" className="text-xs shrink-0">
+                    <Badge variant="outline" className="shrink-0 text-xs text-muted-foreground">
                       {s.phase} · soon
                     </Badge>
                   )}
                 </div>
-                <CardTitle className="text-base pt-2">{s.title}</CardTitle>
-                <CardDescription>{s.desc}</CardDescription>
+                <CardTitle className="pt-3 text-body-lg font-semibold text-foreground">
+                  {s.title}
+                </CardTitle>
+                <CardDescription className="text-body-sm text-muted-foreground">{s.desc}</CardDescription>
               </CardHeader>
               <CardContent />
             </Card>

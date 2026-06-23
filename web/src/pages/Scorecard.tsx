@@ -1,8 +1,9 @@
 // Scorecard — full-screen results page (outside AppShell).
 // Route: /scorecard/:scorecardId
-// Redesigned on feat/ui-redesign-v2 — matches Landing/Login/Dashboard visual language.
+// Premium LIGHT design: muted composite hero, white section cards,
+// light-palette radar chart, semantic score-band bars.
 // Uses: shadcn/ui Card/Badge/Button/Progress/Skeleton/Separator, recharts RadarChart,
-// framer-motion, toast for errors, design tokens (bg-primary, bg-muted, border).
+// framer-motion, toast for errors.
 
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
@@ -72,10 +73,13 @@ const DIMENSION_ORDER: Array<keyof ScoreBreakdown> = [
 
 // ── Score helpers ──────────────────────────────────────────────────────────────
 
-function scoreVariant(score: number): 'default' | 'secondary' | 'destructive' | 'outline' {
-  if (score >= 8) return 'default';
-  if (score >= 6) return 'secondary';
-  return 'outline';
+function scoreVariant(
+  score: number,
+): 'success' | 'accent' | 'warning' | 'destructive' {
+  if (score >= 8) return 'success';
+  if (score >= 6) return 'accent';
+  if (score >= 4) return 'warning';
+  return 'destructive';
 }
 
 function scoreLabelKey(score: number): string {
@@ -85,11 +89,13 @@ function scoreLabelKey(score: number): string {
   return 'scorecard.labelNeedsWork';
 }
 
-function compositeColorClass(score: number): string {
-  if (score >= 8) return 'text-green-600';
-  if (score >= 6) return 'text-primary';
-  if (score >= 4) return 'text-amber-500';
-  return 'text-destructive';
+// Tinted bar fill per score band — light semantic colors.
+// emerald (strong), primary-blue (mid), amber (fair), rose (weak).
+function scoreBarClass(score: number): string {
+  if (score >= 8) return '[&>div]:bg-emerald-500';
+  if (score >= 6) return '[&>div]:bg-primary';
+  if (score >= 4) return '[&>div]:bg-amber-500';
+  return '[&>div]:bg-destructive';
 }
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
@@ -97,19 +103,19 @@ function compositeColorClass(score: number): string {
 function ErrorState() {
   const { t } = useTranslation();
   return (
-    <main className="min-h-screen bg-gradient-to-br from-primary/5 via-background to-violet-500/5 flex items-center justify-center px-4">
+    <main className="min-h-screen bg-background flex items-center justify-center px-4">
       <div
         role="alert"
-        className="rounded-2xl border border-border bg-card shadow-sm p-8 max-w-md w-full text-center space-y-4"
+        className="rounded-2xl border border-border bg-white shadow-card p-8 max-w-md w-full text-center space-y-5"
       >
         <div className="inline-flex h-12 w-12 items-center justify-center rounded-full bg-destructive/10 mx-auto">
           <AlertTriangle className="h-6 w-6 text-destructive" aria-hidden="true" />
         </div>
         <div>
-          <p className="font-semibold text-foreground">{t('scorecard.notAvailableTitle')}</p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {t('scorecard.notAvailableDesc')}
+          <p className="text-body-lg font-semibold text-foreground">
+            {t('scorecard.notAvailableTitle')}
           </p>
+          <p className="mt-1.5 text-body-sm text-muted-foreground">{t('scorecard.notAvailableDesc')}</p>
         </div>
         <Button variant="outline" asChild>
           <Link to="/history">{t('scorecard.backToHistory')}</Link>
@@ -143,12 +149,12 @@ function ScoreBarRow({
         aria-expanded={open}
         aria-controls={panelId}
         className={cn(
-          'w-full flex items-center justify-between gap-2 rounded-md -mx-1 px-1 py-1 text-left',
+          'w-full flex items-center justify-between gap-2 rounded-[9px] -mx-1.5 px-1.5 py-1 text-left',
           'transition-colors hover:bg-muted/60',
-          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
+          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70',
         )}
       >
-        <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+        <span className="flex items-center gap-1.5 text-body-sm font-medium text-foreground">
           {label}
           <ChevronDown
             className={cn(
@@ -158,24 +164,32 @@ function ScoreBarRow({
             aria-hidden="true"
           />
         </span>
-        <Badge variant={scoreVariant(score)} className="text-xs tabular-nums">
+        <Badge variant={scoreVariant(score)} className="tabular-nums">
           {score} / 10
         </Badge>
       </button>
 
-      <Progress value={pct} className="h-2" aria-label={`${label}: ${score} out of 10`} />
+      {/* Tinted competency bar — fill color tracks the score band */}
+      <Progress
+        value={pct}
+        className={cn(
+          'h-2 bg-border [&>div]:transition-all [&>div]:duration-500',
+          scoreBarClass(score),
+        )}
+        aria-label={`${label}: ${score} out of 10`}
+      />
 
       {/* Rationale panel */}
       {open && (
         <div
           id={panelId}
-          className="mt-1 rounded-lg border border-border bg-muted/40 px-3 py-2.5"
+          className="mt-1.5 rounded-xl border border-border bg-muted/40 px-3.5 py-3"
         >
-          <p className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          <p className="mb-1.5 flex items-center gap-1.5 text-caption font-semibold uppercase tracking-wide text-primary">
             <Info className="h-3.5 w-3.5" aria-hidden="true" />
             {t('scorecard.whyThisScore')}
           </p>
-          <p className="text-sm leading-relaxed text-foreground">
+          <p className="text-body-sm leading-relaxed text-muted-foreground">
             {hasRationale ? rationale : t('scorecard.rationaleUnavailable')}
           </p>
         </div>
@@ -201,26 +215,29 @@ function DimensionRadar({ scores }: { scores: ScoreBreakdown }) {
   return (
     <ResponsiveContainer width="100%" height={220}>
       <RadarChart data={data} margin={{ top: 8, right: 24, bottom: 8, left: 24 }}>
-        <PolarGrid stroke="hsl(var(--border))" />
+        <PolarGrid stroke="#e8e8ed" />
         <PolarAngleAxis
           dataKey="dimension"
-          tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }}
+          tick={{ fill: '#707070', fontSize: 11 }}
         />
         <Tooltip
+          cursor={{ stroke: 'rgba(60,131,246,0.15)' }}
           contentStyle={{
-            background: 'hsl(var(--card))',
-            border: '1px solid hsl(var(--border))',
-            borderRadius: '8px',
+            background: '#ffffff',
+            border: '1px solid #e8e8ed',
+            borderRadius: '10px',
             fontSize: 12,
+            color: '#1d1d1f',
           }}
           formatter={(value) => [`${Number(value ?? 0)} / 10`, 'Score']}
         />
+        {/* Signal-Blue series — the single chromatic accent on light */}
         <Radar
           name="Score"
           dataKey="score"
-          stroke="hsl(var(--primary))"
-          fill="hsl(var(--primary))"
-          fillOpacity={0.15}
+          stroke="#0071e3"
+          fill="#0071e3"
+          fillOpacity={0.14}
           strokeWidth={2}
         />
       </RadarChart>
@@ -231,8 +248,8 @@ function DimensionRadar({ scores }: { scores: ScoreBreakdown }) {
 function StrengthItem({ text }: { text: string }) {
   return (
     <li className="flex gap-2.5">
-      <CheckCircle2 className="h-4 w-4 text-green-500 shrink-0 mt-0.5" aria-hidden="true" />
-      <p className="text-sm text-foreground leading-relaxed">{text}</p>
+      <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" aria-hidden="true" />
+      <p className="text-body-sm text-muted-foreground leading-relaxed">{text}</p>
     </li>
   );
 }
@@ -240,9 +257,9 @@ function StrengthItem({ text }: { text: string }) {
 function ImprovementCard({ item }: { item: ImprovementItem }) {
   return (
     <li className="flex gap-2.5">
-      <TrendingUp className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" aria-hidden="true" />
-      <p className="text-sm text-foreground leading-relaxed">
-        <span className="font-semibold">{item.area}:</span>{' '}
+      <TrendingUp className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" aria-hidden="true" />
+      <p className="text-body-sm leading-relaxed">
+        <span className="font-semibold text-foreground">{item.area}:</span>{' '}
         <span className="text-muted-foreground">{item.suggestion}</span>
       </p>
     </li>
@@ -253,7 +270,7 @@ function ImprovementCard({ item }: { item: ImprovementItem }) {
 
 function ScorecardSkeleton() {
   return (
-    <main className="min-h-screen bg-gradient-to-br from-primary/5 via-background to-violet-500/5 py-10 px-4">
+    <main className="min-h-screen bg-background py-10 px-4">
       {/* Screen-reader status announcement — keeps the existing test contract */}
       <span
         role="status"
@@ -261,11 +278,11 @@ function ScorecardSkeleton() {
         aria-live="polite"
         className="sr-only"
       />
-      <div className="max-w-2xl mx-auto space-y-6">
-        <Skeleton className="h-8 w-48 rounded mx-auto" />
-        <Skeleton className="h-48 w-full rounded-2xl" />
-        <Skeleton className="h-64 w-full rounded-2xl" />
-        <Skeleton className="h-40 w-full rounded-2xl" />
+      <div className="max-w-4xl mx-auto space-y-6">
+        <Skeleton className="h-8 w-48 rounded-full mx-auto" />
+        <Skeleton className="h-48 w-full rounded-3xl" />
+        <Skeleton className="h-64 w-full rounded-3xl" />
+        <Skeleton className="h-40 w-full rounded-3xl" />
       </div>
     </main>
   );
@@ -303,22 +320,15 @@ export default function Scorecard() {
   if (isError || !data) return <ErrorState />;
 
   const compositePct = Math.round((data.composite_score / 10) * 100);
-  const colorClass = compositeColorClass(data.composite_score);
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-primary/5 via-background to-violet-500/5 py-10 px-4">
-      {/* Subtle background orbs */}
-      <div aria-hidden="true" className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
-        <div className="absolute -top-40 left-1/2 -translate-x-1/2 h-[40rem] w-[80rem] rounded-full bg-primary/4 blur-3xl" />
-        <div className="absolute bottom-0 right-0 h-64 w-64 rounded-full bg-violet-500/4 blur-2xl" />
-      </div>
-
+    <main className="min-h-screen bg-background py-10 px-4">
       {/* Page header */}
       <motion.header
         initial={{ opacity: 0, y: -12 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4 }}
-        className="max-w-2xl mx-auto mb-8"
+        className="max-w-4xl mx-auto mb-8"
       >
         {/* Back nav */}
         <nav className="flex items-center gap-3 mb-6" aria-label="Breadcrumb">
@@ -328,7 +338,7 @@ export default function Scorecard() {
               {t('nav.history')}
             </Link>
           </Button>
-          <Separator orientation="vertical" className="h-4" />
+          <Separator orientation="vertical" className="h-4 bg-border" />
           <Button variant="ghost" size="sm" asChild className="gap-1.5 text-muted-foreground">
             <Link to="/dashboard">
               <LayoutDashboard className="h-4 w-4" aria-hidden="true" />
@@ -338,11 +348,11 @@ export default function Scorecard() {
         </nav>
 
         <div className="text-center">
-          <Badge variant="secondary" className="mb-3 gap-1.5 px-3 py-1 text-xs">
+          <Badge variant="accent" className="mb-4 gap-1.5 px-3 py-1">
             <History className="h-3 w-3" aria-hidden="true" />
             {t('scorecard.badge')}
           </Badge>
-          <h1 className="text-3xl font-bold text-foreground">{t('scorecard.title')}</h1>
+          <h1 className="text-heading font-semibold text-foreground">{t('scorecard.title')}</h1>
         </div>
       </motion.header>
 
@@ -351,31 +361,43 @@ export default function Scorecard() {
         initial="hidden"
         animate="visible"
         variants={stagger}
-        className="max-w-2xl mx-auto space-y-5"
+        className="max-w-4xl mx-auto space-y-5"
       >
-        {/* Composite score card */}
+        {/* Composite score card — frost-tinted hero surface with a large score */}
         <motion.div variants={fadeUp}>
-          <Card className="shadow-sm overflow-hidden">
-            <CardContent className="pt-8 pb-6 text-center space-y-4">
+          <Card className="relative overflow-hidden border-primary/10 bg-muted shadow-elevated ring-1 ring-primary/10">
+            {/* Subtle blue halo behind the number */}
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute left-1/2 top-0 h-56 w-56 -translate-x-1/2 -translate-y-1/3 rounded-full bg-primary/8 blur-[80px]"
+            />
+            <CardContent className="relative pt-10 pb-8 text-center space-y-4">
               <h2
                 id="composite-heading"
-                className="text-xs font-semibold uppercase tracking-widest text-muted-foreground"
+                className="text-caption font-semibold uppercase tracking-widest text-muted-foreground"
               >
                 {t('scorecard.overallScore')}
               </h2>
 
-              <div
-                className={cn('text-6xl font-extrabold leading-none tabular-nums', colorClass)}
-                aria-label={`Overall score: ${data.composite_score.toFixed(1)} out of 10`}
-              >
-                {data.composite_score.toFixed(1)}
+              <div className="flex items-baseline justify-center gap-1.5">
+                <span
+                  className="text-display font-semibold leading-none tabular-nums text-foreground"
+                  aria-label={`Overall score: ${data.composite_score.toFixed(1)} out of 10`}
+                >
+                  {data.composite_score.toFixed(1)}
+                </span>
+                <span className="text-body-lg font-medium text-muted-foreground">
+                  {t('scorecard.outOf10')}
+                </span>
               </div>
-              <p className="text-sm text-muted-foreground">{t('scorecard.outOf10')}</p>
 
               <div className="mx-auto max-w-xs">
                 <Progress
                   value={compositePct}
-                  className="h-3"
+                  className={cn(
+                    'h-3 bg-border [&>div]:transition-all [&>div]:duration-700',
+                    scoreBarClass(data.composite_score),
+                  )}
                   aria-valuenow={data.composite_score}
                   aria-valuemin={0}
                   aria-valuemax={10}
@@ -392,16 +414,18 @@ export default function Scorecard() {
 
         {/* Score breakdown — bar rows + radar chart */}
         <motion.div variants={fadeUp}>
-          <Card className="shadow-sm">
+          <Card className="transition-shadow hover:shadow-card-hover">
             <CardHeader className="pb-2">
-              <CardTitle className="text-base">{t('scorecard.scoreBreakdown')}</CardTitle>
-              <p className="text-xs text-muted-foreground">{t('scorecard.tapForDetail')}</p>
+              <CardTitle className="text-body-lg font-semibold text-foreground">
+                {t('scorecard.scoreBreakdown')}
+              </CardTitle>
+              <p className="text-caption text-muted-foreground">{t('scorecard.tapForDetail')}</p>
             </CardHeader>
             <CardContent className="space-y-4">
               {/* Radar chart */}
               <DimensionRadar scores={data.scores} />
 
-              <Separator />
+              <Separator className="bg-border" />
 
               {/* Bar rows — each is clickable to reveal its rationale */}
               <div className="space-y-4">
@@ -421,11 +445,11 @@ export default function Scorecard() {
         {/* Strengths */}
         {data.strengths.length > 0 && (
           <motion.div variants={fadeUp}>
-            <Card className="shadow-sm border-green-200/60">
+            <Card className="transition-shadow hover:shadow-card-hover">
               <CardHeader className="pb-3">
-                <CardTitle className="text-base flex items-center gap-2">
-                  <span className="inline-flex h-6 w-6 items-center justify-center rounded bg-green-100">
-                    <CheckCircle2 className="h-4 w-4 text-green-600" aria-hidden="true" />
+                <CardTitle className="text-body-lg font-semibold text-foreground flex items-center gap-2.5">
+                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-[9px] bg-emerald-50">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-600" aria-hidden="true" />
                   </span>
                   {t('scorecard.keyStrengths')}
                 </CardTitle>
@@ -444,10 +468,10 @@ export default function Scorecard() {
         {/* Areas for improvement */}
         {data.improvements.length > 0 && (
           <motion.div variants={fadeUp}>
-            <Card className="shadow-sm border-amber-200/60">
+            <Card className="transition-shadow hover:shadow-card-hover">
               <CardHeader className="pb-3">
-                <CardTitle className="text-base flex items-center gap-2">
-                  <span className="inline-flex h-6 w-6 items-center justify-center rounded bg-amber-100">
+                <CardTitle className="text-body-lg font-semibold text-foreground flex items-center gap-2.5">
+                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-[9px] bg-amber-50">
                     <TrendingUp className="h-4 w-4 text-amber-600" aria-hidden="true" />
                   </span>
                   {t('scorecard.areasForImprovement')}
@@ -464,14 +488,16 @@ export default function Scorecard() {
           </motion.div>
         )}
 
-        {/* Summary */}
+        {/* Summary — frost-tinted feature surface for a calm closing read */}
         <motion.div variants={fadeUp}>
-          <Card className="shadow-sm">
+          <Card className="bg-muted border-primary/10 ring-1 ring-primary/10">
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">{t('scorecard.summary')}</CardTitle>
+              <CardTitle className="text-body-lg font-semibold text-foreground">
+                {t('scorecard.summary')}
+              </CardTitle>
             </CardHeader>
             <CardContent>
-              <p className="text-sm text-muted-foreground leading-relaxed">{data.summary}</p>
+              <p className="text-body-sm text-muted-foreground leading-relaxed">{data.summary}</p>
             </CardContent>
           </Card>
         </motion.div>
@@ -479,7 +505,7 @@ export default function Scorecard() {
         {/* Download PDF button */}
         {data.report_pdf_url && (
           <motion.div variants={fadeUp} className="flex justify-center pb-4">
-            <Button asChild size="lg" className="gap-2 shadow-md shadow-primary/20">
+            <Button asChild size="lg" className="gap-2">
               <a href={data.report_pdf_url} target="_blank" rel="noopener noreferrer">
                 <Download className="h-4 w-4" aria-hidden="true" />
                 {t('scorecard.downloadPdf')}

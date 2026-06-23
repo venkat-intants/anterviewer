@@ -115,14 +115,14 @@ scale on different axes (API by HTTP traffic, worker by concurrent interviews).
 .\dev-up.ps1
 ```
 
-Then open **http://localhost:5173**.
+Then open **http://localhost:5174**.
 
 ### Manual (one PowerShell terminal each)
 
 ```powershell
-# 1. data_gateway — auth (:8002)            [uses Poetry's venv]
+# 1. data_gateway — auth (:8002)            [uses the in-project .venv]
 cd services\data_gateway
-poetry run uvicorn app.main:app --host 0.0.0.0 --port 8002
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8002
 
 # 2. interview_core — API (:8001)           [uses the in-project .venv]
 cd services\interview_core
@@ -142,15 +142,16 @@ cd services\interview_core
 $env:PYTHONUTF8="1"
 .\.venv\Scripts\python.exe -m app.worker.interview_worker dev
 
-# 6. web — frontend (:5173)
+# 6. web — frontend (:5174)
 cd web
 npm run dev
 ```
 
 **Gotchas**
-- **interview_core / feedback_billing / admin_ops:** run the in-project **`.venv` python directly** —
-  do **not** `poetry install` interview_core (its `poetry.lock` is out of sync with the pip-managed
-  LiveKit stack; a sync would uninstall working packages). Only **`data_gateway`** uses Poetry's own venv.
+- **All four services** run the in-project **`.venv` python directly** (`py -3.12 -m venv .venv`
+  then `.\.venv\Scripts\python.exe -m pip install -r requirements.txt`). Do **not** `poetry install`
+  interview_core (its `poetry.lock` is out of sync with the pip-managed LiveKit stack; a sync would
+  uninstall working packages). `shared` is made importable via a `.pth` file dropped in each `.venv`.
 - **Start the worker before** beginning an interview — LiveKit auto-dispatch only assigns a worker
   to rooms created while it is running.
 - **`admin_ops` (:8004)** is started by `dev-up.ps1` and serves the admin/analytics dashboard.

@@ -1,6 +1,6 @@
 # stop-all.ps1 — Intants AI Interview Platform — kill dev service processes
 # Usage:  .\scripts\stop-all.ps1
-# Kills processes bound to ports 8001 (interview_core), 8002 (data_gateway), 5173 (web/Vite).
+# Kills processes bound to ports 8001 (interview_core), 8002 (data_gateway), 5174 (web/Vite).
 # Does NOT stop Docker — Postgres data is left intact between sessions.
 # S3-014 retro action item 3.
 
@@ -32,11 +32,11 @@ function Stop-Port {
     }
 }
 
-Write-Step "Stopping Intants dev services (ports 8001, 8002, 5173)..."
+Write-Step "Stopping Intants dev services (ports 8001, 8002, 5174)..."
 
 Stop-Port -Port 8001
 Stop-Port -Port 8002
-Stop-Port -Port 5173
+Stop-Port -Port 5174
 
 Write-Host ""
 Write-Host "Done. Docker containers (Postgres, Redis, MinIO, Mailpit) left running." -ForegroundColor Cyan

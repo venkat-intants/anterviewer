@@ -7,7 +7,7 @@
  *   - Postgres (default port 5432, schema migrated)
  *   - data_gateway  → http://localhost:8002
  *   - interview_core → http://localhost:8001
- *   - Vite dev server → http://localhost:5173  (npm run dev)
+ *   - Vite dev server → http://localhost:5174  (npm run dev)
  *
  * Then, from the web/ directory:
  *   npx playwright install chromium   # first time only

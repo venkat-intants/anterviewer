@@ -76,22 +76,22 @@ interface StatTileProps {
 
 function StatTile({ icon, label, value, sub, loading, accent }: StatTileProps) {
   return (
-    <Card className={cn('shadow-sm', accent)}>
-      <CardContent className="pt-5 pb-4 flex items-start gap-4">
-        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary shrink-0">
+    <Card className={cn('transition-shadow hover:shadow-card-hover', accent)}>
+      <CardContent className="pt-6 pb-5 flex items-start gap-4">
+        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-secondary text-foreground shrink-0">
           {icon}
         </div>
         <div className="min-w-0 flex-1">
-          <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide mb-1">
+          <p className="text-caption text-muted-foreground font-medium uppercase tracking-wide mb-1.5">
             {label}
           </p>
           {loading ? (
-            <Skeleton className="h-7 w-20 rounded" />
+            <Skeleton className="h-8 w-20 rounded" />
           ) : (
-            <p className="text-2xl font-bold text-foreground leading-none tabular-nums">{value}</p>
+            <p className="text-heading font-semibold text-foreground leading-none tabular-nums">{value}</p>
           )}
           {sub && !loading && (
-            <p className="mt-1 text-xs text-muted-foreground">{sub}</p>
+            <p className="mt-1.5 text-caption text-muted-foreground">{sub}</p>
           )}
         </div>
       </CardContent>
@@ -111,26 +111,28 @@ function TrendsChart({ items }: { items: TrendItem[] }) {
   return (
     <ResponsiveContainer width="100%" height={200}>
       <LineChart data={data} margin={{ top: 4, right: 16, bottom: 0, left: 0 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+        <CartesianGrid strokeDasharray="3 3" stroke="#e8e8ed" />
         <XAxis
           dataKey="label"
-          tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }}
+          tick={{ fill: '#707070', fontSize: 11 }}
           tickLine={false}
           axisLine={false}
           interval="preserveStartEnd"
         />
         <YAxis
-          tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }}
+          tick={{ fill: '#707070', fontSize: 11 }}
           tickLine={false}
           axisLine={false}
           allowDecimals={false}
         />
         <Tooltip
+          cursor={{ stroke: '#e8e8ed' }}
           contentStyle={{
-            background: 'hsl(var(--card))',
-            border: '1px solid hsl(var(--border))',
-            borderRadius: '8px',
+            background: '#ffffff',
+            border: '1px solid #e8e8ed',
+            borderRadius: '10px',
             fontSize: 12,
+            color: '#1d1d1f',
           }}
           formatter={(value, name) => {
             if (name === 'interview_count') return [value ?? 0, 'Interviews'];
@@ -140,10 +142,10 @@ function TrendsChart({ items }: { items: TrendItem[] }) {
         <Line
           type="monotone"
           dataKey="interview_count"
-          stroke="hsl(var(--primary))"
+          stroke="#0071e3"
           strokeWidth={2}
           dot={false}
-          activeDot={{ r: 4 }}
+          activeDot={{ r: 4, fill: '#0071e3', stroke: '#ffffff' }}
         />
       </LineChart>
     </ResponsiveContainer>
@@ -156,32 +158,34 @@ function DistributionChart({ buckets }: { buckets: ScoreBucket[] }) {
   return (
     <ResponsiveContainer width="100%" height={180}>
       <BarChart data={buckets} margin={{ top: 4, right: 16, bottom: 0, left: 0 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+        <CartesianGrid strokeDasharray="3 3" stroke="#e8e8ed" vertical={false} />
         <XAxis
           dataKey="label"
-          tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }}
+          tick={{ fill: '#707070', fontSize: 11 }}
           tickLine={false}
           axisLine={false}
         />
         <YAxis
-          tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 11 }}
+          tick={{ fill: '#707070', fontSize: 11 }}
           tickLine={false}
           axisLine={false}
           allowDecimals={false}
         />
         <Tooltip
+          cursor={{ fill: 'rgb(60 131 246 / 0.06)' }}
           contentStyle={{
-            background: 'hsl(var(--card))',
-            border: '1px solid hsl(var(--border))',
-            borderRadius: '8px',
+            background: '#ffffff',
+            border: '1px solid #e8e8ed',
+            borderRadius: '10px',
             fontSize: 12,
+            color: '#1d1d1f',
           }}
           formatter={(value) => [value ?? 0, 'Interviews']}
         />
         <Bar
           dataKey="count"
-          fill="hsl(var(--primary))"
-          fillOpacity={0.8}
+          fill="#0071e3"
+          fillOpacity={0.85}
           radius={[4, 4, 0, 0]}
         />
       </BarChart>
@@ -246,8 +250,8 @@ export default function AdminOverview() {
         <div className="inline-flex h-12 w-12 items-center justify-center rounded-full bg-destructive/10">
           <AlertCircle className="h-6 w-6 text-destructive" aria-hidden="true" />
         </div>
-        <p className="font-medium text-foreground">Failed to load overview</p>
-        <p className="text-sm text-muted-foreground">
+        <p className="font-semibold text-foreground">Failed to load overview</p>
+        <p className="text-body-sm text-muted-foreground">
           {overviewErr instanceof Error ? overviewErr.message : 'Unknown error'}
         </p>
       </div>
@@ -258,8 +262,8 @@ export default function AdminOverview() {
     <motion.div initial="hidden" animate="visible" variants={stagger} className="space-y-8">
       {/* Page heading */}
       <motion.div variants={fadeUp}>
-        <h1 className="text-2xl font-bold text-foreground">Platform Overview</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
+        <h1 className="text-2xl font-semibold tracking-tight text-foreground">Platform Overview</h1>
+        <p className="mt-2 text-body-sm text-muted-foreground">
           Aggregate KPIs across all candidates and interview sessions.
         </p>
       </motion.div>
@@ -288,7 +292,6 @@ export default function AdminOverview() {
           value={loading ? null : (overview?.completed_interviews ?? 0).toLocaleString()}
           sub={loading ? undefined : `${fmtPct(overview?.completion_rate ?? 0)} completion rate`}
           loading={loading}
-          accent="border-green-200/60"
         />
         <StatTile
           icon={<TrendingUp className="h-5 w-5" />}
@@ -308,9 +311,9 @@ export default function AdminOverview() {
           label="Activity"
           value={
             loading ? null : (
-              <span className="text-lg">
-                <span className="text-2xl font-bold">{overview?.interviews_today ?? 0}</span>
-                <span className="text-sm text-muted-foreground font-normal"> today</span>
+              <span className="text-heading">
+                <span className="font-semibold">{overview?.interviews_today ?? 0}</span>
+                <span className="text-body-sm text-muted-foreground font-normal"> today</span>
               </span>
             )
           }
@@ -326,9 +329,9 @@ export default function AdminOverview() {
       {/* Charts row */}
       <motion.div variants={fadeUp} className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Daily trends */}
-        <Card className="shadow-sm">
+        <Card className="shadow-elevated">
           <CardHeader className="pb-2">
-            <CardTitle className="text-base">Daily Interview Volume (30 days)</CardTitle>
+            <CardTitle className="text-subheading font-semibold text-foreground">Daily Interview Volume (30 days)</CardTitle>
           </CardHeader>
           <CardContent>
             {trendsLoading ? (
@@ -336,7 +339,7 @@ export default function AdminOverview() {
             ) : trendsData && trendsData.items.length > 0 ? (
               <TrendsChart items={trendsData.items} />
             ) : (
-              <div className="flex items-center justify-center h-[200px] text-sm text-muted-foreground">
+              <div className="flex items-center justify-center h-[200px] text-body-sm text-muted-foreground">
                 No trend data available.
               </div>
             )}
@@ -344,9 +347,9 @@ export default function AdminOverview() {
         </Card>
 
         {/* Score distribution */}
-        <Card className="shadow-sm">
+        <Card className="shadow-elevated">
           <CardHeader className="pb-2">
-            <CardTitle className="text-base">Score Distribution</CardTitle>
+            <CardTitle className="text-subheading font-semibold text-foreground">Score Distribution</CardTitle>
           </CardHeader>
           <CardContent>
             {distLoading ? (
@@ -355,15 +358,15 @@ export default function AdminOverview() {
               <>
                 <DistributionChart buckets={distData.buckets} />
                 {/* Per-axis averages row */}
-                <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-muted-foreground">
-                  <span>Communication avg: <strong className="text-foreground">{fmtScore(distData.avg_communication)}</strong></span>
-                  <span>Technical avg: <strong className="text-foreground">{fmtScore(distData.avg_technical)}</strong></span>
-                  <span>Problem Solving avg: <strong className="text-foreground">{fmtScore(distData.avg_problem_solving)}</strong></span>
-                  <span>Confidence avg: <strong className="text-foreground">{fmtScore(distData.avg_confidence)}</strong></span>
+                <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-1.5 text-caption text-muted-foreground">
+                  <span>Communication avg: <strong className="text-foreground font-semibold">{fmtScore(distData.avg_communication)}</strong></span>
+                  <span>Technical avg: <strong className="text-foreground font-semibold">{fmtScore(distData.avg_technical)}</strong></span>
+                  <span>Problem Solving avg: <strong className="text-foreground font-semibold">{fmtScore(distData.avg_problem_solving)}</strong></span>
+                  <span>Confidence avg: <strong className="text-foreground font-semibold">{fmtScore(distData.avg_confidence)}</strong></span>
                 </div>
               </>
             ) : (
-              <div className="flex items-center justify-center h-[180px] text-sm text-muted-foreground">
+              <div className="flex items-center justify-center h-[180px] text-body-sm text-muted-foreground">
                 No distribution data available.
               </div>
             )}

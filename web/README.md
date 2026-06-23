@@ -15,7 +15,7 @@ npm install
 npm run dev
 ```
 
-App serves at http://localhost:5173.
+App serves at http://localhost:5174.
 
 ## Mock vs real API
 
@@ -33,7 +33,7 @@ Leave it as `VITE_USE_MOCK=true` (or unset) while `data_gateway` is being built.
 
 | Command | Description |
 |---|---|
-| `npm run dev` | Start Vite dev server on :5173 |
+| `npm run dev` | Start Vite dev server on :5174 |
 | `npm run build` | TypeScript check + Vite production build |
 | `npm run preview` | Serve production build locally |
 | `npm run test` | Run Vitest (non-watch) |

@@ -11,6 +11,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
 import { AlertCircle } from 'lucide-react';
 import { completeGoogleLogin } from '@/api/sso';
@@ -18,9 +19,11 @@ import { getMe } from '@/api/auth';
 import { useAuth } from '@/context/AuthContext';
 import { toast } from '@/lib/toast';
 import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
 import type { AuthUser } from '@/types/auth';
 
 export default function GoogleCallback() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const { setAuth } = useAuth();
   const [params] = useSearchParams();
@@ -37,12 +40,12 @@ export default function GoogleCallback() {
     const oauthError = params.get('error');
 
     if (oauthError) {
-      const msg = `Google sign-in was cancelled (${oauthError}).`;
+      const msg = t('googleCallback.cancelled', { error: oauthError });
       setError(msg);
       return;
     }
     if (!code || !state) {
-      setError('Missing authorization code or state from Google.');
+      setError(t('googleCallback.missingCode'));
       return;
     }
 
@@ -59,15 +62,15 @@ export default function GoogleCallback() {
         setAuth(tokens.access_token, user);
         void navigate('/dashboard', { replace: true });
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Google sign-in failed.';
+        const message = err instanceof Error ? err.message : t('googleCallback.failed');
         setError(message);
         toast.error(message);
       }
     })();
-  }, [params, navigate, setAuth]);
+  }, [params, navigate, setAuth, t]);
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-primary/5 via-background to-violet-500/5 flex items-center justify-center px-4 py-12">
+    <main className="min-h-screen bg-background flex items-center justify-center px-4 py-12">
       {error ? (
         /* ── Error state ────────────────────────────────────────────────────── */
         <motion.div
@@ -80,34 +83,36 @@ export default function GoogleCallback() {
           <div className="text-center mb-8">
             <Link
               to="/"
-              className="inline-flex flex-col items-center gap-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
+              className="inline-flex flex-col items-center gap-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-[9px]"
             >
-              <span className="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-primary text-primary-foreground text-xl font-bold shadow-lg shadow-primary/20 select-none">
+              <span className="inline-flex h-12 w-12 items-center justify-center rounded-[9px] bg-primary text-primary-foreground text-xl font-semibold select-none">
                 I
               </span>
             </Link>
           </div>
 
-          <div
+          <Card
             role="alert"
-            className="rounded-2xl border border-border bg-card shadow-sm p-8 text-center"
+            className="p-8 text-center shadow-card"
           >
             <div className="flex justify-center mb-4">
               <span className="inline-flex h-12 w-12 items-center justify-center rounded-full bg-destructive/10">
                 <AlertCircle className="h-6 w-6 text-destructive" aria-hidden="true" />
               </span>
             </div>
-            <h1 className="text-lg font-semibold text-foreground mb-2">Sign-in failed</h1>
-            <p className="text-sm text-muted-foreground mb-6">{error}</p>
+            <h1 className="text-subheading font-semibold text-foreground mb-2">
+              {t('googleCallback.failedTitle')}
+            </h1>
+            <p className="text-body-sm text-muted-foreground mb-6">{error}</p>
             <div className="flex flex-col sm:flex-row gap-3 justify-center">
               <Button asChild variant="default">
-                <Link to="/login">Back to sign in</Link>
+                <Link to="/login">{t('googleCallback.backToSignIn')}</Link>
               </Button>
               <Button type="button" variant="outline" onClick={() => window.location.reload()}>
-                Retry
+                {t('googleCallback.retry')}
               </Button>
             </div>
-          </div>
+          </Card>
         </motion.div>
       ) : (
         /* ── Loading state ──────────────────────────────────────────────────── */
@@ -118,7 +123,7 @@ export default function GoogleCallback() {
           className="text-center"
         >
           {/* Brand mark */}
-          <span className="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-primary text-primary-foreground text-xl font-bold shadow-lg shadow-primary/20 select-none mb-6">
+          <span className="inline-flex h-12 w-12 items-center justify-center rounded-[9px] bg-primary text-primary-foreground text-xl font-semibold select-none mb-6">
             I
           </span>
 
@@ -127,12 +132,12 @@ export default function GoogleCallback() {
             <div
               className="h-8 w-8 animate-spin rounded-full border-[3px] border-primary border-t-transparent"
               role="status"
-              aria-label="Completing Google sign-in"
+              aria-label={t('googleCallback.completing')}
             />
           </div>
 
-          <p className="text-sm font-medium text-foreground">Completing Google sign-in</p>
-          <p className="mt-1 text-xs text-muted-foreground">This will only take a moment…</p>
+          <p className="text-body-sm font-medium text-foreground">{t('googleCallback.completing')}</p>
+          <p className="mt-1 text-caption text-muted-foreground">{t('googleCallback.momentSub')}</p>
         </motion.div>
       )}
     </main>

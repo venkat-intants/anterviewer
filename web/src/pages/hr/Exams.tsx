@@ -7,53 +7,53 @@ import { motion } from 'framer-motion';
 import { ClipboardList, Plus, ChevronRight, FileQuestion, Users2 } from 'lucide-react';
 import { listExams, createExam, type ExamSummary } from '@/api/exams';
 import { toast } from '@/lib/toast';
-import { cn } from '@/lib/utils';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 
 const inputCls =
-  'w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm ' +
-  'focus:outline-none focus:ring-2 focus:ring-ring transition-colors';
+  'w-full rounded-[9px] border border-border bg-background px-3 py-2 text-sm text-foreground ' +
+  'placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring transition-colors';
 
-function statusBadge(s: string): { label: string; cls: string } {
+type BadgeVariant = 'success' | 'secondary' | 'warning';
+
+function statusBadgeVariant(s: string): { label: string; variant: BadgeVariant } {
   switch (s) {
     case 'published':
-      return { label: 'Published', cls: 'bg-emerald-100 text-emerald-800' };
+      return { label: 'Published', variant: 'success' };
     case 'closed':
-      return { label: 'Closed', cls: 'bg-zinc-200 text-zinc-700' };
+      return { label: 'Closed', variant: 'secondary' };
     default:
-      return { label: 'Draft', cls: 'bg-amber-100 text-amber-800' };
+      return { label: 'Draft', variant: 'warning' };
   }
 }
 
 function ExamRow({ e }: { e: ExamSummary }) {
   const navigate = useNavigate();
-  const badge = statusBadge(e.status);
+  const { label, variant } = statusBadgeVariant(e.status);
   return (
     <button
       type="button"
       onClick={() => navigate(`/hr/exams/${e.id}`)}
-      className="w-full rounded-lg border border-border bg-card p-3 text-left transition-colors hover:border-primary/40 hover:bg-accent/40"
+      className="w-full rounded-xl border border-border bg-card p-3 text-left shadow-card transition-shadow hover:border-primary/30 hover:shadow-card-hover"
     >
       <div className="flex items-center gap-3">
-        <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+        <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-[9px] bg-secondary text-foreground">
           <ClipboardList className="h-5 w-5" aria-hidden="true" />
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <p className="truncate text-sm font-medium text-foreground">{e.title}</p>
-            <span className={cn('rounded px-1.5 py-0.5 text-[11px] font-medium', badge.cls)}>
-              {badge.label}
-            </span>
+            <Badge variant={variant}>{label}</Badge>
           </div>
           <p className="mt-0.5 flex items-center gap-3 text-xs text-muted-foreground">
             <span className="flex items-center gap-1">
-              <FileQuestion className="h-3.5 w-3.5" aria-hidden="true" /> {e.question_count} questions
+              <FileQuestion className="h-3.5 w-3.5 text-muted-foreground/60" aria-hidden="true" /> {e.question_count} questions
             </span>
             <span className="flex items-center gap-1">
-              <Users2 className="h-3.5 w-3.5" aria-hidden="true" /> {e.attempt_count} attempts
+              <Users2 className="h-3.5 w-3.5 text-muted-foreground/60" aria-hidden="true" /> {e.attempt_count} attempts
             </span>
             <span>pass ≥ {e.pass_threshold}%</span>
           </p>
@@ -104,9 +104,9 @@ export default function Exams() {
   const list = exams ?? [];
 
   return (
-    <div className="max-w-3xl space-y-6">
+    <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-foreground">MCQ exams</h1>
+        <h1 className="text-heading font-semibold text-foreground">MCQ exams</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           Author a timed multiple-choice exam, set a pass threshold, share a link, and
           auto-grade applicants.
@@ -114,7 +114,7 @@ export default function Exams() {
       </div>
 
       {/* Create */}
-      <Card className="shadow-sm">
+      <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base flex items-center gap-2">
             <Plus className="h-4 w-4 text-primary" aria-hidden="true" />
@@ -155,7 +155,7 @@ export default function Exams() {
                   aria-label="Time limit minutes"
                 />
               </label>
-              <label className="flex items-end gap-2 pb-2 text-sm">
+              <label className="flex items-end gap-2 pb-2 text-sm text-muted-foreground">
                 <input
                   type="checkbox"
                   checked={allowRetake}
@@ -176,11 +176,11 @@ export default function Exams() {
       {/* List */}
       <div className="space-y-2">
         <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
-          <ClipboardList className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+          <ClipboardList className="h-4 w-4 text-primary" aria-hidden="true" />
           Your exams ({list.length})
         </h2>
         {isLoading ? (
-          <Skeleton className="h-20 w-full rounded-lg" />
+          <Skeleton className="h-20 w-full rounded-xl" />
         ) : list.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground">
             No exams yet — create one above.

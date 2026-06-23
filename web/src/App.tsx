@@ -109,7 +109,16 @@ export default function App() {
             </Route>
 
             {/* Full-screen pages — own header/chrome */}
-            <Route path="/interview/:sessionId" element={<Interview />} />
+            {/* The live interview keeps the dark video-immersion theme (scoped
+                via `.dark`); the rest of the app is light. */}
+            <Route
+              path="/interview/:sessionId"
+              element={
+                <div className="dark dark-root min-h-screen bg-background text-foreground">
+                  <Interview />
+                </div>
+              }
+            />
             <Route path="/interview/:sessionId/complete" element={<InterviewComplete />} />
             <Route path="/scorecard/:scorecardId" element={<Scorecard />} />
 

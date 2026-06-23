@@ -107,25 +107,25 @@ export default function InterviewComplete() {
           {/* ── Icon — early-exit variant uses a different colour ──────────── */}
           <div className="flex justify-center mb-6">
             {endedEarly ? (
-              <div className="flex h-20 w-20 items-center justify-center rounded-full bg-amber-100">
+              <div className="flex h-20 w-20 items-center justify-center rounded-full bg-amber-50 border border-amber-200 shadow-card">
                 <XCircle className="h-10 w-10 text-amber-600" aria-hidden="true" />
               </div>
             ) : (
-              <div className="flex h-20 w-20 items-center justify-center rounded-full bg-emerald-100">
+              <div className="flex h-20 w-20 items-center justify-center rounded-full bg-emerald-50 border border-emerald-200 shadow-card">
                 <CheckCircle2 className="h-10 w-10 text-emerald-600" aria-hidden="true" />
               </div>
             )}
           </div>
 
-          <h1 className="text-2xl font-bold text-foreground text-center">
+          <h1 className="text-heading font-semibold text-foreground text-center">
             {endedEarly ? t('interviewComplete.titleEarly') : t('interviewComplete.title')}
           </h1>
-          <p className="mt-2 text-sm text-muted-foreground text-center leading-relaxed">
+          <p className="mt-2 text-body-sm text-muted-foreground text-center leading-relaxed">
             {message}
           </p>
 
           {sessionId && (
-            <p className="mt-1 font-mono text-xs text-muted-foreground/60 text-center break-all">
+            <p className="mt-1 font-mono text-caption text-muted-foreground/70 text-center break-all">
               {t('interviewComplete.sessionLabel', { id: sessionId })}
             </p>
           )}
@@ -134,15 +134,15 @@ export default function InterviewComplete() {
             {/* ── Early-exit notice (no scorecard polling) ───────────────── */}
             {endedEarly && (
               <Card
-                className="shadow-sm border border-amber-200/60 bg-amber-50/50"
+                className="rounded-2xl border-border shadow-card"
                 data-testid="early-exit-card"
               >
                 <CardContent className="pt-4 pb-4">
                   <div className="flex flex-col items-center gap-2 py-1 text-center" aria-live="polite">
-                    <p className="text-sm font-medium text-foreground">
+                    <p className="text-body-sm font-medium text-foreground">
                       {t('interviewComplete.earlyExitTitle')}
                     </p>
-                    <p className="text-xs text-muted-foreground">
+                    <p className="text-caption text-muted-foreground">
                       {t('interviewComplete.earlyExitDesc')}
                     </p>
                   </div>
@@ -154,15 +154,15 @@ export default function InterviewComplete() {
             {!endedEarly && (
               <Card
                 className={cn(
-                  'shadow-sm border transition-colors',
-                  isPreparing && 'border-primary/30 bg-primary/5',
-                  hasTimedOut && 'border-border',
+                  'rounded-2xl border transition-colors shadow-card',
+                  isPreparing && 'border-primary/30 bg-muted',
+                  hasTimedOut && 'border-border bg-card',
                 )}
               >
                 <CardContent className="pt-4 pb-4">
                   {isPreparing && (
                     <div className="flex flex-col items-center gap-3 py-2" aria-live="polite">
-                      <div className="flex items-center gap-2 text-sm font-medium text-primary">
+                      <div className="flex items-center gap-2 text-body-sm font-medium text-primary">
                         <span
                           className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent"
                           aria-hidden="true"
@@ -173,7 +173,7 @@ export default function InterviewComplete() {
                         <Skeleton className="h-3 w-3/4 mx-auto rounded" />
                         <Skeleton className="h-3 w-1/2 mx-auto rounded" />
                       </div>
-                      <p className="text-xs text-muted-foreground text-center">
+                      <p className="text-caption text-muted-foreground text-center">
                         {t('interviewComplete.scorecardDesc')}
                       </p>
                     </div>
@@ -181,10 +181,10 @@ export default function InterviewComplete() {
 
                   {hasTimedOut && (
                     <div className="flex flex-col items-center gap-3 py-2 text-center" aria-live="polite">
-                      <Clock className="h-8 w-8 text-muted-foreground" aria-hidden="true" />
+                      <Clock className="h-8 w-8 text-muted-foreground/40" aria-hidden="true" />
                       <div>
-                        <p className="text-sm font-medium text-foreground">{t('interviewComplete.scorecardTimeout')}</p>
-                        <p className="mt-1 text-xs text-muted-foreground">
+                        <p className="text-body-sm font-medium text-foreground">{t('interviewComplete.scorecardTimeout')}</p>
+                        <p className="mt-1 text-caption text-muted-foreground">
                           {t('interviewComplete.scorecardTimeoutDesc')}
                         </p>
                       </div>

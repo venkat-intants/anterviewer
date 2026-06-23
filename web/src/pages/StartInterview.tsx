@@ -66,13 +66,13 @@ interface SectionHeaderProps {
 function SectionHeader({ step, title, description }: SectionHeaderProps) {
   return (
     <div className="flex items-start gap-3 mb-4">
-      <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-bold mt-0.5">
+      <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 border border-primary/30 text-primary text-xs font-semibold mt-0.5">
         {step}
       </span>
       <div>
-        <p className="text-sm font-semibold text-foreground">{title}</p>
+        <p className="text-body-sm font-semibold text-foreground">{title}</p>
         {description && (
-          <p className="text-xs text-muted-foreground mt-0.5">{description}</p>
+          <p className="text-caption text-muted-foreground mt-0.5">{description}</p>
         )}
       </div>
     </div>
@@ -93,12 +93,12 @@ interface FieldProps {
 function Field({ id, label, error, children }: FieldProps) {
   return (
     <div className="space-y-1.5">
-      <label htmlFor={id} className="block text-sm font-medium text-foreground">
+      <label htmlFor={id} className="block text-body-sm font-medium text-foreground">
         {label}
       </label>
       {children}
       {error && (
-        <p id={`${id}-error`} role="alert" className="text-xs text-destructive">
+        <p id={`${id}-error`} role="alert" className="text-caption text-destructive">
           {error}
         </p>
       )}
@@ -111,13 +111,13 @@ function Field({ id, label, error, children }: FieldProps) {
 // ---------------------------------------------------------------------------
 
 const inputCls =
-  'w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-sm ' +
+  'w-full rounded-[9px] border border-border bg-secondary px-3 py-2 text-sm text-foreground ' +
   'placeholder:text-muted-foreground ' +
-  'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-0 ' +
+  'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-0 focus:border-primary/50 ' +
   'transition-colors';
 
 const inputErrCls =
-  'border-destructive bg-destructive/5 focus:ring-destructive';
+  'border-destructive bg-destructive/10 focus:ring-destructive';
 
 // ---------------------------------------------------------------------------
 // Avatar card
@@ -142,8 +142,8 @@ function AvatarCard({ avatar, selected, onSelect }: AvatarCardProps) {
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
         'w-28 cursor-pointer',
         selected
-          ? 'border-primary bg-primary/5 shadow-md'
-          : 'border-border bg-background hover:border-primary/50 hover:shadow-sm',
+          ? 'border-primary bg-muted shadow-card'
+          : 'border-border bg-white hover:border-primary/40 hover:shadow-card',
       )}
     >
       {/* Thumbnail — looping muted video; falls back to img if src isn't a video URL */}
@@ -163,8 +163,8 @@ function AvatarCard({ avatar, selected, onSelect }: AvatarCardProps) {
       />
       <span
         className={cn(
-          'w-full py-1.5 text-center text-xs font-medium',
-          selected ? 'text-primary' : 'text-foreground',
+          'w-full py-1.5 text-center text-caption font-medium',
+          selected ? 'text-primary' : 'text-muted-foreground',
         )}
       >
         {avatar.name}
@@ -387,7 +387,7 @@ export default function StartInterview() {
   const femaleAvatars = avatars?.filter((a) => a.gender === 'female') ?? [];
 
   return (
-    <div className="max-w-2xl mx-auto pb-12">
+    <div className="pb-12">
       {/* Page heading */}
       <motion.div
         initial={{ opacity: 0, y: 10 }}
@@ -395,8 +395,8 @@ export default function StartInterview() {
         transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
         className="mb-6"
       >
-        <h1 className="text-2xl font-bold text-foreground">{t('startInterview.pageTitle')}</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
+        <h1 className="text-heading font-semibold text-foreground">{t('startInterview.pageTitle')}</h1>
+        <p className="mt-1 text-body-sm text-muted-foreground">
           {t('startInterview.pageDesc')}
         </p>
       </motion.div>
@@ -415,16 +415,16 @@ export default function StartInterview() {
             {me.has_resume ? (
               <div
                 aria-live="polite"
-                className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm text-emerald-800"
+                className="flex items-center gap-2 rounded-xl border border-border bg-emerald-50 px-4 py-2.5 text-body-sm text-muted-foreground"
               >
                 <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" aria-hidden="true" />
-                <span className="font-medium">{t('startInterview.resumeOnFile')}</span>
-                <span className="text-emerald-700">{t('startInterview.resumeOnFileDesc')}</span>
+                <span className="font-medium text-foreground">{t('startInterview.resumeOnFile')}</span>
+                <span className="text-muted-foreground">{t('startInterview.resumeOnFileDesc')}</span>
               </div>
             ) : (
               <div
                 aria-live="polite"
-                className="flex items-start gap-2 rounded-lg border border-border bg-muted/50 px-4 py-2.5 text-sm text-muted-foreground"
+                className="flex items-start gap-2 rounded-xl border border-border bg-muted/40 px-4 py-2.5 text-body-sm text-muted-foreground"
               >
                 <AlertCircle className="h-4 w-4 shrink-0 text-muted-foreground mt-0.5" aria-hidden="true" />
                 <span>
@@ -447,7 +447,7 @@ export default function StartInterview() {
       <form onSubmit={handleSubmit} noValidate aria-label="Start interview form">
         <div className="space-y-5">
           {/* ── Step 1: Role details ─────────────────────────────────────────── */}
-          <Card className="shadow-sm">
+          <Card>
             <CardContent className="pt-5 pb-5 space-y-4">
               <SectionHeader
                 step={1}
@@ -525,7 +525,7 @@ export default function StartInterview() {
           </Card>
 
           {/* ── Step 2: Avatar ──────────────────────────────────────────────── */}
-          <Card className="shadow-sm">
+          <Card>
             <CardContent className="pt-5 pb-5 space-y-4">
               <SectionHeader
                 step={2}
@@ -537,10 +537,10 @@ export default function StartInterview() {
                 <div
                   aria-live="polite"
                   aria-label={t('startInterview.loadingInterviewers')}
-                  className="flex items-center gap-2 text-sm text-muted-foreground"
+                  className="flex items-center gap-2 text-body-sm text-muted-foreground"
                 >
                   <span
-                    className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent"
+                    className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent"
                     aria-hidden="true"
                   />
                   {t('startInterview.loadingInterviewers')}
@@ -550,7 +550,7 @@ export default function StartInterview() {
               {!avatarsLoading && avatarsError && (
                 <div
                   aria-live="polite"
-                  className="rounded-lg border border-border bg-muted/50 px-4 py-2.5 text-sm text-muted-foreground"
+                  className="rounded-xl border border-border bg-muted/40 px-4 py-2.5 text-body-sm text-muted-foreground"
                 >
                   {t('startInterview.avatarLoadError')}
                 </div>
@@ -561,7 +561,7 @@ export default function StartInterview() {
                   {/* Male group */}
                   {maleAvatars.length > 0 && (
                     <div>
-                      <p className="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">
+                      <p className="text-caption font-medium text-muted-foreground mb-2 uppercase tracking-wide">
                         {t('startInterview.maleGroup')}
                       </p>
                       <div className="flex flex-wrap gap-3" role="radiogroup" aria-label={t('startInterview.maleGroup')}>
@@ -580,7 +580,7 @@ export default function StartInterview() {
                   {/* Female group */}
                   {femaleAvatars.length > 0 && (
                     <div>
-                      <p className="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">
+                      <p className="text-caption font-medium text-muted-foreground mb-2 uppercase tracking-wide">
                         {t('startInterview.femaleGroup')}
                       </p>
                       <div className="flex flex-wrap gap-3" role="radiogroup" aria-label={t('startInterview.femaleGroup')}>
@@ -601,7 +601,7 @@ export default function StartInterview() {
           </Card>
 
           {/* ── Step 3: Preferences ─────────────────────────────────────────── */}
-          <Card className="shadow-sm">
+          <Card>
             <CardContent className="pt-5 pb-5 space-y-4">
               <SectionHeader
                 step={3}
@@ -647,7 +647,7 @@ export default function StartInterview() {
           </Card>
 
           {/* ── Step 4: Review + Start ───────────────────────────────────────── */}
-          <Card className="shadow-sm">
+          <Card className="bg-muted ring-1 ring-primary/10 border-primary/20">
             <CardContent className="pt-5 pb-5 space-y-4">
               <SectionHeader
                 step={4}
@@ -660,7 +660,7 @@ export default function StartInterview() {
                 <motion.div
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
-                  className="rounded-lg bg-muted/50 border border-border px-4 py-3 space-y-1.5 text-sm"
+                  className="rounded-xl bg-white border border-border px-4 py-3 space-y-1.5 text-body-sm shadow-card"
                 >
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-semibold text-foreground">{values.title.trim()}</span>
@@ -691,7 +691,7 @@ export default function StartInterview() {
               )}
 
               {/* Consent note */}
-              <p className="text-xs text-muted-foreground">
+              <p className="text-caption text-muted-foreground">
                 {t('startInterview.consentNote')}
               </p>
 
@@ -699,7 +699,7 @@ export default function StartInterview() {
               {apiError && (
                 <div
                   role="alert"
-                  className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive"
+                  className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-body-sm text-destructive"
                 >
                   {apiError}
                 </div>
