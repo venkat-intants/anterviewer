@@ -1,5 +1,14 @@
 # Expansion to HR Workflow — ATS · Exam · Scheduling · Interview
 
+> ⚠️ **Superseded in part (2026-06-25): the role model is now THREE tiers.**
+> Where this doc says "super-admin creates companies + HR managers", that is now
+> split: a new **`platform_owner`** (the Intants core, `support@intants.com`)
+> creates/manages **companies** and creates **one `super_admin` per company**;
+> each **`super_admin`** is **company-scoped** and creates **HR managers for its
+> own company only**. So the hierarchy is
+> `platform_owner → super_admin (per company) → hr_manager → candidate`.
+> The rest of this doc (ATS, exam, scheduling, interview wiring) still applies.
+>
 > Status: **PROPOSED** (planning) · Author: Intants · Date: 2026-06-20
 > Turns the AI interview engine into a full **HR hiring assistant**: a recruiter
 > logs in, screens applicants by resume (ATS), runs an MCQ exam, shortlists by

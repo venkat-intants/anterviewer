@@ -1,7 +1,11 @@
-// hr.ts — super-admin company + HR-manager management (HR workflow Phase 0).
+// hr.ts — platform-owner + company-super-admin management (three-tier hierarchy).
 // Calls data_gateway (VITE_API_BASE_URL) via the central client (token + refresh).
+//
+//   platform_owner  → companies + the ONE company super admin (this file's
+//                     /admin/companies endpoints)
+//   super_admin     → HR managers in its OWN company (/admin/hr-managers)
 
-import { apiGet, apiPost, apiPut } from './client';
+import { apiGet, apiPost, apiPut, apiDelete } from './client';
 
 export interface Company {
   id: string;
@@ -9,6 +13,18 @@ export interface Company {
   slug: string;
   is_active: boolean;
   hr_count: number;
+  /** Whether this company already has its (single) super admin. */
+  has_admin: boolean;
+  admin_email: string | null;
+  created_at: string;
+}
+
+export interface CompanyAdmin {
+  user_id: string;
+  email: string;
+  full_name: string;
+  company_id: string;
+  must_change_password: boolean;
   created_at: string;
 }
 
@@ -21,6 +37,23 @@ export interface HrManager {
   created_at: string;
 }
 
+// ── Platform owner — real dashboard stats ───────────────────────────────────
+
+export interface PlatformStats {
+  companies: number;
+  super_admins: number;
+  hr_managers: number;
+  candidates: number;
+  interviews_total: number;
+  interviews_30d: number;
+}
+
+export function getPlatformStats(): Promise<PlatformStats> {
+  return apiGet<PlatformStats>('/admin/platform-stats');
+}
+
+// ── Platform owner — companies ──────────────────────────────────────────────
+
 export function listCompanies(): Promise<Company[]> {
   return apiGet<Company[]>('/admin/companies');
 }
@@ -29,18 +62,52 @@ export function createCompany(name: string, slug?: string): Promise<Company> {
   return apiPost<Company>('/admin/companies', slug ? { name, slug } : { name });
 }
 
-export function listHrManagers(companyId: string): Promise<HrManager[]> {
+/** Soft-delete a company and all its member users (super admin + HR managers). */
+export function deleteCompany(companyId: string): Promise<void> {
+  return apiDelete<void>(`/admin/companies/${companyId}`);
+}
+
+// ── Platform owner — the one super admin per company ────────────────────────
+
+export function getCompanyAdmin(companyId: string): Promise<CompanyAdmin> {
+  return apiGet<CompanyAdmin>(`/admin/companies/${companyId}/admin`);
+}
+
+export function createCompanyAdmin(
+  companyId: string,
+  body: { email: string; full_name: string; password?: string },
+): Promise<CompanyAdmin> {
+  return apiPost<CompanyAdmin>(`/admin/companies/${companyId}/admin`, body);
+}
+
+/** Remove a company's super admin (a fresh one can then be created). */
+export function deleteCompanyAdmin(companyId: string): Promise<void> {
+  return apiDelete<void>(`/admin/companies/${companyId}/admin`);
+}
+
+/** Platform-owner read-only view of a company's HR managers. */
+export function listCompanyHrManagers(companyId: string): Promise<HrManager[]> {
   return apiGet<HrManager[]>(`/admin/companies/${companyId}/hr-managers`);
 }
 
-export function createHrManager(
-  companyId: string,
-  body: { email: string; full_name: string; password?: string },
-): Promise<HrManager> {
-  return apiPost<HrManager>(`/admin/companies/${companyId}/hr-managers`, body);
+// ── Company super admin — HR managers in the caller's own company ───────────
+
+export function listMyHrManagers(): Promise<HrManager[]> {
+  return apiGet<HrManager[]>('/admin/hr-managers');
 }
 
-// ── DPDP audit log (super-admin) ────────────────────────────────────────────
+export function createMyHrManager(
+  body: { email: string; full_name: string; password?: string },
+): Promise<HrManager> {
+  return apiPost<HrManager>('/admin/hr-managers', body);
+}
+
+/** Soft-delete an HR manager in the caller's own company. */
+export function deleteMyHrManager(userId: string): Promise<void> {
+  return apiDelete<void>(`/admin/hr-managers/${userId}`);
+}
+
+// ── DPDP audit log (platform owner) ─────────────────────────────────────────
 
 export interface AuditEvent {
   ts: string;
@@ -53,7 +120,7 @@ export function listAuditLog(limit = 100): Promise<AuditEvent[]> {
   return apiGet<AuditEvent[]>(`/admin/audit-log?limit=${limit}`);
 }
 
-// ── Platform feature flags (super-admin) ────────────────────────────────────
+// ── Platform feature flags (platform owner) ─────────────────────────────────
 
 export interface FeatureFlag {
   key: string;

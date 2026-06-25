@@ -54,13 +54,14 @@ const SIDEBAR_W = 256;
 
 // ── Role label helper ─────────────────────────────────────────────────────────
 
-const ROLE_PRIORITY = ['super_admin', 'admin', 'hr_manager'] as const;
+const ROLE_PRIORITY = ['platform_owner', 'super_admin', 'admin', 'hr_manager'] as const;
 
 /** Returns the most-privileged display label for the user's role set. */
 function getRoleLabel(roles: string[]): string {
   for (const r of ROLE_PRIORITY) {
     if (roles.includes(r)) {
       switch (r) {
+        case 'platform_owner': return 'Platform Owner';
         case 'super_admin': return 'Super Admin';
         case 'admin': return 'Platform Admin';
         case 'hr_manager': return 'HR Manager';
@@ -72,15 +73,18 @@ function getRoleLabel(roles: string[]): string {
 
 /** Accent color for the role label, matching the design. */
 function getRoleAccent(roles: string[]): string {
+  if (roles.includes('platform_owner')) return '#f0a6c8';
   if (roles.includes('super_admin')) return '#c89ce8';
   if (roles.includes('admin')) return '#60a5fa';
   if (roles.includes('hr_manager')) return '#27c93f';
   return '#70757c';
 }
 
+const PRIVILEGED_ROLES = ['platform_owner', 'super_admin', 'admin', 'hr_manager'];
+
 /** True when the user holds no privileged role (plain candidate). */
 function isCandidateOnly(roles: string[]): boolean {
-  return !roles.some((r) => r === 'super_admin' || r === 'admin' || r === 'hr_manager');
+  return !roles.some((r) => PRIVILEGED_ROLES.includes(r));
 }
 
 /** Derive initials from a display name for the avatar fallback */
@@ -126,8 +130,14 @@ const ADMIN_NAV: NavItem[] = [
   { to: '/admin/jd', labelKey: 'nav.adminJd', icon: <Upload className={ICON} aria-hidden="true" /> },
 ];
 
+// platform_owner — the Intants core: companies + their super admins.
+const PLATFORM_NAV: NavItem[] = [
+  { to: '/platform', label: 'Companies', icon: <Building2 className={ICON} aria-hidden="true" /> },
+];
+
+// super_admin — a company's super admin: its HR managers.
 const SUPER_NAV: NavItem[] = [
-  { to: '/superadmin', label: 'Companies', icon: <Building2 className={ICON} aria-hidden="true" /> },
+  { to: '/superadmin', label: 'HR Managers', icon: <Users className={ICON} aria-hidden="true" /> },
 ];
 
 // ── Sidebar nav link (vertical) ───────────────────────────────────────────────
@@ -313,9 +323,18 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
           </div>
         )}
 
-        {roles.includes('super_admin') && (
+        {roles.includes('platform_owner') && (
           <div className="space-y-1">
             <NavSectionLabel>Platform</NavSectionLabel>
+            {PLATFORM_NAV.map((item) => (
+              <SideNavLink key={item.to} item={item} onNavigate={onNavigate} />
+            ))}
+          </div>
+        )}
+
+        {roles.includes('super_admin') && (
+          <div className="space-y-1">
+            <NavSectionLabel>Company</NavSectionLabel>
             {SUPER_NAV.map((item) => (
               <SideNavLink key={item.to} item={item} onNavigate={onNavigate} />
             ))}

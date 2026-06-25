@@ -53,3 +53,17 @@ export function redeemInterviewInvite(
     body: JSON.stringify({ consent_granted: consentGranted }),
   });
 }
+
+/**
+ * Resume an in-progress interview after a page reload, using the httpOnly resume
+ * cookie that redeem set (sent automatically — clientFetch always uses
+ * credentials:'include'). No token in the URL, no login. Rejects if the link
+ * can't resume (expired / finished / revoked); the caller then shows a
+ * re-open-link prompt instead of bouncing to /login.
+ */
+export function resumeInterview(): Promise<InterviewRedeem> {
+  return clientFetch<InterviewRedeem>(`${API_BASE}/interview-invite/resume`, {
+    method: 'POST',
+    skipAuth: true,
+  });
+}

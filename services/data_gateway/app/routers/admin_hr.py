@@ -1,21 +1,28 @@
-"""Super-admin endpoints — HR workflow Phase 0.
+"""Admin endpoints — three-tier hierarchy (HR workflow Phase 0+).
 
-Lets the platform owner (super_admin) manage tenant companies and the HR
-managers inside them:
+Two privileged tiers manage the tenant identity graph:
 
-  POST   /admin/companies                        — create a company
-  GET    /admin/companies                        — list companies
-  POST   /admin/companies/{company_id}/hr-managers — create an HR manager
-  GET    /admin/companies/{company_id}/hr-managers — list a company's HR managers
+  PLATFORM OWNER ("super super admin" — the Intants core, support@intants.com):
+    POST   /admin/companies                          — create a company
+    GET    /admin/companies                           — list companies
+    POST   /admin/companies/{company_id}/admin        — create the ONE company super admin
+    GET    /admin/companies/{company_id}/admin         — get the company super admin
+    GET    /admin/companies/{company_id}/hr-managers   — read-only view of a company's HRs
+    GET/PUT /admin/feature-flags[...]                  — platform feature flags
+    GET    /admin/audit-log                            — DPDP audit feed
 
-All routes require the ``super_admin`` role. HR managers are created with a
-(default) password and ``must_change_password=true`` so they are forced to
-reset it on first login.
+  COMPANY SUPER ADMIN ("super admin" — one per company, company-scoped):
+    GET    /admin/hr-managers                          — list HRs in the caller's company
+    POST   /admin/hr-managers                          — create an HR in the caller's company
+
+Accounts created with a (default) password get ``must_change_password=true`` so
+they are forced to reset it on first login. A company has AT MOST ONE super admin.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import uuid
 from datetime import UTC, datetime
@@ -23,7 +30,7 @@ from typing import Annotated
 
 import bcrypt
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, EmailStr, Field
 from shared.auth.base import User
 from sqlalchemy import text
@@ -38,8 +45,45 @@ log = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin-hr"])
 
-SuperAdminDep = Annotated[User, Depends(require_role("super_admin"))]
+PlatformOwnerDep = Annotated[User, Depends(require_role("platform_owner"))]
 DbSessionDep = Annotated[AsyncSession, Depends(get_db_session)]
+
+
+# ---------------------------------------------------------------------------
+# Company-super-admin tenant context — resolves the caller's company_id.
+# This is the isolation boundary: a company super admin can ONLY ever touch
+# its own company's HR managers.
+# ---------------------------------------------------------------------------
+async def get_company_admin_ctx(
+    user: Annotated[User, Depends(require_role("super_admin"))],
+    db: DbSessionDep,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Return (admin_user_id, company_id). 403 if not assigned to a company."""
+    try:
+        uid = uuid.UUID(user.user_id)
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid user identity."
+        ) from exc
+    # Join companies + deleted_at so a super_admin of a soft-deleted tenant is
+    # treated as unassigned (consistent with the platform-owner paths).
+    company_id = await db.scalar(
+        text(
+            "SELECT u.company_id FROM users u "
+            "JOIN companies c ON c.id = u.company_id AND c.deleted_at IS NULL "
+            "WHERE u.id = :uid AND u.deleted_at IS NULL"
+        ),
+        {"uid": uid},
+    )
+    if company_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your super-admin account is not assigned to an active company.",
+        )
+    return uid, company_id
+
+
+CompanyAdminCtxDep = Annotated[tuple[uuid.UUID, uuid.UUID], Depends(get_company_admin_ctx)]
 
 
 # ---------------------------------------------------------------------------
@@ -58,14 +102,27 @@ class CompanyResponse(BaseModel):
     slug: str
     is_active: bool
     hr_count: int = 0
+    has_admin: bool = False
+    admin_email: str | None = None
     created_at: str
 
 
-class CreateHrBody(BaseModel):
+class CreateUserBody(BaseModel):
+    """Shared body for creating a company super admin OR an HR manager."""
+
     email: EmailStr
     full_name: str = Field(min_length=1, max_length=200)
-    # Default per product spec; the HR is forced to change it on first login.
+    # Default per product spec; the user is forced to change it on first login.
     password: str = Field(default="12345678", min_length=8, max_length=128)
+
+
+class CompanyAdminResponse(BaseModel):
+    user_id: str
+    email: str
+    full_name: str
+    company_id: str
+    must_change_password: bool
+    created_at: str
 
 
 class HrManagerResponse(BaseModel):
@@ -96,9 +153,7 @@ async def _hash_password(password: str) -> str:
 
 async def _company_or_404(db: AsyncSession, company_id: uuid.UUID) -> None:
     exists = await db.scalar(
-        text(
-            "SELECT 1 FROM companies WHERE id = :cid AND deleted_at IS NULL"
-        ),
+        text("SELECT 1 FROM companies WHERE id = :cid AND deleted_at IS NULL"),
         {"cid": company_id},
     )
     if not exists:
@@ -108,16 +163,110 @@ async def _company_or_404(db: AsyncSession, company_id: uuid.UUID) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# Companies
-# ---------------------------------------------------------------------------
+async def _create_company_user(
+    db: AsyncSession, *, company_id: uuid.UUID, body: CreateUserBody, role: str
+) -> tuple[uuid.UUID, datetime]:
+    """Insert a company-scoped user with the given role + must_change_password.
+
+    Returns (user_id, created_at). Raises 409 on duplicate email.
+    """
+    # Resolve the role id up front so a missing role surfaces as a clear 500
+    # rather than a NOT-NULL IntegrityError mislabelled as an email conflict.
+    role_id = await db.scalar(
+        text("SELECT id FROM roles WHERE name = :role"), {"role": role}
+    )
+    if role_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Role '{role}' is not provisioned — run database migrations.",
+        )
+    user_id = uuid.uuid4()
+    now = datetime.now(tz=UTC)
+    password_hash = await _hash_password(body.password)
+    try:
+        await db.execute(
+            text(
+                "INSERT INTO users "
+                "(id, email, password_hash, full_name, company_id, "
+                " must_change_password, created_at, updated_at) "
+                "VALUES (:id, :email, :pw, :fn, :cid, true, :now, :now)"
+            ),
+            {
+                "id": user_id, "email": str(body.email), "pw": password_hash,
+                "fn": body.full_name, "cid": company_id, "now": now,
+            },
+        )
+        await db.execute(
+            text(
+                "INSERT INTO user_roles (user_id, role_id, assigned_at) "
+                "VALUES (:uid, :rid, :now)"
+            ),
+            {"uid": user_id, "rid": role_id, "now": now},
+        )
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An account with this email already exists.",
+        ) from exc
+    return user_id, now
+
+
+async def _soft_delete_user(db: AsyncSession, user_id: uuid.UUID) -> None:
+    """Soft-delete a user: mark deleted, deactivate, and tombstone the email so
+    the original address can be re-used for a brand-new account later.
+
+    (Soft-delete matches the repo's deleted_at convention and preserves the row
+    for audit/history; list queries already filter deleted_at IS NULL.)
+    """
+    await db.execute(
+        text(
+            "UPDATE users SET deleted_at = now(), is_active = false, "
+            "email = email || '.deleted.' || id::text, updated_at = now() "
+            "WHERE id = :uid AND deleted_at IS NULL"
+        ),
+        {"uid": user_id},
+    )
+
+
+async def _audit(
+    db: AsyncSession,
+    *,
+    actor_id: uuid.UUID,
+    action: str,
+    resource_type: str,
+    resource_id: uuid.UUID,
+    details: dict[str, object] | None = None,
+) -> None:
+    """Append an admin action to the (append-only) DPDP audit_log.
+
+    event_id + event_ts use server defaults; the append-only trigger blocks
+    UPDATE/DELETE but permits INSERT.
+    """
+    await db.execute(
+        text(
+            "INSERT INTO audit_log "
+            "(actor_id, actor_type, action, resource_type, resource_id, details) "
+            "VALUES (:aid, 'admin', :action, :rtype, :rid, CAST(:details AS jsonb))"
+        ),
+        {
+            "aid": actor_id, "action": action, "rtype": resource_type,
+            "rid": resource_id, "details": json.dumps(details) if details else None,
+        },
+    )
+
+
+# ===========================================================================
+# PLATFORM OWNER — companies
+# ===========================================================================
 
 
 @router.post("/companies", status_code=status.HTTP_201_CREATED, response_model=CompanyResponse)
 async def create_company(
-    body: CreateCompanyBody, current_user: SuperAdminDep, db: DbSessionDep
+    body: CreateCompanyBody, current_user: PlatformOwnerDep, db: DbSessionDep
 ) -> CompanyResponse:
-    """Create a tenant company (super_admin only)."""
+    """Create a tenant company (platform_owner only)."""
     company_id = uuid.uuid4()
     slug = _slugify(body.slug or body.name)
     now = datetime.now(tz=UTC)
@@ -146,13 +295,15 @@ async def create_company(
     log.info("admin_hr.company_created", company_id=str(company_id), slug=slug)
     return CompanyResponse(
         id=str(company_id), name=body.name, slug=slug, is_active=True, hr_count=0,
-        created_at=now.isoformat(),
+        has_admin=False, admin_email=None, created_at=now.isoformat(),
     )
 
 
 @router.get("/companies", response_model=list[CompanyResponse])
-async def list_companies(current_user: SuperAdminDep, db: DbSessionDep) -> list[CompanyResponse]:
-    """List all active companies with their HR-manager counts (super_admin only)."""
+async def list_companies(
+    current_user: PlatformOwnerDep, db: DbSessionDep
+) -> list[CompanyResponse]:
+    """List companies with HR-manager counts + their super admin (platform_owner only)."""
     rows = (
         await db.execute(
             text(
@@ -160,7 +311,12 @@ async def list_companies(current_user: SuperAdminDep, db: DbSessionDep) -> list[
                 "(SELECT count(*) FROM users u "
                 " JOIN user_roles ur ON ur.user_id = u.id "
                 " JOIN roles r ON r.id = ur.role_id AND r.name = 'hr_manager' "
-                " WHERE u.company_id = c.id AND u.deleted_at IS NULL) AS hr_count "
+                " WHERE u.company_id = c.id AND u.deleted_at IS NULL) AS hr_count, "
+                "(SELECT u.email FROM users u "
+                " JOIN user_roles ur ON ur.user_id = u.id "
+                " JOIN roles r ON r.id = ur.role_id AND r.name = 'super_admin' "
+                " WHERE u.company_id = c.id AND u.deleted_at IS NULL "
+                " ORDER BY u.created_at ASC LIMIT 1) AS admin_email "
                 "FROM companies c WHERE c.deleted_at IS NULL "
                 "ORDER BY c.created_at DESC"
             )
@@ -170,75 +326,247 @@ async def list_companies(current_user: SuperAdminDep, db: DbSessionDep) -> list[
         CompanyResponse(
             id=str(r[0]), name=r[1], slug=r[2], is_active=r[3],
             created_at=r[4].isoformat(), hr_count=int(r[5]),
+            has_admin=r[6] is not None, admin_email=r[6],
         )
         for r in rows
     ]
 
 
-# ---------------------------------------------------------------------------
-# HR managers
-# ---------------------------------------------------------------------------
+@router.delete("/companies/{company_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_company(
+    company_id: uuid.UUID, current_user: PlatformOwnerDep, db: DbSessionDep
+) -> Response:
+    """Soft-delete a company and ALL its member users — its super admin and HR
+    managers (platform_owner only).
+
+    The company's applicants / exams / interview records are retained in the DB
+    but become inaccessible (the company and every login into it are gone).
+    Member emails are released so they can be re-used for new accounts.
+    """
+    locked = await db.scalar(
+        text("SELECT 1 FROM companies WHERE id = :cid AND deleted_at IS NULL FOR UPDATE"),
+        {"cid": company_id},
+    )
+    if not locked:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Company {company_id} not found.",
+        )
+    # Soft-delete + tombstone every member user (super admin + HR managers).
+    await db.execute(
+        text(
+            "UPDATE users SET deleted_at = now(), is_active = false, "
+            "email = email || '.deleted.' || id::text, updated_at = now() "
+            "WHERE company_id = :cid AND deleted_at IS NULL"
+        ),
+        {"cid": company_id},
+    )
+    await db.execute(
+        text(
+            "UPDATE companies SET deleted_at = now(), is_active = false, "
+            "updated_at = now() WHERE id = :cid"
+        ),
+        {"cid": company_id},
+    )
+    await _audit(
+        db, actor_id=uuid.UUID(current_user.user_id), action="delete_company",
+        resource_type="company", resource_id=company_id,
+    )
+    await db.commit()
+    log.info("admin_hr.company_deleted", company_id=str(company_id))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ===========================================================================
+# PLATFORM OWNER — platform-wide stats (real counts, no dummy data)
+# ===========================================================================
+
+
+class PlatformStats(BaseModel):
+    companies: int
+    super_admins: int
+    hr_managers: int
+    candidates: int
+    interviews_total: int
+    interviews_30d: int
+
+
+@router.get("/platform-stats", response_model=PlatformStats)
+async def platform_stats(current_user: PlatformOwnerDep, db: DbSessionDep) -> PlatformStats:
+    """Real platform-wide counts for the platform-owner dashboard tiles."""
+    row = (
+        await db.execute(
+            text(
+                "SELECT "
+                " (SELECT count(*) FROM companies WHERE deleted_at IS NULL) AS companies, "
+                " (SELECT count(DISTINCT u.id) FROM users u "
+                "  JOIN user_roles ur ON ur.user_id = u.id "
+                "  JOIN roles r ON r.id = ur.role_id AND r.name = 'super_admin' "
+                "  WHERE u.deleted_at IS NULL) AS super_admins, "
+                " (SELECT count(DISTINCT u.id) FROM users u "
+                "  JOIN user_roles ur ON ur.user_id = u.id "
+                "  JOIN roles r ON r.id = ur.role_id AND r.name = 'hr_manager' "
+                "  WHERE u.deleted_at IS NULL) AS hr_managers, "
+                " (SELECT count(DISTINCT u.id) FROM users u "
+                "  JOIN user_roles ur ON ur.user_id = u.id "
+                "  JOIN roles r ON r.id = ur.role_id AND r.name = 'candidate' "
+                "  WHERE u.deleted_at IS NULL) AS candidates, "
+                " (SELECT count(*) FROM sessions WHERE deleted_at IS NULL) AS interviews_total, "
+                " (SELECT count(*) FROM sessions WHERE deleted_at IS NULL "
+                "  AND created_at >= now() - interval '30 days') AS interviews_30d"
+            )
+        )
+    ).fetchone()
+    return PlatformStats(
+        companies=int(row[0]), super_admins=int(row[1]), hr_managers=int(row[2]),
+        candidates=int(row[3]), interviews_total=int(row[4]), interviews_30d=int(row[5]),
+    )
+
+
+# ===========================================================================
+# PLATFORM OWNER — company super admins (one per company)
+# ===========================================================================
 
 
 @router.post(
-    "/companies/{company_id}/hr-managers",
+    "/companies/{company_id}/admin",
     status_code=status.HTTP_201_CREATED,
-    response_model=HrManagerResponse,
+    response_model=CompanyAdminResponse,
 )
-async def create_hr_manager(
-    company_id: uuid.UUID, body: CreateHrBody, current_user: SuperAdminDep, db: DbSessionDep
-) -> HrManagerResponse:
-    """Create an HR manager scoped to a company (super_admin only).
+async def create_company_admin(
+    company_id: uuid.UUID, body: CreateUserBody, current_user: PlatformOwnerDep, db: DbSessionDep
+) -> CompanyAdminResponse:
+    """Create the company super admin (platform_owner only).
 
-    The HR is created with the given (default '12345678') password and
+    A company has at most ONE super admin — a second attempt returns 409. The
+    account is created with the given (default '12345678') password and
     must_change_password=true, forcing a reset on first login.
+
+    Concurrency: the company row is locked FOR UPDATE before the existence
+    check, so two simultaneous requests for the same company serialize — the
+    second waits, then sees the first's super admin and gets a clean 409 (no
+    duplicate-admin race).
     """
-    await _company_or_404(db, company_id)
-    user_id = uuid.uuid4()
-    now = datetime.now(tz=UTC)
-    password_hash = await _hash_password(body.password)
-    try:
-        await db.execute(
-            text(
-                "INSERT INTO users "
-                "(id, email, password_hash, full_name, company_id, "
-                " must_change_password, created_at, updated_at) "
-                "VALUES (:id, :email, :pw, :fn, :cid, true, :now, :now)"
-            ),
-            {
-                "id": user_id, "email": str(body.email), "pw": password_hash,
-                "fn": body.full_name, "cid": company_id, "now": now,
-            },
+    locked = await db.scalar(
+        text("SELECT 1 FROM companies WHERE id = :cid AND deleted_at IS NULL FOR UPDATE"),
+        {"cid": company_id},
+    )
+    if not locked:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Company {company_id} not found.",
         )
-        await db.execute(
-            text(
-                "INSERT INTO user_roles (user_id, role_id) "
-                "VALUES (:uid, (SELECT id FROM roles WHERE name = 'hr_manager'))"
-            ),
-            {"uid": user_id},
-        )
-        await db.commit()
-    except IntegrityError as exc:
-        await db.rollback()
+    existing = await db.scalar(
+        text(
+            "SELECT u.email FROM users u "
+            "JOIN user_roles ur ON ur.user_id = u.id "
+            "JOIN roles r ON r.id = ur.role_id AND r.name = 'super_admin' "
+            "WHERE u.company_id = :cid AND u.deleted_at IS NULL LIMIT 1"
+        ),
+        {"cid": company_id},
+    )
+    if existing is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="An account with this email already exists.",
-        ) from exc
-    log.info("admin_hr.hr_created", user_id=str(user_id), company_id=str(company_id))
-    return HrManagerResponse(
+            detail=f"This company already has a super admin ({existing}).",
+        )
+    user_id, now = await _create_company_user(
+        db, company_id=company_id, body=body, role="super_admin"
+    )
+    log.info("admin_hr.company_admin_created", user_id=str(user_id), company_id=str(company_id))
+    return CompanyAdminResponse(
         user_id=str(user_id), email=str(body.email), full_name=body.full_name,
         company_id=str(company_id), must_change_password=True, created_at=now.isoformat(),
     )
 
 
+@router.get("/companies/{company_id}/admin", response_model=CompanyAdminResponse)
+async def get_company_admin(
+    company_id: uuid.UUID, current_user: PlatformOwnerDep, db: DbSessionDep
+) -> CompanyAdminResponse:
+    """Get a company's super admin (platform_owner only). 404 if none yet."""
+    await _company_or_404(db, company_id)
+    row = (
+        await db.execute(
+            text(
+                "SELECT u.id, u.email, u.full_name, u.must_change_password, u.created_at "
+                "FROM users u "
+                "JOIN user_roles ur ON ur.user_id = u.id "
+                "JOIN roles r ON r.id = ur.role_id AND r.name = 'super_admin' "
+                "WHERE u.company_id = :cid AND u.deleted_at IS NULL "
+                "ORDER BY u.created_at ASC LIMIT 1"
+            ),
+            {"cid": company_id},
+        )
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This company has no super admin yet.",
+        )
+    return CompanyAdminResponse(
+        user_id=str(row[0]), email=row[1], full_name=row[2] or "",
+        company_id=str(company_id), must_change_password=row[3],
+        created_at=row[4].isoformat(),
+    )
+
+
+@router.delete(
+    "/companies/{company_id}/admin", status_code=status.HTTP_204_NO_CONTENT
+)
+async def delete_company_admin(
+    company_id: uuid.UUID, current_user: PlatformOwnerDep, db: DbSessionDep
+) -> Response:
+    """Remove a company's super admin (platform_owner only).
+
+    Afterwards the company has no super admin and a fresh one can be created
+    (this is also how you 'replace' a company's super admin). 404 if none.
+    """
+    await _company_or_404(db, company_id)
+    uid = await db.scalar(
+        text(
+            "SELECT u.id FROM users u "
+            "JOIN user_roles ur ON ur.user_id = u.id "
+            "JOIN roles r ON r.id = ur.role_id AND r.name = 'super_admin' "
+            "WHERE u.company_id = :cid AND u.deleted_at IS NULL "
+            "ORDER BY u.created_at ASC LIMIT 1"
+        ),
+        {"cid": company_id},
+    )
+    if uid is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This company has no super admin to remove.",
+        )
+    await _soft_delete_user(db, uid)
+    await _audit(
+        db, actor_id=uuid.UUID(current_user.user_id), action="delete_company_admin",
+        resource_type="user", resource_id=uid,
+    )
+    await db.commit()
+    log.info("admin_hr.company_admin_deleted", user_id=str(uid), company_id=str(company_id))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get(
     "/companies/{company_id}/hr-managers", response_model=list[HrManagerResponse]
 )
-async def list_hr_managers(
-    company_id: uuid.UUID, current_user: SuperAdminDep, db: DbSessionDep
+async def list_company_hr_managers(
+    company_id: uuid.UUID, current_user: PlatformOwnerDep, db: DbSessionDep
 ) -> list[HrManagerResponse]:
-    """List a company's HR managers (super_admin only)."""
+    """Read-only view of a company's HR managers (platform_owner only)."""
     await _company_or_404(db, company_id)
+    return await _query_hr_managers(db, company_id)
+
+
+# ===========================================================================
+# COMPANY SUPER ADMIN — HR managers (scoped to the caller's own company)
+# ===========================================================================
+
+
+async def _query_hr_managers(
+    db: AsyncSession, company_id: uuid.UUID
+) -> list[HrManagerResponse]:
     rows = (
         await db.execute(
             text(
@@ -262,9 +590,75 @@ async def list_hr_managers(
     ]
 
 
-# ---------------------------------------------------------------------------
-# DPDP audit log (read-only) — admin actions + consent ledger events
-# ---------------------------------------------------------------------------
+@router.get("/hr-managers", response_model=list[HrManagerResponse])
+async def list_my_hr_managers(
+    ctx: CompanyAdminCtxDep, db: DbSessionDep
+) -> list[HrManagerResponse]:
+    """List HR managers in the caller's own company (super_admin only)."""
+    _, company_id = ctx
+    return await _query_hr_managers(db, company_id)
+
+
+@router.post(
+    "/hr-managers", status_code=status.HTTP_201_CREATED, response_model=HrManagerResponse
+)
+async def create_my_hr_manager(
+    body: CreateUserBody, ctx: CompanyAdminCtxDep, db: DbSessionDep
+) -> HrManagerResponse:
+    """Create an HR manager in the caller's own company (super_admin only).
+
+    The HR is created with the given (default '12345678') password and
+    must_change_password=true, forcing a reset on first login.
+    """
+    _, company_id = ctx
+    user_id, now = await _create_company_user(
+        db, company_id=company_id, body=body, role="hr_manager"
+    )
+    log.info("admin_hr.hr_created", user_id=str(user_id), company_id=str(company_id))
+    return HrManagerResponse(
+        user_id=str(user_id), email=str(body.email), full_name=body.full_name,
+        company_id=str(company_id), must_change_password=True, created_at=now.isoformat(),
+    )
+
+
+@router.delete("/hr-managers/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_my_hr_manager(
+    user_id: uuid.UUID, ctx: CompanyAdminCtxDep, db: DbSessionDep
+) -> Response:
+    """Soft-delete an HR manager in the caller's OWN company (super_admin only).
+
+    Tenant-scoped: the target must be an hr_manager belonging to the caller's
+    company, else 404 — a super admin can never remove another company's HR.
+    The HR's email is released so it can be re-used for a new account.
+    """
+    caller_uid, company_id = ctx
+    target = await db.scalar(
+        text(
+            "SELECT 1 FROM users u "
+            "JOIN user_roles ur ON ur.user_id = u.id "
+            "JOIN roles r ON r.id = ur.role_id AND r.name = 'hr_manager' "
+            "WHERE u.id = :uid AND u.company_id = :cid AND u.deleted_at IS NULL"
+        ),
+        {"uid": user_id, "cid": company_id},
+    )
+    if not target:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="HR manager not found in your company.",
+        )
+    await _soft_delete_user(db, user_id)
+    await _audit(
+        db, actor_id=caller_uid, action="delete_hr_manager",
+        resource_type="user", resource_id=user_id,
+    )
+    await db.commit()
+    log.info("admin_hr.hr_deleted", user_id=str(user_id), company_id=str(company_id))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ===========================================================================
+# PLATFORM OWNER — DPDP audit log (read-only)
+# ===========================================================================
 
 
 class AuditEvent(BaseModel):
@@ -276,7 +670,7 @@ class AuditEvent(BaseModel):
 
 @router.get("/audit-log", response_model=list[AuditEvent])
 async def audit_log(
-    current_user: SuperAdminDep,
+    current_user: PlatformOwnerDep,
     db: DbSessionDep,
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
 ) -> list[AuditEvent]:
@@ -308,9 +702,9 @@ async def audit_log(
     ]
 
 
-# ---------------------------------------------------------------------------
-# Platform feature flags
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# PLATFORM OWNER — feature flags
+# ===========================================================================
 
 
 class FeatureFlagOut(BaseModel):
@@ -327,9 +721,9 @@ class FeatureFlagToggle(BaseModel):
 
 @router.get("/feature-flags", response_model=list[FeatureFlagOut])
 async def list_feature_flags(
-    current_user: SuperAdminDep, db: DbSessionDep
+    current_user: PlatformOwnerDep, db: DbSessionDep
 ) -> list[FeatureFlagOut]:
-    """List platform feature flags (super_admin only)."""
+    """List platform feature flags (platform_owner only)."""
     rows = (
         await db.execute(
             text(
@@ -349,9 +743,9 @@ async def list_feature_flags(
 
 @router.put("/feature-flags/{key}", response_model=FeatureFlagOut)
 async def toggle_feature_flag(
-    key: str, body: FeatureFlagToggle, current_user: SuperAdminDep, db: DbSessionDep
+    key: str, body: FeatureFlagToggle, current_user: PlatformOwnerDep, db: DbSessionDep
 ) -> FeatureFlagOut:
-    """Enable/disable a platform feature flag (super_admin only)."""
+    """Enable/disable a platform feature flag (platform_owner only)."""
     now = datetime.now(tz=UTC)
     row = (
         await db.execute(

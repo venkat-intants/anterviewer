@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any
 
 import httpx
@@ -21,6 +22,9 @@ from app.config import Settings
 log = structlog.get_logger(__name__)
 
 RESUME_SCORER_VERSION: str = "1.0"
+
+# Strips a trailing comma before a closing } or ] (invalid JSON Gemini sometimes emits).
+_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
 
 _RETRY_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 _MAX_ATTEMPTS: int = 4
@@ -174,6 +178,8 @@ async def score_resume(
         start, end = cleaned.find("{"), cleaned.rfind("}")
         if start != -1 and end > start:
             cleaned = cleaned[start : end + 1]
+    # Tolerate a trailing comma before a closing } or ] (invalid JSON).
+    cleaned = _TRAILING_COMMA_RE.sub(r"\1", cleaned)
     try:
         parsed: dict[str, Any] = json.loads(cleaned)
     except json.JSONDecodeError as exc:

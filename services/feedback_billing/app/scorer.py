@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -30,6 +31,10 @@ log = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 SCORER_VERSION: str = "1.0"
+
+# Removes a trailing comma before a closing } or ] (invalid JSON Gemini sometimes
+# emits): matches ",  }" / ",\n]" etc. and keeps just the bracket.
+_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
 
 # Transient Gemini HTTP statuses worth retrying: 429 rate-limit, plus gateway /
 # overload errors (503 "high demand" is the common one on the free tier). A 4xx
@@ -316,6 +321,9 @@ async def score_session(
     if cleaned.startswith("```"):
         # Remove opening ```json or ``` fence, then closing ```, then whitespace.
         cleaned = cleaned.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    # Gemini occasionally emits a trailing comma before a closing } or ] which is
+    # invalid JSON — strip it so a recoverable response doesn't 502 the scorer.
+    cleaned = _TRAILING_COMMA_RE.sub(r"\1", cleaned)
 
     try:
         parsed: dict[str, Any] = json.loads(cleaned)

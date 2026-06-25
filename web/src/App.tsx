@@ -5,8 +5,10 @@ import { Suspense, lazy } from 'react';
 import { Routes, Route, Outlet, Navigate, useLocation } from 'react-router-dom';
 import ProtectedRoute from './components/ProtectedRoute';
 import AdminRoute from './components/AdminRoute';
+import PlatformOwnerRoute from './components/PlatformOwnerRoute';
 import SuperAdminRoute from './components/SuperAdminRoute';
 import HRRoute from './components/HRRoute';
+import InterviewSessionRoute from './components/InterviewSessionRoute';
 import ErrorBoundary from './components/ErrorBoundary';
 import AppShell from './components/layout/AppShell';
 import { useAuth } from './context/AuthContext';
@@ -45,7 +47,8 @@ const AdminAnalytics = lazy(() => import('./pages/admin/AdminAnalytics'));
 
 // ── HR workflow pages ─────────────────────────────────────────────────────────
 const ChangePassword = lazy(() => import('./pages/ChangePassword'));
-const SuperAdminConsole = lazy(() => import('./pages/superadmin/SuperAdminConsole'));
+const PlatformOwnerConsole = lazy(() => import('./pages/superadmin/PlatformOwnerConsole'));
+const CompanyAdminConsole = lazy(() => import('./pages/superadmin/CompanyAdminConsole'));
 const HRConsole = lazy(() => import('./pages/hr/HRConsole'));
 const Applicants = lazy(() => import('./pages/hr/Applicants'));
 const Exams = lazy(() => import('./pages/hr/Exams'));
@@ -113,9 +116,17 @@ export default function App() {
               <Route path="/u/:userId" element={<ProfileView />} />
             </Route>
 
-            {/* Full-screen pages — own header/chrome */}
-            {/* The live interview keeps the dark video-immersion theme (scoped
-                via `.dark`); the rest of the app is light. */}
+            <Route path="/interview/:sessionId/complete" element={<InterviewComplete />} />
+            <Route path="/scorecard/:scorecardId" element={<Scorecard />} />
+
+            {/* Forced bootstrap-password reset — standalone, no shell */}
+            <Route path="/change-password" element={<ChangePassword />} />
+          </Route>
+
+          {/* Live interview — its own guard: a logged-in user passes through; a
+              magic-link guest who RELOADED resumes via the httpOnly cookie (no
+              login). The dark video-immersion theme is scoped via `.dark`. */}
+          <Route element={<InterviewSessionRoute />}>
             <Route
               path="/interview/:sessionId"
               element={
@@ -124,17 +135,19 @@ export default function App() {
                 </div>
               }
             />
-            <Route path="/interview/:sessionId/complete" element={<InterviewComplete />} />
-            <Route path="/scorecard/:scorecardId" element={<Scorecard />} />
-
-            {/* Forced bootstrap-password reset — standalone, no shell */}
-            <Route path="/change-password" element={<ChangePassword />} />
           </Route>
 
-          {/* Super-admin console — manage companies + HR managers */}
+          {/* Platform-owner console — manage companies + their super admins */}
+          <Route element={<PlatformOwnerRoute />}>
+            <Route element={<ShellLayout />}>
+              <Route path="/platform" element={<PlatformOwnerConsole />} />
+            </Route>
+          </Route>
+
+          {/* Company super-admin console — manage the company's HR managers */}
           <Route element={<SuperAdminRoute />}>
             <Route element={<ShellLayout />}>
-              <Route path="/superadmin" element={<SuperAdminConsole />} />
+              <Route path="/superadmin" element={<CompanyAdminConsole />} />
             </Route>
           </Route>
 

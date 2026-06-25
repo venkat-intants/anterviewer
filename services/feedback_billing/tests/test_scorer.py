@@ -145,6 +145,49 @@ async def test_score_session_returns_scorecard_id() -> None:
     mock_db.commit.assert_called_once()
 
 
+@pytest.mark.asyncio
+async def test_score_session_tolerates_trailing_commas() -> None:
+    """Gemini emits a trailing comma before } / ] (invalid JSON) → must recover,
+    not 502. Regression for the score.gemini_error seen in production logs."""
+    mock_db = _make_db_session()
+    mock_settings = _make_settings()
+
+    raw = (
+        '{"scores": {"communication": 7, "technical": 6, "problem_solving": 8, '
+        '"confidence": 7,}, '
+        '"strengths": ["Clear", "Good", "Structured",], '
+        '"improvements": [{"area": "Tech", "suggestion": "Practice",},], '
+        '"summary": "Solid candidate.",}'
+    )
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "candidates": [{"content": {"parts": [{"text": raw}]}}]
+    }
+    mock_response.text = ""
+
+    with patch("app.scorer.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value = mock_client
+
+        scorecard_id, scores, _ = await score_session(
+            session_id=str(uuid.uuid4()),
+            job_title="Junior Java Developer",
+            experience_level="entry",
+            language="en",
+            turns=_SAMPLE_TURNS,
+            db_session=mock_db,
+            settings=mock_settings,
+        )
+
+    assert uuid.UUID(scorecard_id)  # parsed successfully → no ScoringError
+    assert scores == dict(_GOOD_SCORES)
+    mock_db.commit.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # test_score_session_includes_jd_in_prompt
 # ---------------------------------------------------------------------------

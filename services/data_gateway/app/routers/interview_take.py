@@ -27,7 +27,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Cookie, Header, HTTPException, Response, status
 from pydantic import BaseModel
 from shared.auth.jwt import issue_access_token
 from sqlalchemy import select, text
@@ -47,6 +47,39 @@ _NOT_AVAILABLE = HTTPException(
     status_code=status.HTTP_404_NOT_FOUND, detail="Interview link not available."
 )
 _DEFAULT_AVATAR = "anna"  # hardcoded — no data_gateway -> interview_core import (m5)
+
+# httpOnly cookie carrying the raw invite token, set on redeem so a guest who
+# RELOADS the interview page mid-session can transparently resume (POST /resume)
+# WITHOUT any login. It is XSS-safe (httpOnly), expires with the invite link, and
+# only ever re-issues a fresh guest token for the SAME already-started session.
+_IV_RESUME_COOKIE = "iv_resume_token"
+
+
+def _set_resume_cookie(response: Response, raw_token: str, expires_at: datetime, now: datetime) -> None:
+    """Set the httpOnly resume cookie, capped to the invite's own expiry.
+
+    Security posture (reviewed):
+      - path is scoped to the resume endpoint ONLY, so the raw token is attached
+        to that single POST — never to /auth, /hr, /admin, etc. (minimises where
+        a bearer-equivalent secret travels).
+      - samesite follows settings (must be 'none' in prod because the SPA on
+        Vercel and this API on Railway are cross-site, so the cookie has to be
+        sendable cross-site for reload-resume to work; 'strict' would silently
+        break resume in prod). CSRF impact is nil regardless: /resume is
+        idempotent, only ever re-issues a guest token bound to the SAME session
+        the cookie already owns, and the response is cross-origin-unreadable
+        (explicit CORS allow-list, no wildcard).
+    """
+    max_age = max(0, int((expires_at - now).total_seconds()))
+    response.set_cookie(
+        key=_IV_RESUME_COOKIE,
+        value=raw_token,
+        max_age=max_age,
+        httponly=True,
+        secure=settings.auth_cookie_secure,
+        samesite=settings.auth_cookie_samesite,
+        path="/interview-invite/resume",
+    )
 
 
 class InviteInfoOut(BaseModel):
@@ -167,6 +200,7 @@ async def preview_invite(
 async def redeem_invite(
     body: RedeemIn,
     db: DbSessionDep,
+    response: Response,
     x_interview_token: Annotated[str | None, Header(alias="X-Interview-Token")] = None,
 ) -> RedeemOut:
     """Redeem the magic link.
@@ -245,7 +279,9 @@ async def redeem_invite(
             raise _NOT_AVAILABLE  # malformed 'consumed' row — fail closed
         inv.updated_at = now
         await db.commit()
-        return _issue_guest_token(inv, sid, gid, applicant.full_name)
+        result = _issue_guest_token(inv, sid, gid, applicant.full_name)
+        _set_resume_cookie(response, x_interview_token, inv.expires_at, now)
+        return result
 
     # ---- FIRST START (status 'invited'). The join window gates first-start ONLY,
     # anchored at scheduled_at; an unscheduled invite anchors at this first click (so its
@@ -362,4 +398,58 @@ async def redeem_invite(
     inv.consumed_at = now
     inv.updated_at = now
     await db.commit()
-    return _issue_guest_token(inv, session_id, guest_user_id, applicant.full_name)
+    result = _issue_guest_token(inv, session_id, guest_user_id, applicant.full_name)
+    _set_resume_cookie(response, x_interview_token, inv.expires_at, now)
+    return result
+
+
+@router.post("/resume", response_model=RedeemOut)
+async def resume_invite(
+    db: DbSessionDep,
+    response: Response,
+    iv_cookie: Annotated[str | None, Cookie(alias=_IV_RESUME_COOKIE)] = None,
+) -> RedeemOut:
+    """Resume an in-progress interview after a page RELOAD, using the httpOnly
+    resume cookie set at redeem.
+
+    Reconnect-ONLY: re-issues a fresh guest token for the SAME already-started
+    session. No new consent (captured at first redeem) and NO login. This is what
+    keeps a mid-interview refresh from bouncing the (account-less) applicant to a
+    login wall. Uniform 404 on any miss — the frontend then shows a "re-open your
+    link" message, never /login.
+    """
+    if not iv_cookie:
+        raise _NOT_AVAILABLE
+    now = datetime.now(tz=UTC)
+    th = hash_interview_token(iv_cookie, settings.interview_link_secret)
+    # Only an already-STARTED ('consumed'), non-expired, non-revoked invite resumes.
+    inv = await db.scalar(
+        select(InterviewInvite)
+        .where(
+            InterviewInvite.token_hash == th,
+            InterviewInvite.deleted_at.is_(None),
+            InterviewInvite.status == "consumed",
+            InterviewInvite.expires_at > now,
+        )
+        .with_for_update()
+    )
+    if inv is None:
+        raise _NOT_AVAILABLE
+    # A finished interview is never resumable.
+    if await _session_completed(db, inv.session_id) or await _scorecard_exists(db, inv.session_id):
+        raise _NOT_AVAILABLE
+    applicant = await db.scalar(
+        select(Applicant).where(
+            Applicant.id == inv.applicant_id,
+            Applicant.company_id == inv.company_id,
+            Applicant.deleted_at.is_(None),
+        )
+    )
+    gid, sid = inv.guest_user_id, inv.session_id
+    if applicant is None or gid is None or sid is None:
+        raise _NOT_AVAILABLE
+    inv.updated_at = now
+    await db.commit()
+    result = _issue_guest_token(inv, sid, gid, applicant.full_name)
+    _set_resume_cookie(response, iv_cookie, inv.expires_at, now)  # slide the TTL
+    return result

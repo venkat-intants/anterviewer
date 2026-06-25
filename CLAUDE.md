@@ -88,6 +88,16 @@ real-time avatar interview (Tavus/Simli over LiveKit, 10-question window), Sarva
 6 avatars + picker, scoring + PDF scorecard, and the admin/analytics dashboard. Production (Tier-2
 AWS Mumbai) is the same code, env-swappable.
 
+**Admin hierarchy (three tiers, since 2026-06-25):**
+`platform_owner` → `super_admin` (per company) → `hr_manager` → `candidate`.
+- **`platform_owner`** — the Intants core ("super super admin"), `support@intants.com`. `company_id` NULL.
+  Creates/manages companies and creates **one `super_admin` per company**; owns platform feature flags +
+  DPDP audit; also holds `admin` (analytics). Console: `/platform`.
+- **`super_admin`** — a single company's super admin, `company_id` SET. Created by the platform owner;
+  creates **HR managers for its own company only** (server-scoped). Console: `/superadmin`.
+- **`hr_manager`** — runs the ATS/exam/interview workflow for its company. Console: `/hr`.
+- **`admin`** — platform analytics dashboard role (separate from the hierarchy). Console: `/admin/*`.
+
 ## Coding Conventions
 
 - **Python:** PEP 8, type hints, async/await for all I/O, ruff + mypy strict

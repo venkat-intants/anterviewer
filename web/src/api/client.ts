@@ -94,6 +94,16 @@ interface ClientOptions extends Omit<RequestInit, 'headers'> {
   skipAuth?: boolean;
 }
 
+/** Parse a JSON body, tolerating empty responses (204 No Content). */
+function parseJsonOrEmpty<T>(res: Response): Promise<T> {
+  // `headers` is always present on a real Response; guard it so test doubles
+  // that only set `status` still work. 204 short-circuits regardless.
+  if (res.status === 204 || res.headers?.get('content-length') === '0') {
+    return Promise.resolve(undefined as T);
+  }
+  return res.json() as Promise<T>;
+}
+
 async function clientFetch<T>(url: string, options: ClientOptions = {}): Promise<T> {
   const { skipAuth = false, headers: extraHeaders = {}, ...fetchOptions } = options;
 
@@ -148,7 +158,7 @@ async function clientFetch<T>(url: string, options: ClientOptions = {}): Promise
         throw new Error(errorBody.detail ?? `HTTP ${retryResponse.status}`);
       }
 
-      return retryResponse.json() as Promise<T>;
+      return parseJsonOrEmpty<T>(retryResponse);
     } else {
       // Refresh failed — clear auth, toast, redirect
       clearToken();
@@ -167,7 +177,7 @@ async function clientFetch<T>(url: string, options: ClientOptions = {}): Promise
     throw new Error(errorBody.detail ?? `HTTP ${response.status}`);
   }
 
-  return response.json() as Promise<T>;
+  return parseJsonOrEmpty<T>(response);
 }
 
 // ---------------------------------------------------------------------------

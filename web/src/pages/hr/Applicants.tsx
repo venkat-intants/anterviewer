@@ -4,7 +4,7 @@
 //           progress bar, failure list, shortlist/reject/rescore mutations,
 //           real ats_breakdown/strengths/concerns in the detail drawer.
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -124,6 +124,15 @@ function ApplicantDrawer({
   statusPending,
   rescorePending,
 }: DrawerProps) {
+  // Close on Escape (hook must run before any early return).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   if (!a) return null;
 
   const seed = seedFrom(a.full_name);
@@ -132,18 +141,18 @@ function ApplicantDrawer({
 
   return (
     <div
-      className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/65 p-4 backdrop-blur-sm sm:items-center"
       onClick={onClose}
     >
       <div
-        className="absolute right-0 top-0 h-full w-full max-w-[420px] overflow-y-auto border-l border-white/10 bg-[#0a0b0d] p-7"
-        style={{ animation: 'av-drawer-in 0.32s cubic-bezier(.2,.7,.2,1)' }}
+        className="relative my-auto w-full max-w-[880px] max-h-[90vh] overflow-y-auto rounded-[20px] border border-white/10 bg-[#0a0b0d] p-7 shadow-[0_24px_80px_rgba(0,0,0,0.65)]"
+        style={{ animation: 'av-modal-in 0.22s cubic-bezier(.2,.7,.2,1)' }}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
         aria-label={`${a.full_name} applicant details`}
       >
-        <style>{`@keyframes av-drawer-in{from{transform:translateX(100%)}to{transform:translateX(0)}}`}</style>
+        <style>{`@keyframes av-modal-in{from{opacity:0;transform:translateY(10px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}`}</style>
 
         {/* Header */}
         <div className="flex items-center justify-between">
@@ -157,119 +166,128 @@ function ApplicantDrawer({
           </button>
         </div>
 
-        {/* Identity */}
-        <div className="mt-5 flex items-center gap-4">
-          <Avatar initials={initialsOf(a.full_name)} gradient={gradientFor(seed)} size={58} />
-          <div>
-            <div className="text-[20px] font-semibold tracking-[-0.5px] text-white">{a.full_name}</div>
-            <div className="text-[13px] text-[#70757c]">{a.email ?? 'No email on file'}</div>
-            {a.user_id && (
-              <Link
-                to={`/u/${a.user_id}`}
-                className="mt-1 inline-flex items-center gap-1 text-[12px] font-medium text-[#60a5fa] hover:underline"
-              >
-                View full profile <ArrowRight size={12} aria-hidden="true" />
-              </Link>
-            )}
-          </div>
-        </div>
-
-        {/* Score + status tiles */}
-        <div className="mt-5 grid grid-cols-2 gap-2.5">
-          <div className="rounded-[12px] border border-white/[0.08] bg-[#0f0f10] p-4">
-            <div className="text-[11px] uppercase tracking-[0.5px] text-[#70757c]">ATS score</div>
-            <div
-              className="mt-1 text-[28px] font-semibold tracking-[-1px]"
-              style={{ color: atsDisplay !== null ? scoreColor(atsDisplay) : '#70757c' }}
-            >
-              {atsDisplay ?? '—'}
+        {/* Body — wide landscape layout: two columns side by side */}
+        <div className="mt-6 grid gap-x-8 gap-y-6 md:grid-cols-2">
+          {/* LEFT column — identity, score/status, role, summary */}
+          <div className="space-y-5">
+            {/* Identity */}
+            <div className="flex items-center gap-4">
+              <Avatar initials={initialsOf(a.full_name)} gradient={gradientFor(seed)} size={58} />
+              <div className="min-w-0">
+                <div className="text-[20px] font-semibold tracking-[-0.5px] text-white">{a.full_name}</div>
+                <div className="truncate text-[13px] text-[#70757c]">{a.email ?? 'No email on file'}</div>
+                {a.user_id && (
+                  <Link
+                    to={`/u/${a.user_id}`}
+                    className="mt-1 inline-flex items-center gap-1 text-[12px] font-medium text-[#60a5fa] hover:underline"
+                  >
+                    View full profile <ArrowRight size={12} aria-hidden="true" />
+                  </Link>
+                )}
+              </div>
             </div>
-          </div>
-          <div className="rounded-[12px] border border-white/[0.08] bg-[#0f0f10] p-4">
-            <div className="text-[11px] uppercase tracking-[0.5px] text-[#70757c]">Status</div>
-            <div className="mt-2">
-              <StatusTag tone={STATUS_TONE[a.status]} dot>
-                {STATUS_LABEL[a.status]}
-              </StatusTag>
-            </div>
-          </div>
-        </div>
 
-        {/* Role meta */}
-        <div className="mt-3 space-y-1 text-[12.5px] text-[#70757c]">
-          <p>
-            Role &middot;{' '}
-            <span className="text-[#b8babf]">
-              {a.target_job_title} ({a.target_level})
-            </span>
-          </p>
-          <div>
-            <StatusTag tone={rec.tone} className="text-[11.5px]">
-              {rec.label}
-            </StatusTag>
-          </div>
-        </div>
-
-        {/* ATS summary */}
-        {a.ats_summary && (
-          <p className="mt-4 text-[13px] leading-relaxed text-[#888b91]">{a.ats_summary}</p>
-        )}
-
-        {/* ATS breakdown bars — REAL data, not fabricated competencies */}
-        {a.ats_breakdown && Object.keys(a.ats_breakdown).length > 0 && (
-          <div className="mt-5">
-            <div className="text-[13px] font-semibold text-white">Score breakdown</div>
-            <div className="mt-3 flex flex-col gap-3">
-              {Object.entries(a.ats_breakdown).map(([k, v]) => (
-                <div key={k}>
-                  <div className="mb-1 flex justify-between text-[12.5px]">
-                    <span className="text-[#b8babf]">{BREAKDOWN_LABELS[k] ?? k}</span>
-                    <span className="font-mono text-[#888b91]">{v}</span>
-                  </div>
-                  <div className="h-1.5 rounded-full bg-white/[0.07]">
-                    <div
-                      className="h-full rounded-full bg-[linear-gradient(90deg,var(--accent),#a887dc)]"
-                      style={{ width: `${Math.max(0, Math.min(100, v))}%` }}
-                    />
-                  </div>
+            {/* Score + status tiles */}
+            <div className="grid grid-cols-2 gap-2.5">
+              <div className="rounded-[12px] border border-white/[0.08] bg-[#0f0f10] p-4">
+                <div className="text-[11px] uppercase tracking-[0.5px] text-[#70757c]">ATS score</div>
+                <div
+                  className="mt-1 text-[28px] font-semibold tracking-[-1px]"
+                  style={{ color: atsDisplay !== null ? scoreColor(atsDisplay) : '#70757c' }}
+                >
+                  {atsDisplay ?? '—'}
                 </div>
-              ))}
+              </div>
+              <div className="rounded-[12px] border border-white/[0.08] bg-[#0f0f10] p-4">
+                <div className="text-[11px] uppercase tracking-[0.5px] text-[#70757c]">Status</div>
+                <div className="mt-2">
+                  <StatusTag tone={STATUS_TONE[a.status]} dot>
+                    {STATUS_LABEL[a.status]}
+                  </StatusTag>
+                </div>
+              </div>
             </div>
-          </div>
-        )}
 
-        {/* Strengths + Concerns */}
-        {((a.ats_strengths && a.ats_strengths.length > 0) ||
-          (a.ats_concerns && a.ats_concerns.length > 0)) && (
-          <div className="mt-5 grid gap-4 sm:grid-cols-2">
-            {a.ats_strengths && a.ats_strengths.length > 0 && (
+            {/* Role meta */}
+            <div className="space-y-1.5 text-[12.5px] text-[#70757c]">
+              <p>
+                Role &middot;{' '}
+                <span className="text-[#b8babf]">
+                  {a.target_job_title} ({a.target_level})
+                </span>
+              </p>
               <div>
-                <p className="text-[12.5px] font-semibold text-[#27c93f]">Strengths</p>
-                <ul className="mt-2 space-y-1">
-                  {a.ats_strengths.map((s, i) => (
-                    <li key={i} className="flex items-start gap-1.5 text-[12px] text-[#70757c]">
-                      <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[#27c93f]" />
-                      {s}
-                    </li>
+                <StatusTag tone={rec.tone} className="text-[11.5px]">
+                  {rec.label}
+                </StatusTag>
+              </div>
+            </div>
+
+            {/* ATS summary */}
+            {a.ats_summary && (
+              <p className="text-[13px] leading-relaxed text-[#888b91]">{a.ats_summary}</p>
+            )}
+          </div>
+
+          {/* RIGHT column — score breakdown + strengths / concerns */}
+          <div className="space-y-5">
+            {/* ATS breakdown bars — REAL data, not fabricated competencies */}
+            {a.ats_breakdown && Object.keys(a.ats_breakdown).length > 0 && (
+              <div>
+                <div className="text-[13px] font-semibold text-white">Score breakdown</div>
+                <div className="mt-3 flex flex-col gap-3">
+                  {Object.entries(a.ats_breakdown).map(([k, v]) => (
+                    <div key={k}>
+                      <div className="mb-1 flex justify-between text-[12.5px]">
+                        <span className="text-[#b8babf]">{BREAKDOWN_LABELS[k] ?? k}</span>
+                        <span className="font-mono text-[#888b91]">{v}</span>
+                      </div>
+                      <div className="h-1.5 rounded-full bg-white/[0.07]">
+                        <div
+                          className="h-full rounded-full bg-[linear-gradient(90deg,var(--accent),#a887dc)]"
+                          style={{ width: `${Math.max(0, Math.min(100, v))}%` }}
+                        />
+                      </div>
+                    </div>
                   ))}
-                </ul>
+                </div>
               </div>
             )}
-            {a.ats_concerns && a.ats_concerns.length > 0 && (
-              <div>
-                <p className="text-[12.5px] font-semibold text-[#e6714f]">Concerns</p>
-                <ul className="mt-2 space-y-1">
-                  {a.ats_concerns.map((c, i) => (
-                    <li key={i} className="flex items-start gap-1.5 text-[12px] text-[#70757c]">
-                      <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[#e6714f]" />
-                      {c}
-                    </li>
-                  ))}
-                </ul>
+
+            {/* Strengths + Concerns */}
+            {((a.ats_strengths && a.ats_strengths.length > 0) ||
+              (a.ats_concerns && a.ats_concerns.length > 0)) && (
+              <div className="grid gap-4">
+                {a.ats_strengths && a.ats_strengths.length > 0 && (
+                  <div>
+                    <p className="text-[12.5px] font-semibold text-[#27c93f]">Strengths</p>
+                    <ul className="mt-2 space-y-1">
+                      {a.ats_strengths.map((s, i) => (
+                        <li key={i} className="flex items-start gap-1.5 text-[12px] text-[#70757c]">
+                          <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[#27c93f]" />
+                          {s}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {a.ats_concerns && a.ats_concerns.length > 0 && (
+                  <div>
+                    <p className="text-[12.5px] font-semibold text-[#e6714f]">Concerns</p>
+                    <ul className="mt-2 space-y-1">
+                      {a.ats_concerns.map((c, i) => (
+                        <li key={i} className="flex items-start gap-1.5 text-[12px] text-[#70757c]">
+                          <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[#e6714f]" />
+                          {c}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
             )}
           </div>
-        )}
+        </div>
 
         {/* Actions */}
         <div className="mt-7 flex flex-wrap gap-2.5">

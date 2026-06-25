@@ -75,7 +75,8 @@ class User(Base):
     location: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # HR workflow (Phase 0) — multi-tenant scoping + forced first-login reset.
-    # company_id is NULL for super_admin / platform users.
+    # company_id is NULL for platform_owner / platform users; it is SET for a
+    # company super_admin and its hr_managers (they are company-scoped).
     company_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("companies.id", ondelete="SET NULL"), nullable=True
     )
@@ -122,8 +123,9 @@ class UserRole(Base):
 class Company(Base):
     """A tenant company (HR workflow — Phase 0).
 
-    Each HR manager and all of their applicants / exams / jobs belong to one
-    company. Created and managed by super-admins.
+    Each company has one super_admin and any number of HR managers; all of their
+    applicants / exams / jobs belong to the company. Companies are created and
+    managed by the platform owner (platform_owner).
     """
 
     __tablename__ = "companies"

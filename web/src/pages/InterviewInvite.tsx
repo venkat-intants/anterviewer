@@ -259,13 +259,14 @@ export default function InterviewInvite() {
               </p>
             )}
 
-            {/* Help footer — design chrome (presentation only) */}
+            {/* Help footer — support contact only. This is an HR-issued invite
+                link; the applicant has NO account, so there is deliberately no
+                login/sign-in affordance anywhere in this flow. */}
             <p className="mt-4 text-center text-[12px] text-fog">
               {t('interviewInvite.needHelp')}{' '}
-              <a href="/login" className="text-electric hover:underline">
-                {t('interviewInvite.signIn')}
-              </a>{' '}
-              {t('interviewInvite.toYourAccount')}
+              <a href="mailto:support@intants.com" className="text-electric hover:underline">
+                support@intants.com
+              </a>
             </p>
           </GlassCard>
         </motion.div>

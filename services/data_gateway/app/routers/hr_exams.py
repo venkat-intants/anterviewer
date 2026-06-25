@@ -585,12 +585,20 @@ async def list_assignments(
             .order_by(ExamAssignment.created_at.desc())
         )
     ).all()
+    # An assignment past its expiry that was never completed is effectively dead
+    # (the take endpoint already 404s it) — surface it as 'expired' rather than a
+    # stale 'invited'/'started' so HR sees real link state.
+    now = datetime.now(tz=UTC)
     return [
         AssignmentOut(
             assignment_id=str(a.id),
             applicant_id=str(a.applicant_id),
             applicant_name=name,
-            status=a.status,
+            status=(
+                "expired"
+                if a.status in ("invited", "started") and a.expires_at <= now
+                else a.status
+            ),
             expires_at=a.expires_at.isoformat(),
             consumed_at=a.consumed_at.isoformat() if a.consumed_at else None,
             created_at=a.created_at.isoformat(),

@@ -340,10 +340,18 @@ async def list_invites(
                 body=f"{name} finished their interview — scorecard ready",
                 link="/hr/interviews",
             )
+        # A non-completed invite past its expiry is effectively dead (redeem
+        # already 404s it) — surface it as 'expired' instead of a stale
+        # 'invited'/'consumed' so HR sees real link state.
+        eff_status = (
+            "expired"
+            if inv.status in ("invited", "consumed") and inv.expires_at <= now
+            else inv.status
+        )
         out.append(
             InviteOut(
                 invite_id=str(inv.id), applicant_id=str(inv.applicant_id), applicant_name=name,
-                job_title=title, language=inv.language, status=inv.status,
+                job_title=title, language=inv.language, status=eff_status,
                 scheduled_at=inv.scheduled_at.isoformat() if inv.scheduled_at else None,
                 expires_at=inv.expires_at.isoformat(), created_at=inv.created_at.isoformat(),
                 composite_score=float(composite) if composite is not None else None,

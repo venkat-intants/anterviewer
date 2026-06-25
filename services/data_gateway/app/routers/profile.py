@@ -1,7 +1,8 @@
 """Read-only profile viewing for privileged roles.
 
-  GET /users/{user_id}/profile  — HR managers, admins and super-admins can view
-                                  any user's public profile (e.g. a candidate's).
+  GET /users/{user_id}/profile  — HR managers and company super-admins can view
+                                  any user in THEIR OWN company; platform admins
+                                  and the platform owner can view any user.
 
 This is the "click a candidate to see their details" surface. Editing one's own
 profile lives in auth.py (PATCH /auth/me/profile); this router is view-only and
@@ -29,9 +30,16 @@ log = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/users", tags=["profiles"])
 
-# HR managers, platform admins and super-admins may view any user's profile.
-ViewerDep = Annotated[User, Depends(require_role("hr_manager", "admin", "super_admin"))]
+# Who may view another user's profile. Company-scoped roles (hr_manager,
+# super_admin) only see users in THEIR OWN company (enforced in the handler);
+# the platform roles (admin, platform_owner) may view any user.
+ViewerDep = Annotated[
+    User, Depends(require_role("hr_manager", "super_admin", "admin", "platform_owner"))
+]
 DbSessionDep = Annotated[AsyncSession, Depends(get_db_session)]
+
+# Roles that see ALL users platform-wide; everyone else is company-scoped.
+_GLOBAL_VIEW_ROLES = frozenset({"admin", "platform_owner"})
 
 
 class PublicProfile(BaseModel):
@@ -60,20 +68,26 @@ class PublicProfile(BaseModel):
     "/{user_id}/profile",
     status_code=status.HTTP_200_OK,
     response_model=PublicProfile,
-    summary="View another user's profile (HR / admin / super-admin only)",
+    summary="View another user's profile (own-company for HR/super-admin; any for admin/owner)",
 )
 async def get_user_profile(
     user_id: uuid.UUID,
     _viewer: ViewerDep,
     db: DbSessionDep,
 ) -> PublicProfile:
-    """Return the public profile of ``user_id``. 404 if missing / soft-deleted."""
+    """Return the public profile of ``user_id``. 404 if missing / soft-deleted.
+
+    Tenant isolation: a company-scoped viewer (hr_manager / super_admin) may
+    only view users in their OWN company. A target in another company (or a
+    caller with no company) returns 404 — same as "not found", so the endpoint
+    never confirms the existence of an out-of-tenant user.
+    """
     result = await db.execute(
         text(
             "SELECT u.full_name, u.email, u.avatar_url, u.headline, u.bio,"
             " u.employment_status, u.desired_roles, u.linkedin_url, u.github_url,"
             " u.location, u.phone, u.official_email, u.resume_s3_key, u.created_at,"
-            " c.name AS company_name,"
+            " c.name AS company_name, u.company_id,"
             " COALESCE(array_agg(r.name) FILTER (WHERE r.name IS NOT NULL), '{}') AS roles"
             " FROM users u"
             " LEFT JOIN companies c ON c.id = u.company_id"
@@ -87,6 +101,26 @@ async def get_user_profile(
     row = result.fetchone()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+
+    # Tenant scoping for company-bound viewers.
+    if not (_GLOBAL_VIEW_ROLES & set(_viewer.roles)):
+        target_company_id = row[15]
+        try:
+            caller_uid = uuid.UUID(_viewer.user_id)
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="User not found."
+            ) from exc
+        if caller_uid != user_id:
+            caller_company_id = await db.scalar(
+                text("SELECT company_id FROM users WHERE id = :uid AND deleted_at IS NULL"),
+                {"uid": caller_uid},
+            )
+            if caller_company_id is None or caller_company_id != target_company_id:
+                # Out-of-tenant (or caller unassigned): behave as "not found".
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail="User not found."
+                )
 
     log.info("profile.view", target=str(user_id))
     return PublicProfile(
@@ -106,5 +140,5 @@ async def get_user_profile(
         has_resume=bool(row[12]),
         created_at=row[13],
         company_name=row[14],
-        roles=list(row[15] or []),
+        roles=list(row[16] or []),
     )

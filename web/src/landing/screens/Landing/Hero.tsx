@@ -102,7 +102,7 @@ export function Hero() {
             </div>
 
             <div className="self-center rounded-[12px] border border-white/[0.12] bg-[#030719]/[0.66] px-4 py-2.5 text-center text-[12.5px] leading-snug text-pearl backdrop-blur-md">
-              <span className="font-semibold text-sky">Anna:</span> “Walk me through a project you're proud of.”
+              <span className="font-semibold text-sky">Anna:</span> “Walk me through a project you&apos;re proud of.”
             </div>
           </div>
         </div>

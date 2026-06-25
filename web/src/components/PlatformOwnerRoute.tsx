@@ -1,12 +1,11 @@
-// SuperAdminRoute — requires the 'super_admin' role (a company's super admin,
-// one per company). Non-super-admins are redirected to /dashboard;
-// unauthenticated to /login. (Platform-wide governance lives behind
-// PlatformOwnerRoute.)
+// PlatformOwnerRoute — requires the 'platform_owner' role (the Intants core /
+// "super super admin"). Non-owners are redirected to /dashboard; unauthenticated
+// to /login.
 
 import { Navigate, Outlet } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
-export default function SuperAdminRoute() {
+export default function PlatformOwnerRoute() {
   const { isAuthenticated, isInitializing, user } = useAuth();
 
   if (isInitializing) {
@@ -25,6 +24,6 @@ export default function SuperAdminRoute() {
   }
 
   if (!isAuthenticated) return <Navigate to="/login" replace />;
-  if (!user?.roles.includes('super_admin')) return <Navigate to="/dashboard" replace />;
+  if (!user?.roles.includes('platform_owner')) return <Navigate to="/dashboard" replace />;
   return <Outlet />;
 }

@@ -6,7 +6,7 @@ import { LOGOS, STEPS } from '../../data/landing'
 export function TrustMarquee() {
   return (
     <section className="relative z-10 mx-auto max-w-[1200px] px-6 py-7">
-      <p className="mb-5 text-center text-xs uppercase tracking-[1.5px] text-fog">Trusted across India's campuses, employers & skilling missions</p>
+      <p className="mb-5 text-center text-xs uppercase tracking-[1.5px] text-fog">Trusted across India&apos;s campuses, employers &amp; skilling missions</p>
       <Marquee>
         {LOGOS.map((lg, i) => (
           <div key={i} className="flex items-center gap-2.5 whitespace-nowrap text-[18px] font-semibold tracking-[-0.4px] text-pearl opacity-55 grayscale transition hover:opacity-100 hover:grayscale-0">
@@ -24,7 +24,7 @@ export function ProblemSolution() {
       <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
         <Reveal kind="left" className="rounded-card border border-white/[0.12] bg-[#16171b] p-10">
           <div className="mb-4.5 text-xs uppercase tracking-[1.5px] text-fog">The old way</div>
-          <h2 className="mb-4 text-[30px] font-semibold tracking-heading text-[#c7ccd4]">Traditional interviews don't scale.</h2>
+          <h2 className="mb-4 text-[30px] font-semibold tracking-heading text-[#c7ccd4]">Traditional interviews don&apos;t scale.</h2>
           <p className="mb-7 text-base leading-normal text-[#9aa1aa]">Panels are slow, biased, English-only, and impossible to run for lakhs of candidates. Most never get a fair first round.</p>
           <div className="flex gap-7">
             <div><div className="text-[38px] font-semibold tracking-[-1.5px] text-[#aab0b8]">14 days</div><div className="text-[13px] text-[#787e87]">avg. time-to-first-round</div></div>

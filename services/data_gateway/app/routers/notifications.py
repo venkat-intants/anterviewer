@@ -12,9 +12,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
+from shared.auth.base import User
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from shared.auth.base import User
 
 from app.database import get_db_session
 from app.dependencies import get_current_user

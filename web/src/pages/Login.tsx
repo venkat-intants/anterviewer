@@ -92,6 +92,8 @@ export default function Login() {
       setAuth(loginRes.access_token, user);
       if (me.must_change_password) {
         void navigate('/change-password', { replace: true });
+      } else if (me.roles.includes('platform_owner')) {
+        void navigate('/platform', { replace: true });
       } else if (me.roles.includes('super_admin')) {
         void navigate('/superadmin', { replace: true });
       } else if (me.roles.includes('hr_manager')) {

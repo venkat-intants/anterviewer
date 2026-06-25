@@ -1,14 +1,15 @@
 """Seed a coherent, presentation-ready demo dataset into the shared DB.
 
 Creates clean, known login accounts for every role and a self-consistent
-company story so every dashboard (candidate, HR, admin, super-admin) looks
-alive:
+company story so every dashboard (candidate, HR, company admin, platform
+owner) looks alive:
 
-    super-admin   superadmin@demo.intants.com   Demo@12345
-    platform admin admin.demo@demo.intants.com   Demo@12345
-    HR manager    hr@demo.intants.com           Demo@12345   (Acme Technologies)
-    HR manager    hr2@demo.intants.com          Demo@12345   (Acme Technologies)
-    candidate     candidate@demo.intants.com    Demo@12345
+    platform owner  superadmin@demo.intants.com   Demo@12345   (the Intants core)
+    company admin   companyadmin@demo.intants.com Demo@12345   (Acme Technologies)
+    platform admin  admin.demo@demo.intants.com   Demo@12345
+    HR manager      hr@demo.intants.com           Demo@12345   (Acme Technologies)
+    HR manager      hr2@demo.intants.com          Demo@12345   (Acme Technologies)
+    candidate       candidate@demo.intants.com    Demo@12345
 
 Idempotent: every row uses a deterministic uuid5 id, so re-running upserts the
 same rows instead of duplicating. It only ADDS demo rows — it never deletes or
@@ -209,10 +210,24 @@ async def main() -> None:  # noqa: C901, PLR0915 — a flat seed script reads be
             text("SELECT id FROM companies WHERE slug = 'acme-technologies-demo'"))).scalar_one()
 
         # ---- Users (one clean login per role) ----
-        super_id = await upsert_user("user:super", "superadmin@demo.intants.com", "Aarav Mehta", "super_admin")
+        # platform_owner = the Intants core ("super super admin"); company_id NULL.
+        super_id = await upsert_user("user:super", "superadmin@demo.intants.com", "Aarav Mehta", "platform_owner")
         admin_id = await upsert_user("user:admin", "admin.demo@demo.intants.com", "Platform Admin", "admin")
+        # super_admin = company super admin (one per company), scoped to Acme.
+        company_admin_id = await upsert_user(
+            "user:companyadmin", "companyadmin@demo.intants.com", "Neha Kapoor", "super_admin",
+            company=company_id)
         hr_id = await upsert_user("user:hr", "hr@demo.intants.com", "Priya Sharma", "hr_manager", company=company_id)
         hr2_id = await upsert_user("user:hr2", "hr2@demo.intants.com", "Karan Nair", "hr_manager", company=company_id)
+
+        # The platform owner is ALSO a platform 'admin' so it can open the
+        # analytics dashboards — a "complete" owner (mirrors the production
+        # migration which grants support@intants.com both roles).
+        await c.execute(
+            text("INSERT INTO user_roles (user_id, role_id, assigned_at) VALUES (:u, :r, :ts)"
+                 " ON CONFLICT DO NOTHING"),
+            {"u": str(super_id), "r": role_id["admin"], "ts": ago(days=30)},
+        )
         cand_id = await upsert_user(
             "user:candidate", "candidate@demo.intants.com", "Rohan Verma", "candidate",
             created_days=40, linkedin="https://linkedin.com/in/rohanverma",
@@ -220,7 +235,7 @@ async def main() -> None:  # noqa: C901, PLR0915 — a flat seed script reads be
             resume=("Frontend engineer with 4 years building React + TypeScript products. "
                     "Shipped a design system, led migration to Vite, mentors juniors."),
         )
-        _ = (super_id, admin_id)
+        _ = (super_id, admin_id, company_admin_id)
 
         # candidate's current resume version (so the Resume page shows a real file,
         # not the empty state) — mirrors users.resume_text.
@@ -520,7 +535,8 @@ async def main() -> None:  # noqa: C901, PLR0915 — a flat seed script reads be
     print("\n  Demo data seeded successfully.\n")
     print("  Login (all passwords: Demo@12345)")
     print("  ---------------------------------------------------------")
-    print("  super-admin     superadmin@demo.intants.com")
+    print("  platform owner  superadmin@demo.intants.com")
+    print("  company admin   companyadmin@demo.intants.com  (Acme Technologies)")
     print("  platform admin  admin.demo@demo.intants.com")
     print("  HR manager      hr@demo.intants.com    (Acme Technologies)")
     print("  HR manager      hr2@demo.intants.com   (Acme Technologies)")

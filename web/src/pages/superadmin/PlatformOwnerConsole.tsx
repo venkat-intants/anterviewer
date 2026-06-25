@@ -1,17 +1,18 @@
-// SuperAdminConsole — platform-owner view.
+// PlatformOwnerConsole — the Intants core ("super super admin") view.
 //
-// Layout: reproduced from design screen (SuperAdminConsole.tsx).
-//   • Page header (title + Add tenant Pill)
+// Tier: platform_owner. Manages tenant COMPANIES and creates the ONE
+// super admin per company. Company super admins then create their own HR
+// managers (see CompanyAdminConsole).
+//
+// Layout:
+//   • Page header (title + Add tenant pill)
 //   • 4 platform-wide stat tiles (design data)
 //   • SegTabs: Companies / Feature flags / Audit log
-//   • Companies tab: design table layout (Tenant/Plan/HR managers/Seats/Interviews/Status)
-//     with live row-click → HR panel below + create-company form
-//   • Feature flags tab: live (listFeatureFlags + setFeatureFlag via ToggleSwitch)
+//   • Companies tab: table (Tenant / Super admin / HR managers / Slug / Created /
+//     Status) with row-click → company-admin panel below + create-company form
+//   • Feature flags tab: live (listFeatureFlags + setFeatureFlag)
 //   • Audit log tab: live (listAuditLog)
 //
-// Behavior: 100% live — listCompanies + createCompany + real hr_count;
-//   listHrManagers + createHrManager (default pw + must_change_password badge);
-//   listFeatureFlags + setFeatureFlag; listAuditLog.
 // Shell: bare content — AppShell is provided by the router (no double-wrap).
 
 import { useState } from 'react';
@@ -32,8 +33,12 @@ import {
 import {
   listCompanies,
   createCompany,
-  listHrManagers,
-  createHrManager,
+  deleteCompany,
+  getCompanyAdmin,
+  createCompanyAdmin,
+  deleteCompanyAdmin,
+  listCompanyHrManagers,
+  getPlatformStats,
   listFeatureFlags,
   setFeatureFlag,
   listAuditLog,
@@ -47,6 +52,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { ConfirmDeleteButton } from '@/components/ConfirmDeleteButton';
 import {
   GlassCard,
   StatCard,
@@ -59,7 +65,6 @@ import {
 } from '@/design/components/primitives';
 import { Reveal } from '@/design/components/Reveal';
 import { gradientFor, initialsOf } from '@/design/data/shared';
-import { SUPER_STATS } from '@/design/data/admin';
 
 // ── Tab definitions ────────────────────────────────────────────────────────────
 
@@ -71,161 +76,247 @@ const VIEW_TABS = [
 
 type ViewKey = (typeof VIEW_TABS)[number]['key'];
 
-// ── Plan / status tones (design) ───────────────────────────────────────────────
-
 const STATUS_TONE: Record<string, TagTone> = {
   Active: 'forest',
   Trial: 'amber',
   Suspended: 'ember',
 };
 
-// ── HR Panel (sub-component for the selected company) ─────────────────────────
+// ── Company-admin panel (manage the ONE super admin for the selected company) ──
 
-function HrPanel({ company }: { company: Company }) {
+function CompanyAdminPanel({
+  company,
+  onDeleted,
+}: {
+  company: Company;
+  onDeleted: () => void;
+}) {
   const qc = useQueryClient();
   const [email, setEmail] = useState('');
   const [fullName, setFullName] = useState('');
   const DEFAULT_PW = '12345678';
 
-  const { data: hrs, isLoading } = useQuery({
-    queryKey: ['hr-managers', company.id],
-    queryFn: () => listHrManagers(company.id),
+  // getCompanyAdmin 404s when none exists yet — treat any error as "no admin".
+  const { data: admin, isLoading } = useQuery({
+    queryKey: ['company-admin', company.id],
+    queryFn: () => getCompanyAdmin(company.id),
+    retry: false,
+    throwOnError: false,
+  });
+
+  // Read-only view of the company's HR managers (created by its super admin).
+  const { data: hrs } = useQuery({
+    queryKey: ['company-hr-managers', company.id],
+    queryFn: () => listCompanyHrManagers(company.id),
+    retry: false,
+    throwOnError: false,
   });
 
   const createMut = useMutation({
     mutationFn: () =>
-      createHrManager(company.id, {
+      createCompanyAdmin(company.id, {
         email: email.trim(),
         full_name: fullName.trim(),
         password: DEFAULT_PW,
       }),
     onSuccess: () => {
-      toast.success(`HR manager ${email} created.`);
+      toast.success(`Super admin ${email} created for ${company.name}.`);
       setEmail('');
       setFullName('');
-      void qc.invalidateQueries({ queryKey: ['hr-managers', company.id] });
+      void qc.invalidateQueries({ queryKey: ['company-admin', company.id] });
       void qc.invalidateQueries({ queryKey: ['companies'] });
+      void qc.invalidateQueries({ queryKey: ['platform-stats'] });
     },
     onError: (err: unknown) =>
-      toast.error(err instanceof Error ? err.message : 'Could not create HR manager.'),
+      toast.error(err instanceof Error ? err.message : 'Could not create super admin.'),
   });
+
+  const removeAdminMut = useMutation({
+    mutationFn: () => deleteCompanyAdmin(company.id),
+    onSuccess: () => {
+      toast.success('Super admin removed.');
+      void qc.invalidateQueries({ queryKey: ['company-admin', company.id] });
+      void qc.invalidateQueries({ queryKey: ['companies'] });
+      void qc.invalidateQueries({ queryKey: ['platform-stats'] });
+    },
+    onError: (err: unknown) =>
+      toast.error(err instanceof Error ? err.message : 'Could not remove super admin.'),
+  });
+
+  const deleteCompanyMut = useMutation({
+    mutationFn: () => deleteCompany(company.id),
+    onSuccess: () => {
+      toast.success(`Company "${company.name}" deleted.`);
+      void qc.invalidateQueries({ queryKey: ['companies'] });
+      void qc.invalidateQueries({ queryKey: ['platform-stats'] });
+      onDeleted();
+    },
+    onError: (err: unknown) =>
+      toast.error(err instanceof Error ? err.message : 'Could not delete company.'),
+  });
+
+  const hasAdmin = !!admin;
 
   return (
     <GlassCard className="p-5 space-y-4">
       {/* Panel header */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-start gap-2">
         <span
           className="flex h-9 w-9 flex-none items-center justify-center rounded-[10px] bg-[rgba(var(--accent-rgb),0.12)] text-[#60a5fa]"
           aria-hidden="true"
         >
-          <Users size={17} />
+          <ShieldCheck size={17} />
         </span>
-        <div>
+        <div className="flex-1 min-w-0">
           <h3 className="text-[15px] font-semibold text-white">
-            HR managers — {company.name}
+            Super admin — {company.name}
           </h3>
           <p className="text-[12px] text-[#888b91]">
-            Create accounts; they log in and reset the password.
+            One super admin per company. They log in, reset the password, then create HR managers.
           </p>
         </div>
+        {/* Delete the whole company (and all its member logins) */}
+        <ConfirmDeleteButton
+          label="Delete company"
+          pending={deleteCompanyMut.isPending}
+          onConfirm={() => deleteCompanyMut.mutate()}
+        />
       </div>
 
-      {/* Create HR form */}
-      <form
-        className="grid gap-2 sm:grid-cols-[1fr_1fr_auto] items-end"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (!email.trim() || !fullName.trim()) {
-            toast.error('Email and name are required.');
-            return;
-          }
-          createMut.mutate();
-        }}
-      >
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="hr-email" className="text-[12px] font-medium text-[#b8babf]">
-            Email
-          </label>
-          <Input
-            id="hr-email"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="hr@company.com"
-            aria-required="true"
-          />
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="hr-name" className="text-[12px] font-medium text-[#b8babf]">
-            Full name
-          </label>
-          <Input
-            id="hr-name"
-            value={fullName}
-            onChange={(e) => setFullName(e.target.value)}
-            placeholder="HR Manager"
-            aria-required="true"
-          />
-        </div>
-        <Button
-          type="submit"
-          disabled={createMut.isPending}
-          className="gap-1.5"
-          aria-busy={createMut.isPending}
-        >
-          <UserPlus className="h-4 w-4" aria-hidden="true" />
-          {createMut.isPending ? 'Adding…' : 'Add HR'}
-        </Button>
-      </form>
-
-      {/* Default password hint */}
-      <p className="flex items-center gap-1.5 text-[12px] text-[#888b91]">
-        <KeyRound className="h-3 w-3 text-[#60a5fa]" aria-hidden="true" />
-        Default password{' '}
-        <code className="rounded bg-white/[0.06] px-1.5 py-0.5 font-mono text-[11px] text-white">
-          {DEFAULT_PW}
-        </code>{' '}
-        — they must change it on first login.
-      </p>
-
-      {/* HR list */}
       {isLoading ? (
         <Skeleton className="h-16 w-full rounded-[12px] bg-white/[0.05]" />
-      ) : !hrs || hrs.length === 0 ? (
-        <p className="text-[13px] text-[#888b91] py-2">No HR managers yet.</p>
-      ) : (
-        <div role="list" aria-label={`HR managers for ${company.name}`}>
-          {hrs.map((hr) => (
-            <div
-              key={hr.user_id}
-              role="listitem"
-              className="flex items-center justify-between rounded-[14px] border border-white/[0.07] bg-white/[0.03] px-3 py-2.5 mb-2 last:mb-0"
-            >
-              <div className="flex items-center gap-2.5 min-w-0">
-                <Avatar
-                  initials={initialsOf(hr.full_name)}
-                  gradient={gradientFor(hr.user_id.charCodeAt(0))}
-                  size={30}
-                />
-                <div className="min-w-0">
-                  <p className="text-[13.5px] font-medium text-white truncate">
-                    {hr.full_name}
-                  </p>
-                  <p className="text-[12px] text-[#888b91] truncate">{hr.email}</p>
-                </div>
-              </div>
-              {hr.must_change_password ? (
-                <Badge variant="outline" className="text-xs shrink-0">
-                  pending first login
-                </Badge>
-              ) : (
-                <Badge variant="success" className="text-xs gap-1 shrink-0">
-                  <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
-                  active
-                </Badge>
-              )}
+      ) : hasAdmin ? (
+        /* Existing super admin — read-only card */
+        <div
+          className="flex items-center justify-between rounded-[14px] border border-white/[0.07] bg-white/[0.03] px-3 py-2.5"
+          role="status"
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <Avatar
+              initials={initialsOf(admin.full_name)}
+              gradient={gradientFor(admin.user_id.charCodeAt(0))}
+              size={30}
+            />
+            <div className="min-w-0">
+              <p className="text-[13.5px] font-medium text-white truncate">{admin.full_name}</p>
+              <p className="text-[12px] text-[#888b91] truncate">{admin.email}</p>
             </div>
-          ))}
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {admin.must_change_password ? (
+              <Badge variant="outline" className="text-xs">
+                pending first login
+              </Badge>
+            ) : (
+              <Badge variant="success" className="text-xs gap-1">
+                <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
+                active
+              </Badge>
+            )}
+            <ConfirmDeleteButton
+              title={`Remove super admin ${admin.email}`}
+              pending={removeAdminMut.isPending}
+              onConfirm={() => removeAdminMut.mutate()}
+            />
+          </div>
+        </div>
+      ) : (
+        <>
+          {/* Create super-admin form */}
+          <form
+            className="grid gap-2 sm:grid-cols-[1fr_1fr_auto] items-end"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!email.trim() || !fullName.trim()) {
+                toast.error('Email and name are required.');
+                return;
+              }
+              createMut.mutate();
+            }}
+          >
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="sa-email" className="text-[12px] font-medium text-[#b8babf]">
+                Email
+              </label>
+              <Input
+                id="sa-email"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="admin@company.com"
+                aria-required="true"
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="sa-name" className="text-[12px] font-medium text-[#b8babf]">
+                Full name
+              </label>
+              <Input
+                id="sa-name"
+                value={fullName}
+                onChange={(e) => setFullName(e.target.value)}
+                placeholder="Company Super Admin"
+                aria-required="true"
+              />
+            </div>
+            <Button
+              type="submit"
+              disabled={createMut.isPending}
+              className="gap-1.5"
+              aria-busy={createMut.isPending}
+            >
+              <UserPlus className="h-4 w-4" aria-hidden="true" />
+              {createMut.isPending ? 'Adding…' : 'Create super admin'}
+            </Button>
+          </form>
+
+          {/* Default password hint */}
+          <p className="flex items-center gap-1.5 text-[12px] text-[#888b91]">
+            <KeyRound className="h-3 w-3 text-[#60a5fa]" aria-hidden="true" />
+            Default password{' '}
+            <code className="rounded bg-white/[0.06] px-1.5 py-0.5 font-mono text-[11px] text-white">
+              {DEFAULT_PW}
+            </code>{' '}
+            — they must change it on first login.
+          </p>
+        </>
+      )}
+
+      {/* Read-only HR managers (the super admin creates these for the company) */}
+      {hrs && hrs.length > 0 && (
+        <div className="border-t border-white/[0.06] pt-4">
+          <p className="mb-2 flex items-center gap-1.5 text-[12px] font-medium text-[#b8babf]">
+            <Users className="h-3.5 w-3.5 text-[#888b91]" aria-hidden="true" />
+            HR managers ({hrs.length})
+          </p>
+          <div role="list" aria-label={`HR managers for ${company.name}`}>
+            {hrs.map((hr) => (
+              <div
+                key={hr.user_id}
+                role="listitem"
+                className="flex items-center justify-between rounded-[12px] border border-white/[0.06] bg-white/[0.02] px-3 py-2 mb-1.5 last:mb-0"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <Avatar
+                    initials={initialsOf(hr.full_name)}
+                    gradient={gradientFor(hr.user_id.charCodeAt(0))}
+                    size={26}
+                  />
+                  <span className="text-[12.5px] text-white truncate">{hr.full_name}</span>
+                  <span className="text-[11.5px] text-[#70757c] truncate">{hr.email}</span>
+                </div>
+                {hr.must_change_password ? (
+                  <Badge variant="outline" className="text-[10px] shrink-0">
+                    pending
+                  </Badge>
+                ) : (
+                  <Badge variant="success" className="text-[10px] shrink-0">
+                    active
+                  </Badge>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </GlassCard>
@@ -257,7 +348,6 @@ function FeatureFlagsTab(): JSX.Element {
 
   return (
     <div className="mt-5 space-y-4" aria-live="polite">
-      {/* Section header */}
       <div className="flex items-center gap-2">
         <span
           className="flex h-9 w-9 flex-none items-center justify-center rounded-[10px] bg-[rgba(var(--accent-rgb),0.12)] text-[#60a5fa]"
@@ -271,7 +361,6 @@ function FeatureFlagsTab(): JSX.Element {
         </div>
       </div>
 
-      {/* Loading skeleton */}
       {isLoading && (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {[0, 1, 2, 3].map((i) => (
@@ -280,7 +369,6 @@ function FeatureFlagsTab(): JSX.Element {
         </div>
       )}
 
-      {/* Error / not-migrated state */}
       {!isLoading && isError && (
         <GlassCard className="p-6">
           <div className="flex items-start gap-3">
@@ -301,21 +389,16 @@ function FeatureFlagsTab(): JSX.Element {
         </GlassCard>
       )}
 
-      {/* Empty state */}
       {!isLoading && !isError && flags && flags.length === 0 && (
         <GlassCard className="p-8 text-center">
           <p className="text-[13px] text-[#888b91]">No feature flags defined yet.</p>
         </GlassCard>
       )}
 
-      {/* Flag cards — design: 2-col grid with icon + toggle */}
       {!isLoading && !isError && flags && flags.length > 0 && (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2" role="list" aria-label="Feature flags">
           {flags.map((flag) => (
-            <GlassCard
-              key={flag.key}
-              className="flex items-center gap-4 p-5"
-            >
+            <GlassCard key={flag.key} className="flex items-center gap-4 p-5">
               <span
                 className="flex h-11 w-11 flex-none items-center justify-center rounded-[12px] bg-white/[0.05] text-[#60a5fa]"
                 aria-hidden="true"
@@ -323,22 +406,16 @@ function FeatureFlagsTab(): JSX.Element {
                 <Building2 size={20} />
               </span>
               <div className="flex-1 min-w-0">
-                <p className="text-[14.5px] font-semibold text-white truncate">
-                  {flag.label}
-                </p>
+                <p className="text-[14.5px] font-semibold text-white truncate">{flag.label}</p>
                 {flag.description && (
-                  <p className="text-[12.5px] text-[#888b91] truncate">
-                    {flag.description}
-                  </p>
+                  <p className="text-[12.5px] text-[#888b91] truncate">{flag.description}</p>
                 )}
                 <p className="mt-0.5 font-mono text-[11px] text-[#5a5f66]">{flag.key}</p>
               </div>
               <ToggleSwitch
                 checked={flag.enabled}
                 label={`Toggle ${flag.label}`}
-                onChange={(next) =>
-                  toggleMut.mutate({ key: flag.key, enabled: next })
-                }
+                onChange={(next) => toggleMut.mutate({ key: flag.key, enabled: next })}
               />
             </GlassCard>
           ))}
@@ -405,7 +482,6 @@ function AuditLogTab(): JSX.Element {
         DPDP audit log
       </h3>
 
-      {/* Loading skeleton */}
       {isLoading && (
         <div className="space-y-2">
           {[0, 1, 2, 3, 4].map((i) => (
@@ -414,18 +490,13 @@ function AuditLogTab(): JSX.Element {
         </div>
       )}
 
-      {/* Empty state */}
       {!isLoading && (!events || events.length === 0) && (
         <div className="py-8 text-center">
-          <ClipboardList
-            className="mx-auto mb-3 h-8 w-8 text-[#5a5f66]"
-            aria-hidden="true"
-          />
+          <ClipboardList className="mx-auto mb-3 h-8 w-8 text-[#5a5f66]" aria-hidden="true" />
           <p className="text-[13px] text-[#888b91]">No audit events yet.</p>
         </div>
       )}
 
-      {/* Event list — design layout */}
       {!isLoading && events && events.length > 0 && (
         <div className="flex flex-col" aria-label="Audit event list" role="list">
           {events.map((ev, idx) => (
@@ -449,10 +520,7 @@ function AuditLogTab(): JSX.Element {
                 className="shrink-0 font-mono text-[11.5px] text-[#888b91] tabular-nums"
                 title={new Date(ev.ts).toLocaleString('en-IN')}
               >
-                {new Date(ev.ts).toLocaleTimeString('en-IN', {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                })}
+                {new Date(ev.ts).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
               </time>
             </div>
           ))}
@@ -464,7 +532,7 @@ function AuditLogTab(): JSX.Element {
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-export default function SuperAdminConsole() {
+export default function PlatformOwnerConsole() {
   const qc = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [newCompany, setNewCompany] = useState('');
@@ -475,6 +543,12 @@ export default function SuperAdminConsole() {
     queryFn: listCompanies,
   });
 
+  // Real platform-wide counts for the stat tiles (no dummy data).
+  const { data: stats } = useQuery({
+    queryKey: ['platform-stats'],
+    queryFn: getPlatformStats,
+  });
+
   const createMut = useMutation({
     mutationFn: () => createCompany(newCompany.trim()),
     onSuccess: (c) => {
@@ -482,6 +556,7 @@ export default function SuperAdminConsole() {
       setNewCompany('');
       setSelectedId(c.id);
       void qc.invalidateQueries({ queryKey: ['companies'] });
+      void qc.invalidateQueries({ queryKey: ['platform-stats'] });
     },
     onError: (err: unknown) =>
       toast.error(err instanceof Error ? err.message : 'Could not create company.'),
@@ -489,21 +564,47 @@ export default function SuperAdminConsole() {
 
   const selected = companies?.find((c) => c.id === selectedId) ?? null;
 
+  const pendingAdmins = Math.max(0, (stats?.companies ?? 0) - (stats?.super_admins ?? 0));
+  const statTiles: { label: string; value: string; delta: string; trend: 'up' | 'down' | 'flat' }[] = [
+    {
+      label: 'Companies',
+      value: String(stats?.companies ?? 0),
+      delta: `${stats?.super_admins ?? 0} with a super admin`,
+      trend: 'flat',
+    },
+    {
+      label: 'Super admins',
+      value: String(stats?.super_admins ?? 0),
+      delta: pendingAdmins > 0 ? `${pendingAdmins} company without one` : 'all companies covered',
+      trend: pendingAdmins > 0 ? 'down' : 'flat',
+    },
+    {
+      label: 'HR managers',
+      value: String(stats?.hr_managers ?? 0),
+      delta: 'across all tenants',
+      trend: 'flat',
+    },
+    {
+      label: 'Interviews',
+      value: String(stats?.interviews_total ?? 0),
+      delta: `${stats?.interviews_30d ?? 0} in last 30 days`,
+      trend: (stats?.interviews_30d ?? 0) > 0 ? 'up' : 'flat',
+    },
+  ];
+
   return (
     <div className="mx-auto max-w-[1280px] px-0 py-2 space-y-6">
-
       {/* ── Page header ──────────────────────────────────────────────────── */}
       <Reveal>
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <h1 className="text-[28px] font-semibold tracking-[-1px] text-white">
-              Super Admin
+              Platform Owner
             </h1>
             <p className="mt-1 text-[14px] text-[#888b91]">
-              Tenants, access and platform governance.
+              Tenants, company super admins and platform governance.
             </p>
           </div>
-          {/* Add tenant — focuses the create-company input */}
           <Pill
             variant="primary"
             className="px-5 py-2.5"
@@ -526,10 +627,10 @@ export default function SuperAdminConsole() {
         </div>
       </Reveal>
 
-      {/* ── Platform-wide stat tiles (design data) ───────────────────────── */}
+      {/* ── Platform-wide stat tiles (live counts) ───────────────────────── */}
       <Reveal delay={0.05}>
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          {SUPER_STATS.map((s) => (
+          {statTiles.map((s) => (
             <StatCard key={s.label} {...s} />
           ))}
         </div>
@@ -544,9 +645,7 @@ export default function SuperAdminConsole() {
         />
       </Reveal>
 
-      {/* ══════════════════════════════════════════════════════════════════
-          TAB: Companies — design table layout + live interaction
-      ══════════════════════════════════════════════════════════════════ */}
+      {/* TAB: Companies */}
       {view === 'companies' && (
         <div className="space-y-5">
           {/* Create company form */}
@@ -583,7 +682,7 @@ export default function SuperAdminConsole() {
             </form>
           </GlassCard>
 
-          {/* Companies table — design layout */}
+          {/* Companies table */}
           {isLoading ? (
             <Skeleton className="h-48 w-full rounded-[24px] bg-white/[0.04]" />
           ) : !companies || companies.length === 0 ? (
@@ -595,15 +694,16 @@ export default function SuperAdminConsole() {
           ) : (
             <GlassCard className="overflow-hidden p-0">
               {/* Table header */}
-              <div className="grid grid-cols-[2fr_1fr_1fr_1.2fr_1fr] gap-3 border-b border-white/[0.06] px-6 py-3.5 text-[11.5px] uppercase tracking-[0.5px] text-[#70757c]">
+              <div className="grid grid-cols-[1.8fr_1.6fr_0.9fr_1fr_1.1fr_0.9fr] gap-3 border-b border-white/[0.06] px-6 py-3.5 text-[11.5px] uppercase tracking-[0.5px] text-[#70757c]">
                 <div>Tenant</div>
+                <div>Super admin</div>
                 <div>HR managers</div>
                 <div>Slug</div>
                 <div>Created</div>
                 <div>Status</div>
               </div>
 
-              {/* Table rows — clickable, drives HR panel */}
+              {/* Table rows */}
               {companies.map((c) => (
                 <motion.button
                   key={c.id}
@@ -611,7 +711,7 @@ export default function SuperAdminConsole() {
                   whileTap={{ scale: 0.995 }}
                   onClick={() => setSelectedId(c.id === selectedId ? null : c.id)}
                   className={cn(
-                    'grid grid-cols-[2fr_1fr_1fr_1.2fr_1fr] items-center gap-3 w-full text-left',
+                    'grid grid-cols-[1.8fr_1.6fr_0.9fr_1fr_1.1fr_0.9fr] items-center gap-3 w-full text-left',
                     'border-b border-white/[0.04] px-6 py-3.5 last:border-0 transition-colors',
                     c.id === selectedId
                       ? 'bg-[rgba(var(--accent-rgb),0.06)]'
@@ -627,19 +727,28 @@ export default function SuperAdminConsole() {
                       size={34}
                     />
                     <div className="min-w-0">
-                      <p className="text-[13.5px] font-medium text-white truncate">
-                        {c.name}
-                      </p>
+                      <p className="text-[13.5px] font-medium text-white truncate">{c.name}</p>
                     </div>
                   </div>
-                  {/* Real hr_count from live API */}
+                  {/* Super admin (email or "needs one") */}
+                  <div className="min-w-0">
+                    {c.has_admin ? (
+                      <span className="flex items-center gap-1.5 text-[12.5px] text-[#b8babf] truncate">
+                        <ShieldCheck className="h-3 w-3 shrink-0 text-[#27c93f]" aria-hidden="true" />
+                        <span className="truncate">{c.admin_email}</span>
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1.5 text-[12.5px] text-[#ffb764]">
+                        <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
+                        Needs a super admin
+                      </span>
+                    )}
+                  </div>
                   <div className="flex items-center gap-1.5 text-[13.5px] text-[#b8babf]">
                     <Users className="h-3 w-3 text-[#888b91]" aria-hidden="true" />
                     {c.hr_count}
                   </div>
-                  <div className="font-mono text-[12.5px] text-[#888b91] truncate">
-                    {c.slug}
-                  </div>
+                  <div className="font-mono text-[12.5px] text-[#888b91] truncate">{c.slug}</div>
                   <div className="font-mono text-[12.5px] text-[#888b91]">
                     {new Date(c.created_at).toLocaleDateString('en-IN', {
                       day: 'numeric',
@@ -660,15 +769,19 @@ export default function SuperAdminConsole() {
             </GlassCard>
           )}
 
-          {/* HR panel — appears below table when a company is selected */}
+          {/* Company-admin panel — keyed so the form resets per company */}
           {selected ? (
-            <HrPanel company={selected} />
+            <CompanyAdminPanel
+              key={selected.id}
+              company={selected}
+              onDeleted={() => setSelectedId(null)}
+            />
           ) : companies && companies.length > 0 ? (
             <GlassCard className="p-5">
               <div className="py-6 text-center space-y-2">
-                <Users className="mx-auto h-7 w-7 text-[#5a5f66]" aria-hidden="true" />
+                <ShieldCheck className="mx-auto h-7 w-7 text-[#5a5f66]" aria-hidden="true" />
                 <p className="text-[13px] text-[#888b91]">
-                  Click a row above to manage its HR managers.
+                  Click a row above to manage its super admin.
                 </p>
               </div>
             </GlassCard>
@@ -676,14 +789,7 @@ export default function SuperAdminConsole() {
         </div>
       )}
 
-      {/* ══════════════════════════════════════════════════════════════════
-          TAB: Feature flags — live (listFeatureFlags + setFeatureFlag)
-      ══════════════════════════════════════════════════════════════════ */}
       {view === 'flags' && <FeatureFlagsTab />}
-
-      {/* ══════════════════════════════════════════════════════════════════
-          TAB: DPDP audit log — live (listAuditLog)
-      ══════════════════════════════════════════════════════════════════ */}
       {view === 'audit' && <AuditLogTab />}
     </div>
   );

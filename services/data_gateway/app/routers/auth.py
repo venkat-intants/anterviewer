@@ -53,8 +53,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db_session
-from app.notifications_util import create_notification
 from app.dependencies import get_auth_provider_dep, get_current_user
+from app.notifications_util import create_notification
 from app.rate_limit import rate_limit
 
 log = structlog.get_logger(__name__)

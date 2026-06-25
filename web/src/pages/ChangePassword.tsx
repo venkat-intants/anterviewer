@@ -16,6 +16,7 @@ import { Field, Pill } from '@/design/components/primitives';
 import { ShieldCheck, Lock } from '@/design/components/icons';
 
 function landingForRoles(roles: string[]): string {
+  if (roles.includes('platform_owner')) return '/platform';
   if (roles.includes('super_admin')) return '/superadmin';
   if (roles.includes('hr_manager')) return '/hr';
   if (roles.includes('admin')) return '/admin/overview';

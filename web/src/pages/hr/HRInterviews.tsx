@@ -247,7 +247,7 @@ export default function HRInterviews() {
   }
 
   // ── Derived ────────────────────────────────────────────────────────────────
-  const allInvites = invites ?? [];
+  const allInvites = useMemo(() => invites ?? [], [invites]);
   const elig = eligible ?? [];
 
   const filteredInvites = useMemo(

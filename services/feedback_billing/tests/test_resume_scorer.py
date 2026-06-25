@@ -103,3 +103,28 @@ async def test_non_200_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_gemini(monkeypatch, _FakeResp(400, {"error": "bad request"}))
     with pytest.raises(ResumeScoringError):
         await score_resume(resume_text="r", job_title="Dev", settings=_SETTINGS)
+
+
+def _raw_envelope(raw_text: str) -> dict[str, Any]:
+    """Envelope carrying RAW (possibly invalid) JSON text, not json.dumps()'d."""
+    return {"candidates": [{"content": {"parts": [{"text": raw_text}]}}]}
+
+
+@pytest.mark.asyncio
+async def test_score_resume_tolerates_trailing_commas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Gemini occasionally emits a trailing comma before } or ] (invalid JSON);
+    # the scorer must recover instead of raising / 502-ing.
+    raw = (
+        '{"candidate_name": "Jane", "candidate_email": "j@x.com", "overall": 82, '
+        '"breakdown": {"skills_match": 80, "experience_relevance": 78, '
+        '"education_fit": 85, "role_alignment": 84,}, '
+        '"strengths": ["a", "b",], "concerns": ["c",], '
+        '"recommendation": "strong_fit", "summary": "Solid.",}'
+    )
+    _patch_gemini(monkeypatch, _FakeResp(200, _raw_envelope(raw)))
+    result = await score_resume(resume_text="r", job_title="Dev", settings=_SETTINGS)
+    assert result["overall"] == 82
+    assert result["breakdown"]["role_alignment"] == 84
+    assert result["recommendation"] == "strong_fit"
