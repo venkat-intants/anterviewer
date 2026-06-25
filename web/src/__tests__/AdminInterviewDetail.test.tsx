@@ -109,15 +109,19 @@ describe('AdminInterviewDetail page', () => {
 
     it('renders the composite score value', async () => {
       renderDetail('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa');
+      // The redesigned UI shows the composite score as "7.85 / 10" below the
+      // ScoreRing, so match with a regex rather than exact text equality.
       await waitFor(() => {
-        expect(screen.getByText('7.85')).toBeInTheDocument();
+        expect(screen.getByText(/7\.85/)).toBeInTheDocument();
       });
     });
 
     it('renders session metadata — role and language', async () => {
       renderDetail('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa');
       await waitFor(() => {
-        expect(screen.getByText('Junior Java Developer')).toBeInTheDocument();
+        // The redesigned UI renders job_title in two places: the candidate
+        // header subtitle and the "Role" MetaItem card, so use getAllByText.
+        expect(screen.getAllByText('Junior Java Developer').length).toBeGreaterThan(0);
         expect(screen.getAllByText('English').length).toBeGreaterThan(0);
       });
     });

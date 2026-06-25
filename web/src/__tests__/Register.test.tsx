@@ -22,6 +22,11 @@ vi.mock('../api/auth', () => ({
   }),
 }));
 
+// The Register component imports googleLoginUrl from @/api/sso — mock to avoid
+// undefined VITE_API_BASE_URL in the test environment.
+vi.mock('../api/sso', () => ({
+  googleLoginUrl: vi.fn().mockReturnValue('https://mock-google-login'),
+}));
 
 const mockNavigate = vi.fn();
 vi.mock('react-router-dom', async () => {
@@ -45,6 +50,14 @@ function renderRegister() {
   );
 }
 
+/** The DPDP consent checkbox gates the submit button. Check it before submitting. */
+async function checkDpdpConsent(user: ReturnType<typeof userEvent.setup>) {
+  const checkbox = screen.getByRole('checkbox', {
+    name: /i agree to the terms and dpdp/i,
+  });
+  await user.click(checkbox);
+}
+
 describe('Register page', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -62,6 +75,8 @@ describe('Register page', () => {
   it('shows validation errors for empty form submit', async () => {
     const user = userEvent.setup();
     renderRegister();
+    // The submit button is gated by the DPDP consent checkbox; check it first.
+    await checkDpdpConsent(user);
     await user.click(screen.getByRole('button', { name: /create account/i }));
     await waitFor(() => {
       expect(screen.getByText(/at least 2 characters/i)).toBeInTheDocument();
@@ -74,6 +89,8 @@ describe('Register page', () => {
     await user.type(screen.getByLabelText(/full name/i), 'Test User');
     await user.type(screen.getByLabelText(/email address/i), 'not-an-email');
     await user.type(screen.getByLabelText(/password/i), 'password123');
+    // Check the DPDP consent checkbox before submitting so the button is enabled.
+    await checkDpdpConsent(user);
     await user.click(screen.getByRole('button', { name: /create account/i }));
     await waitFor(() => {
       expect(screen.getByText(/enter a valid email address/i)).toBeInTheDocument();
@@ -86,6 +103,8 @@ describe('Register page', () => {
     await user.type(screen.getByLabelText(/full name/i), 'Test Candidate');
     await user.type(screen.getByLabelText(/email address/i), 'test@intants.com');
     await user.type(screen.getByLabelText(/password/i), 'securepassword123');
+    // Check the DPDP consent checkbox before submitting so the button is enabled.
+    await checkDpdpConsent(user);
     await user.click(screen.getByRole('button', { name: /create account/i }));
     await waitFor(() => {
       expect(mockNavigate).toHaveBeenCalledWith('/dashboard', { replace: true });

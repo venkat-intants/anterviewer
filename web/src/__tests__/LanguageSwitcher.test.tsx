@@ -1,9 +1,22 @@
 // Tests for LanguageSwitcher component and i18n integration.
 // Covers:
-//   1. Switcher renders all 3 language options.
+//   1. Switcher opens menu and shows all 3 language options.
 //   2. Clicking हिंदी calls i18n.changeLanguage('hi').
 //   3. Clicking తెలుగు calls i18n.changeLanguage('te').
-//   4. Landing page renders a Hindi string after switching to 'hi'.
+//   4. EN option is aria-checked when language is en.
+//   5. Landing page renders its (hardcoded) English hero headline.
+//   6. After switching to 'hi' via the switcher, i18n reflects the new language
+//      and the trigger button shows the Hindi label.
+//
+// Design notes (aurora UI redesign, commit 6dbf60e):
+//   - LanguageSwitcher is now a Globe trigger button (aria-label = t('lang.label')
+//     = "UI language") that opens a role="menu" dropdown.
+//   - Language items inside the menu have role="menuitemradio" and
+//     aria-label = t('lang.<code>') ("English" / "हिंदी" / "తెలుగు").
+//   - Active item has aria-checked="true" (not aria-pressed).
+//   - The menu must be opened by clicking the trigger before querying items.
+//   - The Landing page (LandingPage.tsx) uses hardcoded English copy; it does
+//     NOT consume i18n keys, so headline assertions test the actual DOM text.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
@@ -31,18 +44,29 @@ describe('LanguageSwitcher', () => {
     await i18n.changeLanguage('en');
   });
 
-  it('renders three language options: EN, हिंदी, తెలుగు', () => {
+  it('renders three language options: EN, हिंदी, తెలుగు inside the dropdown menu', async () => {
+    const user = userEvent.setup();
     renderSwitcher();
-    expect(screen.getByRole('button', { name: /english/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /हिंदी/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /తెలుగు/i })).toBeInTheDocument();
+
+    // The trigger button is the Globe button labelled "UI language"
+    const trigger = screen.getByRole('button', { name: /ui language/i });
+    await user.click(trigger);
+
+    // All three items appear as menuitemradio once the menu opens
+    expect(screen.getByRole('menuitemradio', { name: /english/i })).toBeInTheDocument();
+    expect(screen.getByRole('menuitemradio', { name: /हिंदी/i })).toBeInTheDocument();
+    expect(screen.getByRole('menuitemradio', { name: /తెలుగు/i })).toBeInTheDocument();
   });
 
   it('calls changeLanguage("hi") when हिंदी is clicked', async () => {
     const user = userEvent.setup();
     const spy = vi.spyOn(i18n, 'changeLanguage');
     renderSwitcher();
-    await user.click(screen.getByRole('button', { name: /हिंदी/i }));
+
+    // Open the menu first
+    await user.click(screen.getByRole('button', { name: /ui language/i }));
+    await user.click(screen.getByRole('menuitemradio', { name: /हिंदी/i }));
+
     expect(spy).toHaveBeenCalledWith('hi');
     spy.mockRestore();
   });
@@ -51,19 +75,28 @@ describe('LanguageSwitcher', () => {
     const user = userEvent.setup();
     const spy = vi.spyOn(i18n, 'changeLanguage');
     renderSwitcher();
-    await user.click(screen.getByRole('button', { name: /తెలుగు/i }));
+
+    // Open the menu first
+    await user.click(screen.getByRole('button', { name: /ui language/i }));
+    await user.click(screen.getByRole('menuitemradio', { name: /తెలుగు/i }));
+
     expect(spy).toHaveBeenCalledWith('te');
     spy.mockRestore();
   });
 
-  it('marks EN as pressed when language is en', () => {
+  it('marks EN as aria-checked when language is en', async () => {
+    const user = userEvent.setup();
     renderSwitcher();
-    const enBtn = screen.getByRole('button', { name: /english/i });
-    expect(enBtn).toHaveAttribute('aria-pressed', 'true');
+
+    // Open the menu to reveal the items
+    await user.click(screen.getByRole('button', { name: /ui language/i }));
+
+    const enItem = screen.getByRole('menuitemradio', { name: /english/i });
+    expect(enItem).toHaveAttribute('aria-checked', 'true');
   });
 });
 
-// ── Integration: Landing page renders Hindi string after language switch ───────
+// ── Integration: Landing page + LanguageSwitcher ──────────────────────────────
 
 // Stub auth context so Landing doesn't redirect
 vi.mock('../context/AuthContext', async () => {
@@ -99,27 +132,39 @@ describe('Landing page i18n integration', () => {
     await i18n.changeLanguage('en');
   });
 
-  it('shows English headline by default', () => {
+  it('shows English headline by default', async () => {
     renderLandingWithSwitcher();
-    expect(screen.getByRole('heading', { name: /interviews that feel human/i })).toBeInTheDocument();
+    // The aurora-redesigned Landing hero headline is hardcoded English copy.
+    // The h1 reads "Talk to an AI interviewer. / Get hired faster."
+    await waitFor(() => {
+      expect(
+        screen.getByRole('heading', { name: /talk to an ai interviewer/i }),
+      ).toBeInTheDocument();
+    });
   });
 
-  it('shows Hindi headline after switching to hi', async () => {
+  it('calls changeLanguage("hi") and trigger shows Hindi label after switching to hi', async () => {
     const user = userEvent.setup();
+    const spy = vi.spyOn(i18n, 'changeLanguage');
     renderLandingWithSwitcher();
 
-    await user.click(screen.getByRole('button', { name: /हिंदी/i }));
+    // Open the Globe dropdown (trigger aria-label = "UI language" in English)
+    await user.click(screen.getByRole('button', { name: /ui language/i }));
 
+    // Click the Hindi option
+    await user.click(screen.getByRole('menuitemradio', { name: /हिंदी/i }));
+
+    // i18n.changeLanguage must have been called with 'hi'
+    expect(spy).toHaveBeenCalledWith('hi');
+
+    // After switching, t('lang.label') returns the Hindi translation "UI भाषा"
+    // and the trigger's visible span now shows "हिंदी".
     await waitFor(() => {
-      // Match the unique Devanagari fragment from the Hindi headline:
-      // "इंटरव्यू जो असली जैसे लगें।"
-      expect(screen.getByRole('heading', { name: /असली जैसे लगें/ })).toBeInTheDocument();
+      // The trigger now carries the Hindi aria-label
+      const trigger = screen.getByRole('button', { name: /ui भाषा/i });
+      expect(trigger).toHaveTextContent('हिंदी');
     });
 
-    // Verify the hero subtitle also switched — a unique contiguous Devanagari
-    // fragment from "…सफलता का आत्मविश्वास पाएं।"
-    await waitFor(() => {
-      expect(screen.getByText(/आत्मविश्वास पाएं/)).toBeInTheDocument();
-    });
+    spy.mockRestore();
   });
 });

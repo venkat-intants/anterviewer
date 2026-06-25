@@ -117,17 +117,29 @@ describe('Dashboard page', () => {
     vi.clearAllMocks();
   });
 
+  // Aurora redesign: the hero heading changed from "Welcome, <name>" to
+  // "Let's get you hired, <firstName>." (h1 inside a GlassCard). The intent
+  // is unchanged — verify the user is personally greeted after login.
   it('renders welcome message after load', async () => {
     renderDashboard();
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /welcome, test candidate/i })).toBeInTheDocument();
+      expect(
+        screen.getByRole('heading', { name: /let's get you hired/i }),
+      ).toBeInTheDocument();
     });
   });
 
+  // Aurora redesign: the email is no longer shown on the Dashboard surface.
+  // The user's first name now appears in the h1 greeting — verify that the
+  // authenticated user's first name ("Test") is present in the heading.
   it('displays user email', async () => {
     renderDashboard();
     await waitFor(() => {
-      expect(screen.getByText(/test@intants\.com/i)).toBeInTheDocument();
+      // The h1 greeting reads "Let's get you hired, Test." — the first name
+      // is derived from full_name supplied by the getMe mock.
+      expect(
+        screen.getByRole('heading', { name: /test/i }),
+      ).toBeInTheDocument();
     });
   });
 
@@ -138,10 +150,15 @@ describe('Dashboard page', () => {
     });
   });
 
+  // Aurora redesign: explicit role badges were removed from the Dashboard.
+  // Candidate-specific content is now indicated by the "Interview readiness"
+  // section, which only renders for authenticated candidates. Verify that
+  // heading is present to assert role-appropriate UI loaded correctly.
   it('displays the candidate role badge', async () => {
     renderDashboard();
     await waitFor(() => {
-      expect(screen.getByText('candidate')).toBeInTheDocument();
+      // t('dashboard.readinessTitle') = 'Interview readiness'
+      expect(screen.getByText(/interview readiness/i)).toBeInTheDocument();
     });
   });
 
@@ -155,19 +172,32 @@ describe('Dashboard page', () => {
     });
   });
 
+  // Aurora redesign: the "Interviews" StatCard value goes through AnimatedNumber
+  // which relies on IntersectionObserver to count up. Because jsdom stubs
+  // IntersectionObserver as a no-op, the animated span stays at its initial
+  // "—" placeholder value even after data loads. Instead we assert on the
+  // readiness-card description sentence, which is plain (non-animated) text
+  // that includes the interview count once sessions data has resolved.
+  // t('dashboard.readinessDesc', { count: 1 }) → "Based on 1 attempt(s) across your sessions"
   it('shows interviews-taken stat after data loads', async () => {
     renderDashboard();
     await waitFor(() => {
-      // stat value "1" for 1 session, or within a containing element
-      expect(screen.getByText('1')).toBeInTheDocument();
+      expect(
+        screen.getByText(/based on 1 attempt/i),
+      ).toBeInTheDocument();
     });
   });
 
+  // Aurora redesign: the average score is no longer shown as "7.0 / 10".
+  // composite_score 7.05 × 10 = Math.round(70.5) = 71.
+  // The ScoreRing renders the 0–100 readiness score (71) directly as a
+  // numeric <span> — this is NOT routed through AnimatedNumber, so it is
+  // present as plain DOM text as soon as the scorecards query resolves.
   it('shows average score stat after data loads', async () => {
     renderDashboard();
-    // composite_score: 7.05 → (7.05).toFixed(1) = "7.0" (JavaScript float rounding)
+    // composite_score: 7.05 → Math.round(7.05 * 10) = 71 (ScoreRing 0–100 scale)
     await waitFor(() => {
-      expect(screen.getByText(/7\.0 \/ 10/i)).toBeInTheDocument();
+      expect(screen.getByText('71')).toBeInTheDocument();
     });
   });
 

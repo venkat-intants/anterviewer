@@ -100,14 +100,17 @@ describe('Scorecard page', () => {
 
   it('displays the overall score after data loads', async () => {
     renderScorecard();
-    // composite_score 7.05 → toFixed(1) = "7.1" rendered inside an aria-label span
+    // After data loads, the page h1 "Your Scorecard" appears and the ScoreRing
+    // renders the 0-100 scaled value (Math.round(7.05*10) = 71) as visible text
+    // inside a span. The sr-only span reads "Overall Score: 7.1 out of 10".
     await waitFor(() => {
-      expect(
-        screen.getByRole('heading', { name: /overall score/i }) ||
-          screen.getByLabelText(/overall score: 7.1/i) ||
-          screen.getByText(/7\.1/),
-      ).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: /your scorecard/i })).toBeInTheDocument();
     });
+    // ScoreRing renders the 0-100 integer (71) as a visible span inside the ring.
+    // The "Overall Score" label appears as a <p> below the ring.
+    expect(screen.getByText('71')).toBeInTheDocument();
+    // Both "Overall Score" labels (sr-only span + visible <p>) are in the DOM.
+    expect(screen.getAllByText(/overall score/i).length).toBeGreaterThanOrEqual(1);
   });
 
   it('displays the score breakdown section', async () => {
@@ -148,8 +151,11 @@ describe('Scorecard page', () => {
 
   it('does not show Download PDF button when report_pdf_url is null', async () => {
     renderScorecard();
+    // Use the unique h1 "Your Scorecard" as the "data loaded" sentinel — the page
+    // renders it only after the query resolves; avoids the multi-match problem with
+    // "Overall Score" which appears in both an sr-only span and a visible <p>.
     await waitFor(() => {
-      expect(screen.getByText(/overall score/i)).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: /your scorecard/i })).toBeInTheDocument();
     });
     expect(screen.queryByText(/download pdf/i)).not.toBeInTheDocument();
   });
@@ -160,15 +166,21 @@ describe('Scorecard page', () => {
       report_pdf_url: 'https://r2.example.com/scorecards/001/report.pdf?sig=abc',
     });
     renderScorecard();
+    // The redesigned page renders the "Download PDF Report" link in TWO places:
+    // the header area and the CTA footer. Wait for at least one to appear, then
+    // verify both share the correct href and target — this upholds the original
+    // intent (the PDF link exists and opens in a new tab) while matching the new DOM.
     await waitFor(() => {
-      expect(screen.getByRole('link', { name: /download pdf report/i })).toBeInTheDocument();
+      expect(screen.getAllByRole('link', { name: /download pdf report/i }).length).toBeGreaterThan(0);
     });
-    const link = screen.getByRole('link', { name: /download pdf report/i });
-    expect(link).toHaveAttribute('target', '_blank');
-    expect(link).toHaveAttribute(
-      'href',
-      'https://r2.example.com/scorecards/001/report.pdf?sig=abc',
-    );
+    const links = screen.getAllByRole('link', { name: /download pdf report/i });
+    links.forEach((link) => {
+      expect(link).toHaveAttribute('target', '_blank');
+      expect(link).toHaveAttribute(
+        'href',
+        'https://r2.example.com/scorecards/001/report.pdf?sig=abc',
+      );
+    });
   });
 
   it('shows error state when fetch fails', async () => {
@@ -182,16 +194,18 @@ describe('Scorecard page', () => {
 
   it('renders back-to-history navigation link', async () => {
     renderScorecard();
+    // Use h1 "Your Scorecard" as the "data loaded" sentinel (unique on the page).
     await waitFor(() => {
-      expect(screen.getByText(/overall score/i)).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: /your scorecard/i })).toBeInTheDocument();
     });
     expect(screen.getByRole('link', { name: /history/i })).toBeInTheDocument();
   });
 
   it('renders back-to-dashboard navigation link', async () => {
     renderScorecard();
+    // Use h1 "Your Scorecard" as the "data loaded" sentinel (unique on the page).
     await waitFor(() => {
-      expect(screen.getByText(/overall score/i)).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: /your scorecard/i })).toBeInTheDocument();
     });
     expect(screen.getByRole('link', { name: /dashboard/i })).toBeInTheDocument();
   });

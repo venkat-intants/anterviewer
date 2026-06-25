@@ -5,7 +5,12 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import AdminOverview from '../pages/admin/AdminOverview';
-import type { OverviewResponse, TrendsResponse, ScoreDistributionResponse } from '../api/admin';
+import type {
+  OverviewResponse,
+  TrendsResponse,
+  ScoreDistributionResponse,
+  SystemHealthResponse,
+} from '../api/admin';
 
 // ---------------------------------------------------------------------------
 // Mock admin API
@@ -47,14 +52,29 @@ const MOCK_DIST: ScoreDistributionResponse = {
   avg_confidence: 6.93,
 };
 
+const MOCK_SYSTEM_HEALTH: SystemHealthResponse = {
+  overall: 'operational',
+  services: [
+    { name: 'admin_ops', kind: 'service', status: 'operational', latency_ms: 0, detail: null },
+    { name: 'interview_core', kind: 'service', status: 'operational', latency_ms: 24, detail: null },
+    { name: 'data_gateway', kind: 'service', status: 'operational', latency_ms: 18, detail: null },
+    { name: 'feedback_billing', kind: 'service', status: 'operational', latency_ms: 21, detail: null },
+    { name: 'postgres', kind: 'datastore', status: 'operational', latency_ms: null, detail: null },
+    { name: 'redis', kind: 'datastore', status: 'operational', latency_ms: null, detail: null },
+  ],
+  checked_at: '2026-06-25T00:00:00.000Z',
+};
+
 const mockGetOverview = vi.fn().mockResolvedValue(MOCK_OVERVIEW);
 const mockGetTrends = vi.fn().mockResolvedValue(MOCK_TRENDS);
 const mockGetScoreDist = vi.fn().mockResolvedValue(MOCK_DIST);
+const mockGetSystemHealth = vi.fn().mockResolvedValue(MOCK_SYSTEM_HEALTH);
 
 vi.mock('../api/admin', () => ({
   getOverview: (...args: unknown[]) => mockGetOverview(...args) as unknown,
   getTrends: (...args: unknown[]) => mockGetTrends(...args) as unknown,
   getScoreDistribution: (...args: unknown[]) => mockGetScoreDist(...args) as unknown,
+  getSystemHealth: (...args: unknown[]) => mockGetSystemHealth(...args) as unknown,
 }));
 
 // ---------------------------------------------------------------------------
@@ -84,13 +104,16 @@ describe('AdminOverview page', () => {
     mockGetOverview.mockResolvedValue(MOCK_OVERVIEW);
     mockGetTrends.mockResolvedValue(MOCK_TRENDS);
     mockGetScoreDist.mockResolvedValue(MOCK_DIST);
+    mockGetSystemHealth.mockResolvedValue(MOCK_SYSTEM_HEALTH);
   });
 
+  // The aurora redesign changed the page h1 from "Platform Overview" to
+  // "Admin Overview". The intent is still "verify the page heading renders".
   it('renders the page heading', async () => {
     renderOverview();
     await waitFor(() => {
       expect(
-        screen.getByRole('heading', { name: /platform overview/i }),
+        screen.getByRole('heading', { name: /admin overview/i }),
       ).toBeInTheDocument();
     });
   });

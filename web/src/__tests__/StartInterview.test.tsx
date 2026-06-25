@@ -111,7 +111,7 @@ describe('StartInterview page', () => {
     localStorage.removeItem('intants:interview-avatar');
   });
 
-  it('renders the form with all expected fields', () => {
+  it('renders the form with all expected fields', async () => {
     renderPage();
     expect(screen.getByRole('heading', { name: /start an interview/i })).toBeInTheDocument();
     expect(screen.getByLabelText(/job title/i)).toBeInTheDocument();
@@ -119,8 +119,10 @@ describe('StartInterview page', () => {
     expect(screen.getByLabelText(/job description/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/experience level/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/interview language/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /start interview/i })).toBeInTheDocument();
-    // Avatar step heading
+    // The submit button text depends on consent state (loaded async).
+    // Wait for consent to resolve (consented=true) → button reads "Start Interview".
+    await screen.findByRole('button', { name: /start interview/i });
+    // Avatar step heading is rendered statically
     expect(screen.getByText(/choose your interviewer/i)).toBeInTheDocument();
   });
 
@@ -151,7 +153,9 @@ describe('StartInterview page', () => {
   it('shows validation error when title is empty on submit', async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.click(screen.getByRole('button', { name: /start interview/i }));
+    // Wait for consent to load (consented=true) so the submit button reads "Start Interview"
+    const submitBtn = await screen.findByRole('button', { name: /start interview/i });
+    await user.click(submitBtn);
     await waitFor(() => {
       expect(screen.getByRole('alert', { hidden: false })).toHaveTextContent(
         /job title is required/i,
@@ -196,11 +200,10 @@ describe('StartInterview page', () => {
 
     const user = userEvent.setup();
     renderPage();
-    // Wait until consent state is resolved (false)
-    await waitFor(() => expect(mockGetConsentStatus).toHaveBeenCalled());
-
+    // Wait until consent state is resolved (false) — button text becomes "Accept consent to begin"
+    const submitBtn = await screen.findByRole('button', { name: /accept consent to begin/i });
     await user.type(screen.getByLabelText(/job title/i), 'QA Engineer');
-    await user.click(screen.getByRole('button', { name: /start interview/i }));
+    await user.click(submitBtn);
 
     await waitFor(() => {
       expect(screen.getByRole('dialog', { name: /data & privacy consent/i })).toBeInTheDocument();
@@ -221,10 +224,11 @@ describe('StartInterview page', () => {
 
     const user = userEvent.setup();
     renderPage();
-    await waitFor(() => expect(mockGetConsentStatus).toHaveBeenCalled());
+    // Wait for consent to resolve (false) — button becomes "Accept consent to begin"
+    const submitBtn = await screen.findByRole('button', { name: /accept consent to begin/i });
 
     await user.type(screen.getByLabelText(/job title/i), 'QA');
-    await user.click(screen.getByRole('button', { name: /start interview/i }));
+    await user.click(submitBtn);
 
     // Modal should appear
     const agreeBtn = await screen.findByRole('button', { name: /i agree/i });
@@ -327,13 +331,18 @@ describe('StartInterview page', () => {
     renderPage();
     await waitFor(() => expect(mockGetConsentStatus).toHaveBeenCalled());
 
-    // Error message shown
-    await waitFor(() => {
-      expect(screen.getByText(/could not load avatar list/i)).toBeInTheDocument();
-    });
+    // The avatar query has retry:1, so the error panel appears after one retry.
+    // Allow extra time for the retry delay (default ~1 s exponential back-off).
+    await waitFor(
+      () => {
+        expect(screen.getByText(/could not load avatar list/i)).toBeInTheDocument();
+      },
+      { timeout: 5000 },
+    );
 
     // User can still fill and submit the form
     await user.type(screen.getByLabelText(/job title/i), 'Dev');
+    // Consent is true so button reads "Start Interview"
     await user.click(screen.getByRole('button', { name: /start interview/i }));
 
     await waitFor(() => {
