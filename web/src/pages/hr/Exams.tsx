@@ -1,76 +1,113 @@
 // Exams — HR MCQ exam list + create (HR workflow Phase 2).
+// Layout: faithfully reproduces anterview-pages/src/screens/hr/Exams.tsx
+//   (header + create-new dashed tile + card grid with status/Qs/actions).
+// Behavior: all live mutations/queries from the previous version preserved.
+//   Status taxonomy: published → forest/live; draft → neutral/not-published.
+//   Inline create form from the previous version retained inside the new layout.
 
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { motion } from 'framer-motion';
-import { ClipboardList, Plus, ChevronRight, FileQuestion, Users2 } from 'lucide-react';
 import { listExams, createExam, type ExamSummary } from '@/api/exams';
 import { toast } from '@/lib/toast';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { Input } from '@/components/ui/input';
-import { Skeleton } from '@/components/ui/skeleton';
+import { cn } from '@/lib/utils';
+import { Reveal } from '@/design/components/Reveal';
+import {
+  GlassCard,
+  Pill,
+  StatusTag,
+  Field,
+  ToggleSwitch,
+} from '@/design/components/primitives';
+import { Plus, Pencil, BarChart3, Sparkles } from '@/design/components/icons';
 
-const inputCls =
-  'w-full rounded-[9px] border border-border bg-background px-3 py-2 text-sm text-foreground ' +
-  'placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring transition-colors';
+// ── Status → design tone mapping ─────────────────────────────────────────────
+type ToneKey = 'forest' | 'neutral' | 'amber';
 
-type BadgeVariant = 'success' | 'secondary' | 'warning';
-
-function statusBadgeVariant(s: string): { label: string; variant: BadgeVariant } {
-  switch (s) {
-    case 'published':
-      return { label: 'Published', variant: 'success' };
-    case 'closed':
-      return { label: 'Closed', variant: 'secondary' };
-    default:
-      return { label: 'Draft', variant: 'warning' };
-  }
+function statusTone(s: string): ToneKey {
+  if (s === 'published') return 'forest';
+  if (s === 'closed') return 'neutral';
+  return 'amber';
 }
 
-function ExamRow({ e }: { e: ExamSummary }) {
+function statusLabel(s: string): string {
+  if (s === 'published') return 'Live';
+  if (s === 'closed') return 'Closed';
+  return 'Draft';
+}
+
+// ── Exam card (design layout) ─────────────────────────────────────────────────
+function ExamCard({ e }: { e: ExamSummary }) {
   const navigate = useNavigate();
-  const { label, variant } = statusBadgeVariant(e.status);
+  const tone = statusTone(e.status);
+  const label = statusLabel(e.status);
+  const isPublished = e.status === 'published';
+
   return (
-    <button
-      type="button"
-      onClick={() => navigate(`/hr/exams/${e.id}`)}
-      className="w-full rounded-xl border border-border bg-card p-3 text-left shadow-card transition-shadow hover:border-primary/30 hover:shadow-card-hover"
-    >
-      <div className="flex items-center gap-3">
-        <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-[9px] bg-secondary text-foreground">
-          <ClipboardList className="h-5 w-5" aria-hidden="true" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="truncate text-sm font-medium text-foreground">{e.title}</p>
-            <Badge variant={variant}>{label}</Badge>
-          </div>
-          <p className="mt-0.5 flex items-center gap-3 text-xs text-muted-foreground">
-            <span className="flex items-center gap-1">
-              <FileQuestion className="h-3.5 w-3.5 text-muted-foreground/60" aria-hidden="true" /> {e.question_count} questions
-            </span>
-            <span className="flex items-center gap-1">
-              <Users2 className="h-3.5 w-3.5 text-muted-foreground/60" aria-hidden="true" /> {e.attempt_count} attempts
-            </span>
-            <span>pass ≥ {e.pass_threshold}%</span>
-          </p>
-        </div>
-        <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+    <GlassCard hover className="flex h-full flex-col p-5">
+      {/* Status + question count */}
+      <div className="mb-3.5 flex items-center justify-between">
+        <StatusTag tone={tone} dot={isPublished}>
+          {label}
+        </StatusTag>
+        <span className="font-mono text-[12px] text-[#70757c]">{e.question_count} Qs</span>
       </div>
-    </button>
+
+      {/* Title */}
+      <h3 className="text-[16px] font-semibold line-clamp-2">{e.title}</h3>
+
+      {/* Meta */}
+      <div className="mt-1 text-[12.5px] text-[#70757c]">pass ≥ {e.pass_threshold}%</div>
+
+      {/* Attempts / not-published */}
+      {isPublished ? (
+        <div className="mt-4 flex items-center gap-4 text-[12.5px] text-[#888b91]">
+          <span>{e.attempt_count} attempts</span>
+        </div>
+      ) : (
+        <div className="mt-4 text-[12.5px] text-[#70757c]">Not published yet</div>
+      )}
+
+      {/* Actions */}
+      <div className="mt-auto flex gap-2 pt-4">
+        <button
+          type="button"
+          className="flex-1"
+          onClick={() => navigate(`/hr/exams/${e.id}`)}
+          aria-label={`Edit exam ${e.title}`}
+        >
+          <Pill variant="ghost" className="w-full py-2 text-[12.5px]">
+            <Pencil size={14} aria-hidden="true" /> Edit
+          </Pill>
+        </button>
+        {isPublished && (
+          <button
+            type="button"
+            className="flex-1"
+            onClick={() => navigate(`/hr/exams/${e.id}/results`)}
+            aria-label={`View results for exam ${e.title}`}
+          >
+            <Pill variant="accent" className="w-full py-2 text-[12.5px]">
+              <BarChart3 size={14} aria-hidden="true" /> Results
+            </Pill>
+          </button>
+        )}
+      </div>
+    </GlassCard>
   );
 }
 
+// ── Page ──────────────────────────────────────────────────────────────────────
 export default function Exams() {
   const qc = useQueryClient();
   const navigate = useNavigate();
+
+  // Create-form state
   const [title, setTitle] = useState('');
   const [threshold, setThreshold] = useState('60');
   const [minutes, setMinutes] = useState('');
   const [allowRetake, setAllowRetake] = useState(false);
+  const [showForm, setShowForm] = useState(false);
 
   const { data: exams, isLoading } = useQuery({
     queryKey: ['hr', 'exams'],
@@ -89,119 +126,167 @@ export default function Exams() {
       toast.success('Exam created — add questions next');
       setTitle('');
       setMinutes('');
+      setThreshold('60');
+      setAllowRetake(false);
+      setShowForm(false);
       void qc.invalidateQueries({ queryKey: ['hr', 'exams'] });
       navigate(`/hr/exams/${e.id}`);
     },
-    onError: (err: unknown) => toast.error(err instanceof Error ? err.message : 'Create failed'),
+    onError: (err: unknown) =>
+      toast.error(err instanceof Error ? err.message : 'Create failed'),
   });
 
   function onSubmit(ev: React.FormEvent) {
     ev.preventDefault();
-    if (!title.trim()) return toast.error('Give the exam a title.');
+    if (!title.trim()) {
+      toast.error('Give the exam a title.');
+      return;
+    }
     createMut.mutate();
   }
 
   const list = exams ?? [];
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-heading font-semibold text-foreground">MCQ exams</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Author a timed multiple-choice exam, set a pass threshold, share a link, and
-          auto-grade applicants.
-        </p>
+    <div className="mx-auto max-w-[1120px] px-6 py-8 lg:px-8">
+      {/* ── Header ── */}
+      <div className="flex items-end justify-between gap-4">
+        <div>
+          <h1 className="text-[28px] font-semibold tracking-[-1px]">Exams</h1>
+          <p className="mt-1 text-[14px] text-[#888b91]">
+            Build and publish AI interview exams.
+          </p>
+        </div>
       </div>
 
-      {/* Create */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <Plus className="h-4 w-4 text-primary" aria-hidden="true" />
-            New exam
-          </CardTitle>
-          <CardDescription>Create the exam, then add questions and publish.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={onSubmit} className="space-y-3">
-            <Input
-              placeholder="Exam title (e.g. Python Fundamentals Screening)"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              aria-label="Exam title"
-            />
-            <div className="grid gap-3 sm:grid-cols-3">
-              <label className="text-sm">
-                <span className="mb-1 block text-xs text-muted-foreground">Pass threshold %</span>
-                <input
+      {/* ── Inline create form ── */}
+      {showForm && (
+        <Reveal delay={0.04}>
+          <GlassCard feature className="mt-6 p-5">
+            <h3 className="mb-4 text-[16px] font-semibold">New exam</h3>
+            <form onSubmit={onSubmit} className="space-y-4">
+              <Field
+                label="Exam title"
+                placeholder="e.g. Python Fundamentals Screening"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                aria-label="Exam title"
+                required
+              />
+              <div className="grid gap-3 sm:grid-cols-3">
+                <Field
+                  label="Pass threshold %"
                   type="number"
                   min={0}
                   max={100}
-                  className={inputCls}
                   value={threshold}
                   onChange={(e) => setThreshold(e.target.value)}
                   aria-label="Pass threshold percent"
                 />
-              </label>
-              <label className="text-sm">
-                <span className="mb-1 block text-xs text-muted-foreground">Time limit (min)</span>
-                <input
+                <Field
+                  label="Time limit (min)"
                   type="number"
                   min={1}
                   placeholder="none"
-                  className={inputCls}
                   value={minutes}
                   onChange={(e) => setMinutes(e.target.value)}
-                  aria-label="Time limit minutes"
+                  aria-label="Time limit in minutes"
                 />
-              </label>
-              <label className="flex items-end gap-2 pb-2 text-sm text-muted-foreground">
-                <input
-                  type="checkbox"
-                  checked={allowRetake}
-                  onChange={(e) => setAllowRetake(e.target.checked)}
-                  className="h-4 w-4 accent-primary"
-                />
-                <span>Allow retake</span>
-              </label>
-            </div>
-            <Button type="submit" disabled={createMut.isPending} className="gap-1.5">
-              <Plus className="h-4 w-4" aria-hidden="true" />
-              {createMut.isPending ? 'Creating…' : 'Create exam'}
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
+                <div className="flex items-end gap-3 pb-1">
+                  <ToggleSwitch
+                    checked={allowRetake}
+                    onChange={setAllowRetake}
+                    label="Allow retake"
+                  />
+                  <span className="text-[13px] text-[#b8babf]">Allow retake</span>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <Pill
+                  type="submit"
+                  disabled={createMut.isPending}
+                  aria-busy={createMut.isPending}
+                  className="gap-1.5"
+                >
+                  <Plus size={16} aria-hidden="true" />
+                  {createMut.isPending ? 'Creating…' : 'Create exam'}
+                </Pill>
+                <Pill
+                  type="button"
+                  variant="ghost"
+                  onClick={() => setShowForm(false)}
+                  disabled={createMut.isPending}
+                >
+                  Cancel
+                </Pill>
+              </div>
+            </form>
+          </GlassCard>
+        </Reveal>
+      )}
 
-      {/* List */}
-      <div className="space-y-2">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
-          <ClipboardList className="h-4 w-4 text-primary" aria-hidden="true" />
-          Your exams ({list.length})
-        </h2>
-        {isLoading ? (
-          <Skeleton className="h-20 w-full rounded-xl" />
-        ) : list.length === 0 ? (
-          <p className="py-6 text-center text-sm text-muted-foreground">
-            No exams yet — create one above.
-          </p>
-        ) : (
-          <motion.div
-            initial="hidden"
-            animate="visible"
-            variants={{ hidden: {}, visible: { transition: { staggerChildren: 0.04 } } }}
-            className="space-y-2"
-          >
-            {list.map((e) => (
-              <motion.div
-                key={e.id}
-                variants={{ hidden: { opacity: 0, y: 8 }, visible: { opacity: 1, y: 0 } }}
-              >
-                <ExamRow e={e} />
-              </motion.div>
-            ))}
-          </motion.div>
+      {/* ── Exam grid ── */}
+      <div
+        className={cn(
+          'mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3',
         )}
+        aria-busy={isLoading ? 'true' : undefined}
+        aria-label={isLoading ? 'Loading exams' : undefined}
+      >
+        {/* "Create new" dashed tile — always first */}
+        <button
+          type="button"
+          onClick={() => setShowForm(true)}
+          className={cn(
+            'flex min-h-[212px] flex-col items-center justify-center gap-2.5',
+            'rounded-[24px] border-[1.5px] border-dashed border-[rgba(var(--accent-rgb),0.4)]',
+            'bg-[rgba(var(--accent-rgb),0.06)] text-[#60a5fa]',
+            'transition-colors hover:bg-[rgba(var(--accent-rgb),0.1)]',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-black',
+          )}
+          aria-label="Create new exam"
+        >
+          <Plus size={28} aria-hidden="true" />
+          <span className="text-[14px] font-semibold">
+            {list.length === 0 ? 'Create your first exam' : 'Create new exam'}
+          </span>
+        </button>
+
+        {/* Loading skeletons */}
+        {isLoading &&
+          [0, 1, 2].map((i) => (
+            <div
+              key={i}
+              className="h-[212px] w-full animate-pulse rounded-[24px] bg-white/[0.04]"
+            />
+          ))}
+
+        {/* Empty hint when no exams */}
+        {!isLoading && list.length === 0 && (
+          <div
+            className={cn(
+              'flex flex-col items-center justify-center gap-3 rounded-[24px]',
+              'border border-dashed border-white/[0.08] bg-white/[0.02] p-8 text-center',
+              'sm:col-span-1 lg:col-span-2',
+            )}
+          >
+            <span className="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.06] text-[#888b91]">
+              <Sparkles size={24} aria-hidden="true" />
+            </span>
+            <p className="text-[13px] text-[#888b91]">
+              No exams yet. Create one, add questions, then publish to start receiving
+              attempts.
+            </p>
+          </div>
+        )}
+
+        {/* Exam cards */}
+        {!isLoading &&
+          list.map((e) => (
+            <Reveal key={e.id} dir="zoom">
+              <ExamCard e={e} />
+            </Reveal>
+          ))}
       </div>
     </div>
   );

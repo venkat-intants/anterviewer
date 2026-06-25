@@ -5,16 +5,18 @@ import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "@/lib/utils"
 
 const buttonVariants = cva(
-  // Apple pill: 999px radius, no shadow. Azure primary is the sole CTA color.
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-full text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70 focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  // Apple pill: 999px radius. Azure primary is the sole CTA color. Redesign adds
+  // a smooth multi-prop transition + a subtle press-scale for tactile feedback.
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-full text-sm font-medium ring-offset-background transition-[transform,background-color,box-shadow,color,border-color] duration-200 ease-out active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70 focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary/90",
+        // Primary CTA lights up with the signature ring-glow on hover.
+        default: "bg-primary text-primary-foreground hover:bg-primary/90 hover:shadow-glow",
         destructive:
-          "bg-destructive text-destructive-foreground hover:bg-destructive/90",
+          "bg-destructive text-destructive-foreground hover:bg-destructive/90 hover:shadow-[0_8px_30px_-8px_hsl(var(--destructive)/0.6)]",
         outline:
-          "border border-input bg-card hover:bg-accent hover:text-accent-foreground",
+          "border border-input bg-card hover:bg-accent hover:text-accent-foreground hover:border-ring/40",
         secondary:
           "bg-secondary text-secondary-foreground hover:bg-secondary/80",
         ghost: "hover:bg-accent hover:text-accent-foreground",

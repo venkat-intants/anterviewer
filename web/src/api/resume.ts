@@ -108,14 +108,15 @@ export async function listResumes(): Promise<ResumeVersionItem[]> {
 
 /**
  * Fetch the currently active resume version metadata.
- * Throws (HTTP 404) if no resume has been uploaded yet.
+ * Returns null when no resume has been uploaded yet ("no resume on file" is a
+ * normal empty state — the API returns 200/null, not a 404 error).
  */
-export async function getCurrentResume(): Promise<ResumeCurrentResponse> {
+export async function getCurrentResume(): Promise<ResumeCurrentResponse | null> {
   if (USE_MOCK) {
     await simulateDelay(300);
     return mockCurrentResume;
   }
-  return apiGet<ResumeCurrentResponse>('/users/me/resume');
+  return apiGet<ResumeCurrentResponse | null>('/users/me/resume');
 }
 
 // ---------------------------------------------------------------------------

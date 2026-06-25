@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     sentry_dsn: str = ""
     cors_allowed_origins: str = "http://localhost:5173"
 
+    # Peer microservice base URLs — used by the /admin/system/health aggregator.
+    # Defaults to localhost dev ports; override in cloud via env. All optional so a
+    # stale .env never crashes startup.
+    interview_core_url: str = "http://localhost:8001"
+    data_gateway_url: str = "http://localhost:8002"
+    feedback_billing_url: str = "http://localhost:8003"
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]

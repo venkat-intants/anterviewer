@@ -64,6 +64,15 @@ class User(Base):
     # B-031 — resume document storage (single-column for B-033 enrichment)
     resume_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     resume_s3_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Self-service profile (editable candidate / HR / admin profile).
+    # avatar_url holds a small client-downscaled data URI or an external URL.
+    avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    headline: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bio: Mapped[str | None] = mapped_column(Text, nullable=True)
+    employment_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    desired_roles: Mapped[str | None] = mapped_column(Text, nullable=True)
+    official_email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    location: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # HR workflow (Phase 0) — multi-tenant scoping + forced first-login reset.
     # company_id is NULL for super_admin / platform users.
@@ -753,4 +762,32 @@ class Scorecard(Base):
     transcript_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     scorer_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     scorer_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+
+
+# ---------------------------------------------------------------------------
+# Notifications (migration 20260624_0001)
+# ---------------------------------------------------------------------------
+
+
+class Notification(Base):
+    """In-app notification feed item backing the AppShell header bell.
+
+    Produced by event handlers (HR invite sent, interview completed, welcome on
+    registration). read_at NULL = unread; the bell badge counts unread rows.
+    kind: welcome | invite_sent | interview_completed | applicant_scored |
+          decision | system — opaque string; the UI maps it to an icon/tone.
+    """
+
+    __tablename__ = "notifications"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(Text, default="system", nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    link: Mapped[str | None] = mapped_column(Text, nullable=True)
+    read_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))

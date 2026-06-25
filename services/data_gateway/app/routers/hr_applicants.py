@@ -92,6 +92,9 @@ class ApplicantOut(BaseModel):
     ats_recommendation: str | None
     ats_summary: str | None
     created_at: str
+    # The linked candidate user (set once the applicant redeems an interview
+    # invite) — lets HR open the candidate's full profile. None until provisioned.
+    user_id: str | None = None
 
 
 class StatusUpdate(BaseModel):
@@ -121,6 +124,7 @@ def _to_out(a: Applicant) -> ApplicantOut:
         ats_recommendation=a.ats_recommendation,
         ats_summary=a.ats_summary,
         created_at=a.created_at.isoformat(),
+        user_id=str(a.user_id) if a.user_id else None,
     )
 
 

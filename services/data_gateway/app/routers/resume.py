@@ -535,18 +535,20 @@ async def list_resumes(
 @router.get(
     "/resume",
     status_code=status.HTTP_200_OK,
-    response_model=ResumeCurrentResponse,
+    response_model=ResumeCurrentResponse | None,
     summary="Get the current resume metadata",
     description=(
-        "Returns metadata for the currently active resume version. "
-        "404 if no resume has been uploaded yet."
+        "Returns metadata for the currently active resume version, or null when "
+        "no resume has been uploaded yet. 'No resume on file' is a normal empty "
+        "state — not an error — so this returns 200/null rather than 404 (which "
+        "would surface as a console/network error in the browser)."
     ),
 )
 async def get_current_resume(
     current_user: CurrentUserDep,
     db: DbSessionDep,
-) -> ResumeCurrentResponse:
-    """Return the current resume version for the authenticated user."""
+) -> ResumeCurrentResponse | None:
+    """Return the current resume version for the authenticated user, or None."""
     user_uuid = uuid.UUID(current_user.user_id)
 
     result = await db.execute(
@@ -557,10 +559,7 @@ async def get_current_resume(
     resume: Resume | None = result.scalar_one_or_none()
 
     if resume is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No resume uploaded yet.",
-        )
+        return None
 
     download_url = await _presign_url(resume.resume_s3_key)
 

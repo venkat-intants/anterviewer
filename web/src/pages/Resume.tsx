@@ -1,8 +1,7 @@
-// Resume — Resume manager page. Renders inside AppShell.
-// Shows: current resume with "Current" badge + download,
-// upload new version (FileUploadZone with progress),
-// version list with set-as-current + delete (confirm Dialog) actions.
-// All mutations use React Query optimistic invalidation.
+// Resume — Resume manager page. Renders inside AppShell (no shell here).
+// Design skin applied; all logic + mutations preserved verbatim.
+// Shows: upload zone, current-resume card, version history with set-current/delete.
+// "Extracted skills" (design-only, no API) is intentionally omitted.
 
 import { useState, useCallback, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -12,10 +11,10 @@ import {
   FileText,
   Download,
   Trash2,
-  CheckCircle2,
   Upload,
   AlertCircle,
-} from 'lucide-react';
+  FileCheck2,
+} from '@/design/components/icons';
 import {
   listResumes,
   getCurrentResume,
@@ -28,11 +27,9 @@ import FileUploadZone from '@/components/FileUploadZone';
 import { toast } from '@/lib/toast';
 import { formatDate } from '@/lib/formatters';
 import { cn } from '@/lib/utils';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
+import { GlassCard, StatusTag, Pill } from '@/design/components/primitives';
+import { Reveal } from '@/design/components/Reveal';
 import { Button } from '@/components/ui/button';
-import { Skeleton } from '@/components/ui/skeleton';
-import { Separator } from '@/components/ui/separator';
 import {
   Dialog,
   DialogContent,
@@ -66,14 +63,20 @@ const fadeUp: Variants = {
   visible: { opacity: 1, y: 0, transition: { duration: 0.35, ease: [0.22, 1, 0.36, 1] } },
 };
 
+// ── Inline skeleton (avoids @/components/ui/skeleton — shadcn forbidden on this page) ──
+
+function SkeletonBlock({ className }: { className?: string }) {
+  return <div className={cn('animate-pulse rounded-[24px] bg-white/[0.06]', className)} />;
+}
+
 // ── Sub-components ─────────────────────────────────────────────────────────────
 
 function LoadingSkeletons() {
   return (
     <div className="space-y-4" aria-busy="true" aria-label="Loading resume data">
-      <Skeleton className="h-28 w-full rounded-xl" />
-      <Skeleton className="h-40 w-full rounded-xl" />
-      <Skeleton className="h-20 w-full rounded-xl" />
+      <SkeletonBlock className="h-28 w-full" />
+      <SkeletonBlock className="h-40 w-full" />
+      <SkeletonBlock className="h-20 w-full" />
     </div>
   );
 }
@@ -96,18 +99,16 @@ function EmptyState({ onUploadSuccess }: { onUploadSuccess: () => void }) {
   );
 
   return (
-    <div
-      className="flex flex-col items-center justify-center rounded-3xl border border-dashed border-border bg-muted/40 py-16 text-center gap-4"
-      data-testid="resume-empty-state"
+    <div data-testid="resume-empty-state">
+    <GlassCard
+      className="flex flex-col items-center justify-center gap-4 py-16 text-center"
     >
-      <div className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-secondary ring-1 ring-border">
-        <FileText className="h-7 w-7 text-primary" aria-hidden="true" />
+      <div className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-[rgba(var(--accent-rgb),0.1)] ring-1 ring-[rgba(var(--accent-rgb),0.2)]">
+        <FileText className="h-7 w-7 text-[#60a5fa]" aria-hidden="true" />
       </div>
       <div>
-        <p className="text-body font-semibold text-foreground">{t('resume.noResumeTitle')}</p>
-        <p className="mt-1 text-body-sm text-muted-foreground">
-          {t('resume.noResumeDesc')}
-        </p>
+        <p className="text-[15px] font-semibold text-white">{t('resume.noResumeTitle')}</p>
+        <p className="mt-1 text-[13px] text-[#888b91]">{t('resume.noResumeDesc')}</p>
       </div>
       <div className="w-full max-w-sm px-4">
         <FileUploadZone
@@ -117,11 +118,12 @@ function EmptyState({ onUploadSuccess }: { onUploadSuccess: () => void }) {
           onUpload={handleUpload}
         />
       </div>
+    </GlassCard>
     </div>
   );
 }
 
-// Delete confirm dialog
+// Delete confirm dialog — preserved verbatim from live logic
 interface DeleteDialogProps {
   open: boolean;
   filename: string;
@@ -137,9 +139,7 @@ function DeleteDialog({ open, filename, isPending, onConfirm, onCancel }: Delete
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{t('resume.deleteTitle')}</DialogTitle>
-          <DialogDescription>
-            {t('resume.deleteDesc', { filename })}
-          </DialogDescription>
+          <DialogDescription>{t('resume.deleteDesc', { filename })}</DialogDescription>
         </DialogHeader>
         <DialogFooter className="gap-2">
           <Button variant="outline" onClick={onCancel} disabled={isPending}>
@@ -159,7 +159,7 @@ function DeleteDialog({ open, filename, isPending, onConfirm, onCancel }: Delete
   );
 }
 
-// Single resume version row
+// Single resume version row — reskinned with design language
 interface ResumeVersionRowProps {
   item: ResumeVersionItem;
   onSetCurrent: (id: string) => void;
@@ -180,76 +180,90 @@ function ResumeVersionRow({
     <motion.div
       variants={fadeUp}
       className={cn(
-        'flex flex-col sm:flex-row sm:items-center gap-3 rounded-xl border border-border bg-white p-4 transition-shadow hover:shadow-card-hover',
-        item.is_current && 'border-primary/30 bg-muted ring-1 ring-primary/10',
+        'flex flex-col gap-3 rounded-[20px] border p-4 transition-colors sm:flex-row sm:items-center',
+        item.is_current
+          ? 'border-[rgba(var(--accent-rgb),0.25)] bg-[linear-gradient(160deg,rgba(0,27,51,0.6),rgba(3,7,25,0.6))]'
+          : 'border-white/[0.08] bg-[#0f0f10] hover:bg-white/[0.02]',
       )}
       data-testid={`resume-version-${item.resume_id}`}
     >
       {/* File icon + info */}
-      <div className="flex items-start gap-3 flex-1 min-w-0">
-        <div
+      <div className="flex flex-1 min-w-0 items-start gap-3">
+        <span
           className={cn(
-            'flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px]',
+            'flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px]',
             item.is_current
-              ? 'bg-secondary text-foreground'
-              : 'bg-secondary text-muted-foreground',
+              ? 'bg-[rgba(39,201,63,0.14)]'
+              : 'bg-white/[0.06]',
           )}
         >
-          <FileText className="h-4 w-4" aria-hidden="true" />
-        </div>
+          {item.is_current ? (
+            <FileCheck2
+              className="h-5 w-5 text-[#27c93f]"
+              aria-hidden="true"
+            />
+          ) : (
+            <FileText
+              className="h-5 w-5 text-[#888b91]"
+              aria-hidden="true"
+            />
+          )}
+        </span>
         <div className="min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex flex-wrap items-center gap-2">
             <p
-              className="text-body-sm font-medium text-foreground truncate"
+              className="truncate text-[13.5px] font-medium text-white"
               title={item.filename}
             >
               {item.filename}
             </p>
             {item.is_current && (
-              <Badge variant="accent" className="text-xs gap-1">
-                <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
+              <StatusTag tone="forest" dot>
                 {t('resume.currentBadge')}
-              </Badge>
+              </StatusTag>
             )}
           </div>
-          <p className="mt-0.5 text-caption text-muted-foreground">
-            {t('resume.uploaded')} {formatDate(item.uploaded_at)} · {formatBytes(item.text_length)} {t('resume.extracted')}
+          <p className="mt-0.5 text-[12px] text-[#888b91]">
+            {t('resume.uploaded')} {formatDate(item.uploaded_at)} ·{' '}
+            {formatBytes(item.text_length)} {t('resume.extracted')}
           </p>
         </div>
       </div>
 
       {/* Actions */}
-      <div className="flex items-center gap-2 shrink-0 flex-wrap">
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
         {item.download_url && (
-          <Button variant="ghost" size="sm" asChild className="gap-1.5">
-            <a href={item.download_url} download={item.filename} aria-label={`Download ${item.filename}`}>
-              <Download className="h-3.5 w-3.5" aria-hidden="true" />
-              {t('resume.download')}
-            </a>
-          </Button>
+          <a
+            href={item.download_url}
+            download={item.filename}
+            aria-label={`Download ${item.filename}`}
+            className="inline-flex items-center gap-1.5 rounded-[9999px] border border-white/10 bg-white/[0.06] px-3.5 py-1.5 text-[12.5px] font-semibold text-white transition-colors hover:bg-white/[0.1] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+          >
+            <Download className="h-3.5 w-3.5" aria-hidden="true" />
+            {t('resume.download')}
+          </a>
         )}
         {!item.is_current && (
-          <Button
-            variant="outline"
-            size="sm"
+          <Pill
+            variant="ghost"
+            className="py-1.5 px-3.5 text-[12.5px]"
             onClick={() => onSetCurrent(item.resume_id)}
             disabled={isSettingCurrent}
             aria-busy={isSettingCurrent}
             aria-label={`Set ${item.filename} as current resume`}
           >
             {isSettingCurrent ? t('resume.setting') : t('resume.setAsCurrent')}
-          </Button>
+          </Pill>
         )}
-        <Button
-          variant="ghost"
-          size="sm"
+        <Pill
+          variant="danger"
+          className="py-1.5 px-3 text-[12.5px]"
           onClick={() => onDelete(item)}
           disabled={isDeleting}
-          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
           aria-label={`Delete ${item.filename}`}
         >
           <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-        </Button>
+        </Pill>
       </div>
     </motion.div>
   );
@@ -262,7 +276,7 @@ export default function Resume() {
   const queryClient = useQueryClient();
   const [deleteTarget, setDeleteTarget] = useState<ResumeVersionItem | null>(null);
 
-  // Queries
+  // Queries — keys preserved exactly: ['resumes'] and ['resume','current']
   const {
     data: resumes,
     isLoading: resumesLoading,
@@ -289,7 +303,7 @@ export default function Resume() {
 
   const isLoading = resumesLoading || currentLoading;
 
-  // Set-current mutation
+  // Set-current mutation — 3-key invalidation preserved
   const setCurrentMutation = useMutation({
     mutationFn: (id: string) => setCurrentResume(id),
     onSuccess: () => {
@@ -303,7 +317,7 @@ export default function Resume() {
     },
   });
 
-  // Delete mutation
+  // Delete mutation — 3-key invalidation preserved
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteResume(id),
     onSuccess: () => {
@@ -319,7 +333,7 @@ export default function Resume() {
     },
   });
 
-  // Upload handler (passed to FileUploadZone)
+  // Upload handler — 3-key invalidation preserved
   const handleUpload = useCallback(
     (file: File, onProgress: (pct: number) => void) => {
       return uploadResume(file, undefined, onProgress).then((result) => {
@@ -333,7 +347,7 @@ export default function Resume() {
     [queryClient, t],
   );
 
-  // Fire error toast once per distinct error transition — never on every render.
+  // Error toast — fires once per distinct error transition
   useEffect(() => {
     if (resumesError || currentError) {
       toast.error(t('resume.loadError'));
@@ -349,140 +363,147 @@ export default function Resume() {
       initial="hidden"
       animate="visible"
       variants={stagger}
-      className="space-y-6"
+      className="mx-auto max-w-[1000px] space-y-6 px-6 py-8 lg:px-8"
     >
       {/* Page heading */}
       <motion.div variants={fadeUp}>
-        <h1 id="resume-heading" className="text-heading font-semibold text-foreground">
-          {t('resume.pageTitle')}
-        </h1>
-        <p className="mt-1 text-body-sm text-muted-foreground">
-          {t('resume.pageDesc')}
-        </p>
+        <Reveal>
+          <h1
+            id="resume-heading"
+            className="text-[28px] font-semibold tracking-[-1px] text-white"
+          >
+            {t('resume.pageTitle')}
+          </h1>
+          <p className="mt-1 text-[14px] text-[#888b91]">{t('resume.pageDesc')}</p>
+        </Reveal>
       </motion.div>
 
       {isLoading ? (
         <LoadingSkeletons />
       ) : !hasResumes ? (
         <motion.div variants={fadeUp}>
-          <EmptyState onUploadSuccess={() => void queryClient.invalidateQueries({ queryKey: ['resumes'] })} />
+          <EmptyState
+            onUploadSuccess={() =>
+              void queryClient.invalidateQueries({ queryKey: ['resumes'] })
+            }
+          />
         </motion.div>
       ) : (
-        <>
-          {/* Current resume highlight */}
-          {currentResume && (
-            <motion.div variants={fadeUp}>
-              <Card className="shadow-elevated border-primary/25 bg-muted ring-1 ring-primary/10">
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-body-lg font-semibold text-foreground flex items-center gap-2">
-                    <CheckCircle2 className="h-4 w-4 text-primary" aria-hidden="true" />
-                    {t('resume.activeResumeTitle')}
-                  </CardTitle>
-                  <CardDescription className="text-muted-foreground">
-                    {t('resume.activeResumeDesc')}
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <div className="flex items-center justify-between flex-wrap gap-3">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px] bg-secondary text-foreground">
-                        <FileText className="h-4 w-4" aria-hidden="true" />
-                      </div>
-                      <div className="min-w-0">
-                        <p
-                          className="text-body-sm font-medium text-foreground truncate"
-                          title={currentResume.filename}
-                        >
-                          {currentResume.filename}
-                        </p>
-                        <p className="text-caption text-muted-foreground mt-0.5">
-                          {t('resume.uploaded')} {formatDate(currentResume.uploaded_at)}
-                        </p>
-                      </div>
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-5">
+          {/* Left column: current-resume card + upload zone */}
+          <div className="lg:col-span-2 space-y-5">
+            <Reveal dir="left">
+              {/* Current resume highlight card */}
+              {currentResume && (
+                <GlassCard className="p-5">
+                  <div className="flex items-center gap-3">
+                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[12px] bg-[rgba(39,201,63,0.14)]">
+                      <FileCheck2 size={22} className="text-[#27c93f]" aria-hidden="true" />
+                    </span>
+                    <div className="min-w-0">
+                      <p
+                        className="truncate text-[14px] font-medium text-white"
+                        title={currentResume.filename}
+                      >
+                        {currentResume.filename}
+                      </p>
+                      <p className="text-[12px] text-[#888b91]">
+                        {formatBytes(currentResume.text_length)} ·{' '}
+                        {t('resume.uploaded')} {formatDate(currentResume.uploaded_at)}
+                      </p>
                     </div>
-                    {currentResume.download_url && (
-                      <Button variant="outline" size="sm" asChild className="gap-1.5 shrink-0">
-                        <a
-                          href={currentResume.download_url}
-                          download={currentResume.filename}
-                          aria-label={`Download ${currentResume.filename}`}
-                        >
-                          <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                          Download
-                        </a>
-                      </Button>
+                  </div>
+
+                  <div className="mt-4 flex items-center gap-2">
+                    {currentResume.download_url ? (
+                      <a
+                        href={currentResume.download_url}
+                        download={currentResume.filename}
+                        aria-label={`Download ${currentResume.filename}`}
+                        className="inline-flex flex-1 items-center justify-center gap-2 rounded-[9999px] border border-white/10 bg-white/[0.06] px-5 py-2.5 text-[14px] font-semibold text-white transition-colors hover:bg-white/[0.1]"
+                      >
+                        <Download size={15} aria-hidden="true" />
+                        {t('resume.download')}
+                      </a>
+                    ) : (
+                      <Pill variant="ghost" className="flex-1 py-2.5" disabled>
+                        <Download size={15} aria-hidden="true" />
+                        {t('resume.download')}
+                      </Pill>
                     )}
                   </div>
-                </CardContent>
-              </Card>
-            </motion.div>
-          )}
 
-          {/* Error note when current resume query failed */}
-          {currentError && (
-            <motion.div variants={fadeUp}>
-              <div
-                role="alert"
-                className="flex items-center gap-2 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-body-sm text-destructive"
-              >
-                <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
-                {t('resume.currentLoadError')}
-              </div>
-            </motion.div>
-          )}
+                  <StatusTag tone="forest" dot className="mt-4">
+                    {t('resume.activeResumeTitle')}
+                  </StatusTag>
+                </GlassCard>
+              )}
 
-          {/* Upload new version */}
-          <motion.div variants={fadeUp}>
-            <Card className="shadow-card">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-body-lg font-semibold text-foreground flex items-center gap-2">
-                  <Upload className="h-4 w-4 text-primary" aria-hidden="true" />
-                  {t('resume.uploadTitle')}
-                </CardTitle>
-                <CardDescription className="text-muted-foreground">
-                  {t('resume.uploadDesc')}
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
+              {/* Inline currentError alert — role="alert" preserved */}
+              {currentError && (
+                <div
+                  role="alert"
+                  className="flex items-center gap-2 rounded-[16px] border border-[rgba(230,113,79,0.3)] bg-[rgba(230,113,79,0.1)] px-4 py-3 text-[13px] text-[#e6714f]"
+                >
+                  <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  {t('resume.currentLoadError')}
+                </div>
+              )}
+
+              {/* Upload new version */}
+              <GlassCard className="p-5">
+                <div className="mb-3 flex items-center gap-2">
+                  <Upload className="h-4 w-4 text-[#60a5fa]" aria-hidden="true" />
+                  <h2 className="text-[15px] font-semibold text-white">
+                    {t('resume.uploadTitle')}
+                  </h2>
+                </div>
+                <p className="mb-4 text-[12.5px] text-[#888b91]">{t('resume.uploadDesc')}</p>
                 <FileUploadZone
                   label="Resume"
                   accept="application/pdf"
                   maxBytes={RESUME_MAX_BYTES}
                   onUpload={handleUpload}
                 />
-              </CardContent>
-            </Card>
-          </motion.div>
+              </GlassCard>
+            </Reveal>
+          </div>
 
-          <Separator />
-
-          {/* Version history */}
-          <motion.div variants={fadeUp} className="space-y-3">
-            <h2 className="text-body-sm font-semibold text-foreground">
-              {t('resume.versionHistory', { count: resumeList.length })}
-            </h2>
-            <div className="space-y-2" aria-label="Resume version list">
-              {resumeList.map((item) => (
-                <ResumeVersionRow
-                  key={item.resume_id}
-                  item={item}
-                  onSetCurrent={(id) => setCurrentMutation.mutate(id)}
-                  onDelete={(it) => setDeleteTarget(it)}
-                  isSettingCurrent={
-                    setCurrentMutation.isPending &&
-                    setCurrentMutation.variables === item.resume_id
-                  }
-                  isDeleting={
-                    deleteMutation.isPending && deleteTarget?.resume_id === item.resume_id
-                  }
-                />
-              ))}
-            </div>
-          </motion.div>
-        </>
+          {/* Right column: version history list */}
+          <div className="lg:col-span-3">
+            <Reveal dir="right">
+              <GlassCard className="p-5">
+                <h2 className="mb-4 text-[15px] font-semibold text-white">
+                  {t('resume.versionHistory', { count: resumeList.length })}
+                </h2>
+                <div
+                  className="space-y-3"
+                  aria-label="Resume version list"
+                >
+                  {resumeList.map((item) => (
+                    <ResumeVersionRow
+                      key={item.resume_id}
+                      item={item}
+                      onSetCurrent={(id) => setCurrentMutation.mutate(id)}
+                      onDelete={(it) => setDeleteTarget(it)}
+                      isSettingCurrent={
+                        setCurrentMutation.isPending &&
+                        setCurrentMutation.variables === item.resume_id
+                      }
+                      isDeleting={
+                        deleteMutation.isPending &&
+                        deleteTarget?.resume_id === item.resume_id
+                      }
+                    />
+                  ))}
+                </div>
+              </GlassCard>
+            </Reveal>
+          </div>
+        </div>
       )}
 
-      {/* Delete confirm dialog */}
+      {/* Delete confirm dialog — preserved verbatim */}
       <DeleteDialog
         open={deleteTarget !== null}
         filename={deleteTarget?.filename ?? ''}

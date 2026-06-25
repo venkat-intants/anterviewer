@@ -53,6 +53,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db_session
+from app.notifications_util import create_notification
 from app.dependencies import get_auth_provider_dep, get_current_user
 from app.rate_limit import rate_limit
 
@@ -119,17 +120,59 @@ class MeResponse(BaseModel):
     # HR workflow — true when the account still has its bootstrap password and
     # must reset it before doing anything else (drives the force-change redirect).
     must_change_password: bool = False
+    # Editable self-service profile (candidate / HR / admin).
+    phone: str | None = None
+    preferred_language: str | None = None
+    avatar_url: str | None = None
+    headline: str | None = None
+    bio: str | None = None
+    employment_status: str | None = None
+    desired_roles: str | None = None
+    official_email: str | None = None
+    location: str | None = None
+    # Tenant context (read-only on the profile — HR's company is set by admins).
+    company_id: str | None = None
+    company_name: str | None = None
+
+
+# Editable fields whitelist — column name → max length (None = unbounded text).
+_PROFILE_EDITABLE: dict[str, int | None] = {
+    "full_name": 120,
+    "phone": 32,
+    "preferred_language": 8,
+    "linkedin_url": 300,
+    "github_url": 300,
+    "avatar_url": 800_000,  # downscaled data-URI (~tens of KB); generous ceiling
+    "headline": 160,
+    "bio": 2000,
+    "employment_status": 16,
+    "desired_roles": 300,
+    "official_email": 254,
+    "location": 120,
+}
+
+_EMPLOYMENT_STATUSES = {"student", "employed"}
 
 
 class UserProfileUpdate(BaseModel):
-    """Request body for PATCH /auth/me/profile (B-033).
+    """Request body for PATCH /auth/me/profile.
 
-    All fields are optional — only provided fields are persisted.
+    All fields optional — only provided fields are persisted. Covers the
+    editable candidate / HR / admin profile surface.
     """
 
-    full_name: str | None = Field(default=None, min_length=1)
-    linkedin_url: str | None = Field(default=None, description="LinkedIn profile URL")
-    github_url: str | None = Field(default=None, description="GitHub profile URL")
+    full_name: str | None = Field(default=None, min_length=1, max_length=120)
+    phone: str | None = Field(default=None, max_length=32)
+    preferred_language: str | None = Field(default=None, max_length=8)
+    linkedin_url: str | None = Field(default=None, max_length=300)
+    github_url: str | None = Field(default=None, max_length=300)
+    avatar_url: str | None = Field(default=None, description="Data URI or image URL")
+    headline: str | None = Field(default=None, max_length=160)
+    bio: str | None = Field(default=None, max_length=2000)
+    employment_status: str | None = Field(default=None, max_length=16)
+    desired_roles: str | None = Field(default=None, max_length=300)
+    official_email: str | None = Field(default=None, max_length=254)
+    location: str | None = Field(default=None, max_length=120)
 
 
 class OkResponse(BaseModel):
@@ -247,6 +290,7 @@ async def register(
     body: RegisterBody,
     auth: AuthProviderDep,
     response: Response,
+    db: DbSessionDep,
 ) -> AuthTokensResponse:
     """Create a new user and return access token + auth cookies.
 
@@ -277,6 +321,20 @@ async def register(
 
     refresh_ttl_seconds = settings.jwt_refresh_expiry_days * 86400
     _set_auth_cookies(response, tokens.refresh_token, max_age=refresh_ttl_seconds)
+
+    # Seed a welcome notification (best-effort — never block signup on it).
+    try:
+        await create_notification(
+            db,
+            user_id=uuid.UUID(tokens.user_id),
+            kind="welcome",
+            title="Welcome to Anterview",
+            body="Upload your resume and start a practice interview to get your first scorecard.",
+            link="/dashboard",
+        )
+        await db.commit()
+    except Exception:  # noqa: BLE001 — notification must never fail registration
+        await db.rollback()
 
     return AuthTokensResponse(
         access_token=tokens.access_token,
@@ -438,6 +496,48 @@ async def logout(
     return OkResponse()
 
 
+async def _build_me_response(db: object, user_id_str: str, user: object) -> MeResponse:
+    """Assemble the full MeResponse: identity (from the auth provider) + the
+    editable profile columns + read-only company context (single LEFT JOIN)."""
+    result = await db.execute(  # type: ignore[attr-defined]
+        text(
+            "SELECT u.linkedin_url, u.github_url, u.resume_s3_key, u.must_change_password,"
+            " u.phone, u.preferred_language, u.avatar_url, u.headline, u.bio,"
+            " u.employment_status, u.desired_roles, u.official_email, u.location,"
+            " u.company_id, c.name AS company_name"
+            " FROM users u LEFT JOIN companies c ON c.id = u.company_id"
+            " WHERE u.id = :uid"
+        ),
+        {"uid": uuid.UUID(user_id_str)},
+    )
+    row = result.fetchone()
+
+    def g(i: int) -> object | None:
+        return row[i] if row else None
+
+    return MeResponse(
+        user_id=user.user_id,  # type: ignore[attr-defined]
+        full_name=user.full_name,  # type: ignore[attr-defined]
+        email=user.email,  # type: ignore[attr-defined]
+        roles=user.roles,  # type: ignore[attr-defined]
+        linkedin_url=g(0),  # type: ignore[arg-type]
+        github_url=g(1),  # type: ignore[arg-type]
+        has_resume=bool(g(2)),
+        must_change_password=bool(g(3)),
+        phone=g(4),  # type: ignore[arg-type]
+        preferred_language=g(5),  # type: ignore[arg-type]
+        avatar_url=g(6),  # type: ignore[arg-type]
+        headline=g(7),  # type: ignore[arg-type]
+        bio=g(8),  # type: ignore[arg-type]
+        employment_status=g(9),  # type: ignore[arg-type]
+        desired_roles=g(10),  # type: ignore[arg-type]
+        official_email=g(11),  # type: ignore[arg-type]
+        location=g(12),  # type: ignore[arg-type]
+        company_id=str(g(13)) if g(13) else None,
+        company_name=g(14),  # type: ignore[arg-type]
+    )
+
+
 @router.get(
     "/me",
     status_code=status.HTTP_200_OK,
@@ -449,10 +549,7 @@ async def me(
     auth: AuthProviderDep,
     db: DbSessionDep,
 ) -> MeResponse:
-    """Return full profile for the authenticated user (fetched from DB).
-
-    B-033: also returns linkedin_url and github_url.
-    """
+    """Return the full editable profile for the authenticated user."""
     try:
         user = await auth.get_user(current_user.user_id)
     except ValueError as exc:
@@ -461,39 +558,15 @@ async def me(
             detail="User not found.",
         ) from exc
 
-    # B-033: fetch context fields that are not part of the shared User model.
-    # B-031: also surface whether a resume is on file (boolean only — never the text).
-    result = await db.execute(
-        text(
-            "SELECT linkedin_url, github_url, resume_s3_key, must_change_password "
-            "FROM users WHERE id = :uid"
-        ),
-        {"uid": uuid.UUID(current_user.user_id)},
-    )
-    row = result.fetchone()
-    linkedin_url: str | None = row[0] if row else None
-    github_url: str | None = row[1] if row else None
-    has_resume: bool = bool(row[2]) if row else False
-    must_change_password: bool = bool(row[3]) if row else False
-
     log.info("auth.me", user_id=current_user.user_id)
-    return MeResponse(
-        user_id=user.user_id,
-        full_name=user.full_name,
-        email=user.email,
-        roles=user.roles,
-        linkedin_url=linkedin_url,
-        github_url=github_url,
-        has_resume=has_resume,
-        must_change_password=must_change_password,
-    )
+    return await _build_me_response(db, current_user.user_id, user)
 
 
 @router.patch(
     "/me/profile",
     status_code=status.HTTP_200_OK,
     response_model=MeResponse,
-    summary="Update current user profile (B-033)",
+    summary="Update current user profile",
 )
 async def update_profile(
     body: UserProfileUpdate,
@@ -503,20 +576,32 @@ async def update_profile(
 ) -> MeResponse:
     """Partially update the authenticated user's profile.
 
-    Only provided (non-None) fields are written to the DB.
-    B-033: supports full_name, linkedin_url, github_url.
+    Only provided fields are written. An empty string clears a field (→ NULL).
+    Covers the candidate / HR / admin editable surface.
     """
-    updates: dict[str, object] = {}
-    if body.full_name is not None:
-        updates["full_name"] = body.full_name
-    if body.linkedin_url is not None:
-        updates["linkedin_url"] = body.linkedin_url
-    if body.github_url is not None:
-        updates["github_url"] = body.github_url
+    updates: dict[str, object | None] = {}
+    for col in _PROFILE_EDITABLE:
+        val = getattr(body, col, None)
+        if val is None:
+            continue
+        updates[col] = None if isinstance(val, str) and val == "" else val
+
+    # Guards
+    if updates.get("employment_status") not in (None, *_EMPLOYMENT_STATUSES):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="employment_status must be 'student' or 'employed'.",
+        )
+    avatar = updates.get("avatar_url")
+    if isinstance(avatar, str) and len(avatar) > 800_000:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Avatar image is too large — please use a smaller picture.",
+        )
 
     if updates:
         set_clause = ", ".join(f"{col} = :{col}" for col in updates)
-        params: dict[str, object] = {**updates, "uid": uuid.UUID(current_user.user_id)}
+        params: dict[str, object | None] = {**updates, "uid": uuid.UUID(current_user.user_id)}
         await db.execute(
             text(f"UPDATE users SET {set_clause}, updated_at = now() WHERE id = :uid"),
             params,
@@ -524,7 +609,6 @@ async def update_profile(
         await db.commit()
         log.info("auth.profile_updated", user_id=current_user.user_id, fields=list(updates))
 
-    # Re-fetch the full profile to return consistent state
     try:
         user = await auth.get_user(current_user.user_id)
     except ValueError as exc:
@@ -533,22 +617,7 @@ async def update_profile(
             detail="User not found.",
         ) from exc
 
-    result = await db.execute(
-        text("SELECT linkedin_url, github_url FROM users WHERE id = :uid"),
-        {"uid": uuid.UUID(current_user.user_id)},
-    )
-    row = result.fetchone()
-    linkedin_url: str | None = row[0] if row else None
-    github_url: str | None = row[1] if row else None
-
-    return MeResponse(
-        user_id=user.user_id,
-        full_name=user.full_name,
-        email=user.email,
-        roles=user.roles,
-        linkedin_url=linkedin_url,
-        github_url=github_url,
-    )
+    return await _build_me_response(db, current_user.user_id, user)
 
 
 class ChangePasswordBody(BaseModel):

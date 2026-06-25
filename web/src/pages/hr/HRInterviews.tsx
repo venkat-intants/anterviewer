@@ -1,10 +1,21 @@
-// HRInterviews — invite eligible applicants to the AI interview + track results (Phase 3).
+// HRInterviews — invite eligible applicants to the AI interview + track results.
+// Layout: design screen HRInterviews.tsx (GlassCard table, SegTabs, Avatar, StatusTag).
+// Behavior: all live logic — listEligibleApplicants + listInvites queries,
+//           createInvite (once-shown magic link + copy), revokeInvite (invited-only),
+//           eligibility gating, status taxonomy, real composite_score + /scorecard links.
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { motion } from 'framer-motion';
-import { Video, Send, Copy, Ban, Loader2, BarChart3, Clock } from 'lucide-react';
+import {
+  Video,
+  Send,
+  Copy,
+  Ban,
+  Loader2,
+  BarChart3,
+  Calendar,
+} from '@/design/components/icons';
 import {
   listEligibleApplicants,
   listInvites,
@@ -14,85 +25,182 @@ import {
 } from '@/api/interviewInvites';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Badge, type BadgeProps } from '@/components/ui/badge';
-import { Skeleton } from '@/components/ui/skeleton';
+import {
+  GlassCard,
+  Pill,
+  StatusTag,
+  Avatar,
+  SegTabs,
+  type TagTone,
+} from '@/design/components/primitives';
+import { Reveal, Stagger, StaggerItem } from '@/design/components/Reveal';
+import { initialsOf, gradientFor } from '@/design/data/shared';
+
+/* ── Field styling ────────────────────────────────────────────────────────── */
 
 const inputCls =
-  'w-full rounded-[9px] border border-border bg-secondary px-3 py-2 text-sm text-foreground ' +
-  'placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring transition-colors';
+  'w-full rounded-[10px] border border-white/[0.1] bg-[rgba(28,29,31,0.6)] px-3 py-2 ' +
+  'text-[14px] text-white placeholder:text-[#5a5f66] focus:outline-none ' +
+  'focus:border-[var(--accent)] transition-colors';
 
-function statusBadge(s: string): { label: string; variant: BadgeProps['variant'] } {
+/* ── Status taxonomy → design StatusTag tone ──────────────────────────────── */
+
+interface StatusDisplay {
+  label: string;
+  tone: TagTone;
+  dot: boolean;
+}
+
+function statusDisplay(s: string): StatusDisplay {
   switch (s) {
     case 'completed':
-      return { label: 'Completed', variant: 'success' };
+      return { label: 'Completed', tone: 'forest', dot: false };
     case 'consumed':
-      return { label: 'In progress', variant: 'accent' };
+      return { label: 'In progress', tone: 'electric', dot: true };
     case 'revoked':
-      return { label: 'Revoked', variant: 'destructive' };
+      return { label: 'Revoked', tone: 'ember', dot: false };
     case 'expired':
-      return { label: 'Expired', variant: 'secondary' };
+      return { label: 'Expired', tone: 'neutral', dot: false };
     default:
-      return { label: 'Invited', variant: 'warning' };
+      return { label: 'Invited', tone: 'amber', dot: false };
   }
 }
 
-function InviteRow({ inv, onRevoke, revoking }: {
+/* ── Filter tabs ─────────────────────────────────────────────────────────── */
+
+const FILTER_TABS = [
+  { key: 'all', label: 'All' },
+  { key: 'invited', label: 'Invited' },
+  { key: 'consumed', label: 'In progress' },
+  { key: 'completed', label: 'Completed' },
+  { key: 'expired', label: 'Expired' },
+  { key: 'revoked', label: 'Revoked' },
+] as const;
+
+type FilterKey = (typeof FILTER_TABS)[number]['key'];
+
+/* ── Language labels ─────────────────────────────────────────────────────── */
+
+const LANG_LABEL: Record<string, string> = {
+  en: 'English',
+  hi: 'हिंदी',
+  te: 'తెలుగు',
+};
+
+/* ── Stable gradient seed from id ───────────────────────────────────────── */
+
+function seedFrom(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) {
+    h = (Math.imul(31, h) + id.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h);
+}
+
+/* ── InviteRow ───────────────────────────────────────────────────────────── */
+
+function InviteRow({
+  inv,
+  onRevoke,
+  revoking,
+}: {
   inv: InterviewInvite;
   onRevoke: (id: string) => void;
   revoking: boolean;
 }) {
-  const badge = statusBadge(inv.status);
+  const { label, tone, dot } = statusDisplay(inv.status);
+  const initials = initialsOf(inv.applicant_name);
+  const gradient = gradientFor(seedFrom(inv.applicant_id));
+
   return (
-    <div className="flex items-center gap-3 rounded-xl border border-border bg-muted/40 p-3.5 transition-colors hover:bg-muted/60">
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <p className="truncate text-sm font-medium text-foreground">{inv.applicant_name}</p>
-          <Badge variant={badge.variant}>{badge.label}</Badge>
-        </div>
-        <p className="mt-1 text-caption text-muted-foreground">
-          {inv.job_title} · {inv.language}
-          {inv.scheduled_at ? ` · scheduled ${new Date(inv.scheduled_at).toLocaleDateString()}` : ''}
-        </p>
+    <div className="grid grid-cols-[2fr_1.2fr_1.2fr_1fr_0.8fr] items-center gap-3 border-b border-white/[0.04] px-6 py-3.5 last:border-0 hover:bg-white/[0.02] transition-colors">
+      {/* Candidate */}
+      <div className="flex min-w-0 items-center gap-3">
+        <Avatar initials={initials} gradient={gradient} size={34} />
+        <p className="truncate text-[13.5px] font-medium text-white">{inv.applicant_name}</p>
       </div>
-      {inv.composite_score !== null && (
-        <div className="shrink-0 text-center">
-          <div className="text-lg font-semibold leading-none text-emerald-600">
-            {inv.composite_score.toFixed(1)}
-          </div>
-          <div className="text-[10px] text-muted-foreground">/10</div>
-        </div>
-      )}
-      {inv.scorecard_id && (
-        <Link to={`/scorecard/${inv.scorecard_id}`}>
-          <Button variant="outline" size="sm" className="gap-1.5">
-            <BarChart3 className="h-4 w-4" aria-hidden="true" /> Result
-          </Button>
-        </Link>
-      )}
-      {inv.status === 'invited' && (
-        <button
-          type="button"
-          aria-label="Revoke link"
-          className="shrink-0 text-muted-foreground transition-colors hover:text-destructive"
-          disabled={revoking}
-          onClick={() => onRevoke(inv.invite_id)}
-        >
-          <Ban className="h-4 w-4" aria-hidden="true" />
-        </button>
-      )}
+
+      {/* Role */}
+      <p className="truncate text-[13px] text-[#b8babf]">{inv.job_title}</p>
+
+      {/* When */}
+      <div className="flex items-center gap-1.5 text-[13px] text-[#888b91]">
+        <Calendar size={13} className="shrink-0" aria-hidden="true" />
+        {inv.scheduled_at
+          ? new Date(inv.scheduled_at).toLocaleDateString('en-IN', {
+              day: 'numeric',
+              month: 'short',
+              hour: '2-digit',
+              minute: '2-digit',
+            })
+          : <span className="text-[#5a5f66]">—</span>}
+      </div>
+
+      {/* Status */}
+      <div>
+        <StatusTag tone={tone} dot={dot}>
+          {label}
+        </StatusTag>
+      </div>
+
+      {/* Action */}
+      <div className="flex items-center justify-end gap-2">
+        {inv.composite_score !== null && (
+          <span
+            className="shrink-0 text-center"
+            aria-label={`Score: ${inv.composite_score.toFixed(1)} out of 10`}
+          >
+            <span className="text-[13px] font-semibold text-[#27c93f]">
+              {inv.composite_score.toFixed(1)}
+            </span>
+            <span className="text-[10px] text-[#888b91]">/10</span>
+          </span>
+        )}
+        {inv.scorecard_id ? (
+          <Link
+            to={`/scorecard/${inv.scorecard_id}`}
+            aria-label={`View scorecard for ${inv.applicant_name}`}
+          >
+            <Pill variant="ghost" className="py-1.5 px-3 gap-1.5 text-[12px]">
+              <BarChart3 size={13} aria-hidden="true" /> Result
+            </Pill>
+          </Link>
+        ) : (
+          <span className="text-[12px] text-[#70757c]">
+            {LANG_LABEL[inv.language] ?? inv.language}
+          </span>
+        )}
+        {inv.status === 'invited' && (
+          <button
+            type="button"
+            aria-label={`Revoke interview link for ${inv.applicant_name}`}
+            className="shrink-0 text-[#888b91] hover:text-[#e6714f] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+            disabled={revoking}
+            onClick={() => onRevoke(inv.invite_id)}
+          >
+            <Ban size={15} aria-hidden="true" />
+          </button>
+        )}
+      </div>
     </div>
   );
 }
 
+/* ── Page ─────────────────────────────────────────────────────────────────── */
+
 export default function HRInterviews() {
   const qc = useQueryClient();
+
+  // Form state
   const [applicantId, setApplicantId] = useState('');
   const [language, setLanguage] = useState<'en' | 'hi' | 'te'>('en');
   const [scheduledAt, setScheduledAt] = useState('');
   const [mintedLink, setMintedLink] = useState<string | null>(null);
 
+  // Filter
+  const [filter, setFilter] = useState<FilterKey>('all');
+
+  // ── Queries ──────────────────────────────────────────────────────────────
   const { data: eligible } = useQuery({
     queryKey: ['hr', 'interviews', 'eligible'],
     queryFn: () => listEligibleApplicants('any'),
@@ -102,6 +210,7 @@ export default function HRInterviews() {
     queryFn: () => listInvites(),
   });
 
+  // ── Mutations ─────────────────────────────────────────────────────────────
   const inviteMut = useMutation({
     mutationFn: () =>
       createInvite({
@@ -137,135 +246,202 @@ export default function HRInterviews() {
     }
   }
 
-  const list = invites ?? [];
+  // ── Derived ────────────────────────────────────────────────────────────────
+  const allInvites = invites ?? [];
   const elig = eligible ?? [];
 
+  const filteredInvites = useMemo(
+    () =>
+      filter === 'all'
+        ? allInvites
+        : allInvites.filter((inv) => inv.status === filter),
+    [allInvites, filter],
+  );
+
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="space-y-8">
-      <div>
-        <h1 className="text-heading font-semibold text-foreground">AI interviews</h1>
-        <p className="mt-2 text-body-sm text-muted-foreground">
-          Invite shortlisted or exam-passed applicants to a voice interview with the AI avatar.
-          Share the private link — they need no account.
-        </p>
-      </div>
-
-      {/* Invite */}
-      <Card className="rounded-3xl shadow-elevated ring-1 ring-primary/10 bg-muted">
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2 text-body-lg font-semibold text-foreground">
-            <Video className="h-4 w-4 text-primary" aria-hidden="true" />
-            Invite a candidate
-          </CardTitle>
-          <CardDescription className="text-body-sm text-muted-foreground">
-            Only shortlisted or exam-passed applicants are eligible.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="grid gap-3 sm:grid-cols-3">
-            <select
-              className={cn(inputCls, 'sm:col-span-2')}
-              value={applicantId}
-              onChange={(e) => setApplicantId(e.target.value)}
-              aria-label="Applicant"
-            >
-              <option value="">Select an applicant…</option>
-              {elig.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.full_name} — {a.passed_exam ? 'exam passed' : 'shortlisted'}
-                  {a.has_active_invite ? ' (already invited)' : ''}
-                </option>
-              ))}
-            </select>
-            <select
-              className={inputCls}
-              value={language}
-              onChange={(e) => setLanguage(e.target.value as 'en' | 'hi' | 'te')}
-              aria-label="Language"
-            >
-              <option value="en">English</option>
-              <option value="hi">हिंदी</option>
-              <option value="te">తెలుగు</option>
-            </select>
+    <div className="mx-auto max-w-[1120px] px-6 py-8 lg:px-8">
+      {/* Page header */}
+      <Reveal>
+        <div className="flex items-center gap-4">
+          <span className="relative inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-[rgba(var(--accent-rgb),0.14)] text-[#60a5fa]">
+            <Video size={22} aria-hidden="true" />
+          </span>
+          <div>
+            <h1 className="text-[28px] font-semibold tracking-[-1px] text-white">Interviews</h1>
+            <p className="mt-1 text-[14px] text-[#888b91]">
+              Invite shortlisted or exam-passed applicants to a voice interview with the AI avatar.
+              Share the private link — they need no account.
+            </p>
           </div>
-          <label className="block text-sm">
-            <span className="mb-1 block text-caption text-muted-foreground">
-              Schedule (optional — link works any time before expiry)
-            </span>
-            <input
-              type="datetime-local"
-              className={inputCls}
-              value={scheduledAt}
-              onChange={(e) => setScheduledAt(e.target.value)}
-              aria-label="Scheduled time"
-            />
-          </label>
-          <Button
-            disabled={!applicantId || inviteMut.isPending}
-            onClick={() => inviteMut.mutate()}
-            className="gap-1.5"
-          >
-            {inviteMut.isPending ? (
-              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-            ) : (
-              <Send className="h-4 w-4" aria-hidden="true" />
-            )}
-            Generate interview link
-          </Button>
+        </div>
+      </Reveal>
 
-          {mintedLink && (
-            <div className="space-y-1.5 rounded-xl border border-emerald-200 bg-emerald-50 p-3">
-              <p className="text-caption font-medium text-emerald-700">
-                Share this link with the candidate — copy it now (shown once):
-              </p>
-              <div className="flex items-center gap-2 text-xs">
-                <input
-                  readOnly
-                  value={mintedLink}
-                  className="min-w-0 flex-1 rounded-[9px] border border-border bg-secondary px-2 py-1 text-foreground"
-                />
-                <button
-                  type="button"
-                  aria-label="Copy link"
-                  className="shrink-0 text-emerald-600 transition-colors hover:text-emerald-800"
-                  onClick={() => void copyLink(mintedLink)}
-                >
-                  <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-                </button>
-              </div>
+      {/* Invite form */}
+      <Reveal delay={0.05}>
+        <GlassCard className="mt-6 p-6">
+          <div className="mb-4 flex items-center gap-2.5">
+            <div className="flex h-8 w-8 items-center justify-center rounded-[10px] bg-[rgba(var(--accent-rgb),0.14)] text-[#60a5fa]">
+              <Send size={15} aria-hidden="true" />
             </div>
-          )}
-        </CardContent>
-      </Card>
+            <div>
+              <p className="text-[15px] font-semibold text-white">Invite a candidate</p>
+              <p className="text-[12.5px] text-[#888b91]">
+                Only shortlisted or exam-passed applicants are eligible.
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <div className="grid gap-3 sm:grid-cols-3">
+              <select
+                className={cn(inputCls, 'sm:col-span-2')}
+                value={applicantId}
+                onChange={(e) => setApplicantId(e.target.value)}
+                aria-label="Applicant"
+              >
+                <option value="">Select an eligible applicant…</option>
+                {elig.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.full_name} — {a.passed_exam ? 'exam passed' : 'shortlisted'}
+                    {a.has_active_invite ? ' (already invited)' : ''}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                className={inputCls}
+                value={language}
+                onChange={(e) => setLanguage(e.target.value as 'en' | 'hi' | 'te')}
+                aria-label="Interview language"
+              >
+                <option value="en">English</option>
+                <option value="hi">हिंदी</option>
+                <option value="te">తెలుగు</option>
+              </select>
+            </div>
+
+            <label className="block text-sm">
+              <span className="mb-1 block text-[12px] font-medium uppercase tracking-[0.5px] text-[#70757c]">
+                Schedule (optional — link works any time before expiry)
+              </span>
+              <input
+                type="datetime-local"
+                className={inputCls}
+                value={scheduledAt}
+                onChange={(e) => setScheduledAt(e.target.value)}
+                aria-label="Scheduled time"
+              />
+            </label>
+
+            <Pill
+              variant="primary"
+              className="gap-1.5 px-5 py-2.5"
+              disabled={!applicantId || inviteMut.isPending}
+              onClick={() => inviteMut.mutate()}
+            >
+              {inviteMut.isPending ? (
+                <Loader2 size={16} className="animate-spin" aria-hidden="true" />
+              ) : (
+                <Send size={16} aria-hidden="true" />
+              )}
+              Generate interview link
+            </Pill>
+
+            {/* Once-shown minted link */}
+            {mintedLink && (
+              <div
+                className="space-y-1.5 rounded-[14px] border border-[rgba(39,201,63,0.3)] bg-[rgba(39,201,63,0.08)] p-3.5"
+                role="alert"
+              >
+                <p className="text-[12.5px] font-semibold text-[#27c93f]">
+                  Share this link with the candidate — copy it now (shown once):
+                </p>
+                <div className="flex items-center gap-2">
+                  <input
+                    readOnly
+                    value={mintedLink}
+                    className="min-w-0 flex-1 rounded-[10px] border border-white/[0.1] bg-[rgba(28,29,31,0.6)] px-2 py-1 text-[13px] text-white focus:outline-none"
+                    aria-label="Magic interview link"
+                  />
+                  <button
+                    type="button"
+                    aria-label="Copy interview link"
+                    className="shrink-0 flex h-7 w-7 items-center justify-center rounded-[8px] text-[#27c93f] hover:bg-[rgba(39,201,63,0.15)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                    onClick={() => void copyLink(mintedLink)}
+                  >
+                    <Copy size={14} aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </GlassCard>
+      </Reveal>
 
       {/* Invites list */}
-      <div className="space-y-3">
-        <h2 className="flex items-center gap-2 text-body-sm font-semibold text-foreground">
-          <Clock className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-          Interviews ({list.length})
-        </h2>
+      <div className="mt-7 space-y-4">
+        <Reveal delay={0.1}>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-[14px] font-semibold text-white">
+              Interviews ({allInvites.length})
+            </h2>
+            <SegTabs
+              tabs={FILTER_TABS as unknown as { key: string; label: string }[]}
+              active={filter}
+              onChange={(k) => setFilter(k as FilterKey)}
+            />
+          </div>
+        </Reveal>
+
         {isLoading ? (
-          <Skeleton className="h-16 w-full rounded-xl" />
-        ) : list.length === 0 ? (
-          <p className="py-6 text-center text-body-sm text-muted-foreground">
-            No interviews yet — invite an eligible applicant above.
-          </p>
-        ) : (
-          <motion.div
-            initial="hidden"
-            animate="visible"
-            variants={{ hidden: {}, visible: { transition: { staggerChildren: 0.04 } } }}
-            className="space-y-2"
-          >
-            {list.map((inv) => (
-              <motion.div
-                key={inv.invite_id}
-                variants={{ hidden: { opacity: 0, y: 8 }, visible: { opacity: 1, y: 0 } }}
-              >
-                <InviteRow inv={inv} onRevoke={(id) => revokeMut.mutate(id)} revoking={revokeMut.isPending} />
-              </motion.div>
+          <div className="space-y-2">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="h-16 w-full rounded-[16px] bg-white/[0.05] animate-pulse" />
             ))}
-          </motion.div>
+          </div>
+        ) : allInvites.length === 0 ? (
+          <Reveal delay={0.15}>
+            <div className="flex flex-col items-center gap-3 rounded-[24px] border border-dashed border-white/[0.1] bg-[rgba(15,15,16,0.6)] py-14 text-center">
+              <span className="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.06] text-[#888b91]">
+                <Video size={22} aria-hidden="true" />
+              </span>
+              <p className="text-[14px] text-[#888b91]">
+                No interviews yet — invite an eligible applicant above.
+              </p>
+            </div>
+          </Reveal>
+        ) : filteredInvites.length === 0 ? (
+          <Reveal delay={0.12}>
+            <p className="py-8 text-center text-[14px] text-[#888b91]">
+              No interviews match this filter.
+            </p>
+          </Reveal>
+        ) : (
+          <>
+            {/* Table header */}
+            <div className="hidden grid-cols-[2fr_1.2fr_1.2fr_1fr_0.8fr] gap-3 border-b border-white/[0.06] px-6 py-3.5 text-[11.5px] uppercase tracking-[0.5px] text-[#70757c] sm:grid">
+              <div>Candidate</div>
+              <div>Role</div>
+              <div>Scheduled</div>
+              <div>Status</div>
+              <div className="text-right">Action</div>
+            </div>
+
+            <GlassCard className="overflow-hidden p-0">
+              <Stagger>
+                {filteredInvites.map((inv) => (
+                  <StaggerItem key={inv.invite_id}>
+                    <InviteRow
+                      inv={inv}
+                      onRevoke={(id) => revokeMut.mutate(id)}
+                      revoking={revokeMut.isPending}
+                    />
+                  </StaggerItem>
+                ))}
+              </Stagger>
+            </GlassCard>
+          </>
         )}
       </div>
     </div>

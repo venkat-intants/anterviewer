@@ -24,6 +24,8 @@ export interface Applicant {
   ats_recommendation: string | null;
   ats_summary: string | null;
   created_at: string;
+  /** Linked candidate user id (set after interview-invite redeem); null otherwise. */
+  user_id?: string | null;
 }
 
 /** Ranked applicant list (highest ATS score first), optionally filtered by status. */

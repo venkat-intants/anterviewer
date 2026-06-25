@@ -409,6 +409,71 @@ export async function getOverview(): Promise<OverviewResponse> {
   return adminGet<OverviewResponse>('/admin/overview');
 }
 
+// ---------------------------------------------------------------------------
+// System health — GET /admin/system/health (backs the AdminOverview status board)
+// ---------------------------------------------------------------------------
+
+export interface SystemServiceHealth {
+  name: string;
+  kind: 'service' | 'datastore';
+  status: 'operational' | 'degraded' | 'down';
+  latency_ms: number | null;
+  detail: string | null;
+}
+
+export interface SystemHealthResponse {
+  overall: 'operational' | 'degraded';
+  services: SystemServiceHealth[];
+  checked_at: string;
+}
+
+const MOCK_SYSTEM_HEALTH: SystemHealthResponse = {
+  overall: 'operational',
+  services: [
+    { name: 'admin_ops', kind: 'service', status: 'operational', latency_ms: 0, detail: null },
+    { name: 'interview_core', kind: 'service', status: 'operational', latency_ms: 24, detail: null },
+    { name: 'data_gateway', kind: 'service', status: 'operational', latency_ms: 18, detail: null },
+    { name: 'feedback_billing', kind: 'service', status: 'operational', latency_ms: 21, detail: null },
+    { name: 'postgres', kind: 'datastore', status: 'operational', latency_ms: null, detail: null },
+    { name: 'redis', kind: 'datastore', status: 'operational', latency_ms: null, detail: null },
+  ],
+  checked_at: new Date().toISOString(),
+};
+
+/** GET /admin/system/health — peer-service + datastore status rollup. */
+export async function getSystemHealth(): Promise<SystemHealthResponse> {
+  if (USE_MOCK) {
+    await simulateDelay(300);
+    return MOCK_SYSTEM_HEALTH;
+  }
+  return adminGet<SystemHealthResponse>('/admin/system/health');
+}
+
+// ---------------------------------------------------------------------------
+// Interview transcript — GET /admin/interviews/{id}/transcript
+// ---------------------------------------------------------------------------
+
+export interface TranscriptTurn {
+  turn_number: number;
+  speaker: string; // interviewer | candidate
+  text: string | null;
+  created_at: string | null;
+}
+
+export interface TranscriptResponse {
+  session_id: string;
+  turns: TranscriptTurn[];
+}
+
+/** GET /admin/interviews/{sessionId}/transcript — ordered conversation turns. */
+export async function getInterviewTranscript(sessionId: string): Promise<TranscriptResponse> {
+  if (USE_MOCK) {
+    await simulateDelay(300);
+    return { session_id: sessionId, turns: [] };
+  }
+  return adminGet<TranscriptResponse>(`/admin/interviews/${sessionId}/transcript`);
+}
+
 /** GET /admin/interviews — paginated, filterable interview list */
 export async function listInterviews(
   filters: InterviewFilters = {},

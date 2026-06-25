@@ -1,12 +1,12 @@
-// HRPipeline — single-table hiring funnel: resume → exam → interview → decision
-// (HR workflow Phase 4). One row per applicant; HR makes the hire/reject call
-// inline. Paginated, read-only aggregate from data_gateway. Field names + the
-// POST decision verb match the frozen backend contract.
+// HRPipeline — single-table hiring funnel: resume → exam → interview → decision.
+// Layout: design screen HRPipeline.tsx card visual styling (GlassCard, StatusTag, Avatar).
+// Behavior: all live logic — server-paginated TABLE, persisted setApplicantDecision
+//           (hired/rejected + rationale), canHire/canReject gating, embedded analytics.
+// NOTE: design's drag-drop Kanban is NOT used — no stage-transition API endpoint exists.
 
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { motion } from 'framer-motion';
 import {
   TrendingUp,
   CheckCircle2,
@@ -15,9 +15,8 @@ import {
   Star,
   BarChart3,
   ClipboardCheck,
-  Video,
   Loader2,
-} from 'lucide-react';
+} from '@/design/components/icons';
 import {
   getPipeline,
   setApplicantDecision,
@@ -27,70 +26,105 @@ import {
 } from '@/api/pipeline';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
-import { Button } from '@/components/ui/button';
-import { Badge, type BadgeProps } from '@/components/ui/badge';
-import { Skeleton } from '@/components/ui/skeleton';
-import HrAnalyticsPanel from './HRAnalytics';
+import {
+  GlassCard,
+  StatusTag,
+  Avatar,
+  SegTabs,
+  type TagTone,
+} from '@/design/components/primitives';
+import { Reveal, Stagger, StaggerItem } from '@/design/components/Reveal';
+import HRAnalytics from './HRAnalytics';
 
 const PAGE_SIZE = 50;
 
-function scoreTone(n: number | null): string {
-  if (n === null) return 'text-muted-foreground';
-  if (n >= 70) return 'text-emerald-600';
-  if (n >= 45) return 'text-amber-600';
-  return 'text-destructive';
+/* ── Design-kit colour helpers (inlined — no cross-project import) ─────────── */
+
+const GRADIENTS = [
+  'linear-gradient(135deg,var(--accent),#a887dc)',
+  'linear-gradient(135deg,#16c253,var(--accent))',
+  'linear-gradient(135deg,#dd55e7,#a887dc)',
+  'linear-gradient(135deg,#ffb764,#dd55e7)',
+  'linear-gradient(135deg,#0fb7fa,#16c253)',
+  'linear-gradient(135deg,#a887dc,var(--accent))',
+];
+
+function gradientFor(seed: number): string {
+  return GRADIENTS[Math.abs(seed) % GRADIENTS.length];
 }
 
-function recBadgeVariant(rec: string | null): {
-  label: string;
-  variant: BadgeProps['variant'];
-} {
+function initialsOf(name: string): string {
+  return name
+    .split(' ')
+    .map((w) => w[0] ?? '')
+    .join('')
+    .slice(0, 2)
+    .toUpperCase();
+}
+
+function seedOf(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+/* ── Score helpers ──────────────────────────────────────────────────────────── */
+
+function scoreToneClass(n: number | null): string {
+  if (n === null) return 'text-[#70757c]';
+  if (n >= 70) return 'text-[#27c93f]';
+  if (n >= 45) return 'text-[#ffb764]';
+  return 'text-[#e6714f]';
+}
+
+/* ── Badge helpers ──────────────────────────────────────────────────────────── */
+
+type BadgeInfo = { label: string; tone: TagTone };
+
+function recBadge(rec: string | null): BadgeInfo {
   switch (rec) {
     case 'strong_fit':
-      return { label: 'Strong fit', variant: 'success' };
+      return { label: 'Strong fit', tone: 'forest' };
     case 'weak_fit':
-      return { label: 'Weak fit', variant: 'destructive' };
+      return { label: 'Weak fit', tone: 'ember' };
     case 'moderate_fit':
-      return { label: 'Moderate fit', variant: 'warning' };
+      return { label: 'Moderate fit', tone: 'amber' };
     default:
-      return { label: 'Unscored', variant: 'secondary' };
+      return { label: 'Unscored', tone: 'neutral' };
   }
 }
 
-function interviewBadgeVariant(s: string | null): {
-  label: string;
-  variant: BadgeProps['variant'];
-} {
+function interviewBadge(s: string | null): BadgeInfo {
   switch (s) {
     case 'completed':
-      return { label: 'Completed', variant: 'success' };
+      return { label: 'Completed', tone: 'forest' };
     case 'consumed':
-      return { label: 'In progress', variant: 'accent' };
+      return { label: 'In progress', tone: 'electric' };
     case 'revoked':
-      return { label: 'Revoked', variant: 'destructive' };
+      return { label: 'Revoked', tone: 'ember' };
     case 'expired':
-      return { label: 'Expired', variant: 'secondary' };
+      return { label: 'Expired', tone: 'neutral' };
     case 'invited':
-      return { label: 'Invited', variant: 'warning' };
+      return { label: 'Invited', tone: 'amber' };
     default:
-      return { label: 'Not invited', variant: 'secondary' };
+      return { label: 'Not invited', tone: 'neutral' };
   }
 }
 
-function statusPillVariant(
-  s: Row['status'],
-): { label: string; variant: BadgeProps['variant'] } | null {
+function statusBadge(s: Row['status']): BadgeInfo | null {
   switch (s) {
     case 'hired':
-      return { label: 'Hired', variant: 'success' };
+      return { label: 'Hired', tone: 'forest' };
     case 'rejected':
-      return { label: 'Rejected', variant: 'destructive' };
+      return { label: 'Rejected', tone: 'ember' };
     case 'interviewed':
-      return { label: 'Interviewed', variant: 'warning' };
+      return { label: 'Interviewed', tone: 'amber' };
     default:
       return null;
   }
 }
+
+/* ── Stage tabs ─────────────────────────────────────────────────────────────── */
 
 const STAGE_TABS: { value: PipelineStage; label: string }[] = [
   { value: 'all', label: 'All' },
@@ -99,6 +133,8 @@ const STAGE_TABS: { value: PipelineStage; label: string }[] = [
   { value: 'interviewed', label: 'Interviewed' },
   { value: 'decided', label: 'Decided' },
 ];
+
+/* ── Score display ──────────────────────────────────────────────────────────── */
 
 function StageScore({
   value,
@@ -111,13 +147,15 @@ function StageScore({
 }) {
   return (
     <div className="w-12 shrink-0 text-center">
-      <div className={cn('text-base font-semibold leading-none', tone)}>{value ?? '—'}</div>
-      <div className="text-[10px] text-muted-foreground">{unit}</div>
+      <div className={cn('text-[15px] font-semibold leading-none', tone)}>{value ?? '—'}</div>
+      <div className="text-[10px] text-[#70757c]">{unit}</div>
     </div>
   );
 }
 
-function PipelineRow({ a }: { a: Row }) {
+/* ── Single pipeline card ───────────────────────────────────────────────────── */
+
+function PipelineCard({ a }: { a: Row }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [rationale, setRationale] = useState('');
@@ -130,179 +168,266 @@ function PipelineRow({ a }: { a: Row }) {
       void qc.invalidateQueries({ queryKey: ['hr', 'pipeline'] });
       void qc.invalidateQueries({ queryKey: ['hr', 'analytics'] });
     },
-    onError: (e: unknown) => toast.error(e instanceof Error ? e.message : 'Decision failed'),
+    onError: (e: unknown) =>
+      toast.error(e instanceof Error ? e.message : 'Decision failed'),
   });
 
-  const rec = recBadgeVariant(a.ats_recommendation);
-  const iv = interviewBadgeVariant(a.interview_status);
-  const pill = statusPillVariant(a.status);
+  const rec = recBadge(a.ats_recommendation);
+  const iv = interviewBadge(a.interview_status);
+  const pill = statusBadge(a.status);
+
   const canHire = a.status === 'shortlisted' || a.status === 'interviewed';
-  const canReject = a.status === 'new' || a.status === 'shortlisted' || a.status === 'interviewed';
+  const canReject =
+    a.status === 'new' || a.status === 'shortlisted' || a.status === 'interviewed';
+
+  const seed = seedOf(a.applicant_id || a.full_name);
 
   return (
-    <div className="rounded-xl border border-border bg-card transition-shadow hover:border-primary/20 hover:shadow-card-hover">
+    <div
+      className={cn(
+        'rounded-[20px] border bg-[#0f0f10] transition-colors',
+        open
+          ? 'border-[rgba(var(--accent-rgb),0.3)]'
+          : 'border-white/[0.08] hover:border-[rgba(var(--accent-rgb),0.2)]',
+      )}
+    >
+      {/* ── Collapsed row ── */}
       <div className="flex items-center gap-3 p-3.5">
-        <StageScore value={a.ats_overall} tone={scoreTone(a.ats_overall)} unit="ATS" />
+        {/* Avatar */}
+        <Avatar
+          initials={initialsOf(a.full_name)}
+          gradient={gradientFor(seed)}
+          size={36}
+          aria-hidden="true"
+        />
 
+        {/* ATS score */}
+        <StageScore
+          value={a.ats_overall}
+          tone={scoreToneClass(a.ats_overall)}
+          unit="ATS"
+        />
+
+        {/* Name + badges */}
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <p className="truncate text-sm font-medium text-foreground">{a.full_name}</p>
-            <Badge variant={rec.variant} className="text-[11px]">
+            <p className="truncate text-[13.5px] font-medium text-white">{a.full_name}</p>
+            <StatusTag tone={rec.tone} className="text-[11px]">
               {rec.label}
-            </Badge>
+            </StatusTag>
             {a.status === 'shortlisted' && (
-              <Badge variant="accent" className="gap-1 text-[11px]">
-                <Star className="h-3 w-3" aria-hidden="true" /> Shortlisted
-              </Badge>
+              <StatusTag tone="electric" className="gap-1 text-[11px]">
+                <Star size={11} aria-hidden="true" /> Shortlisted
+              </StatusTag>
             )}
             {pill && (
-              <Badge variant={pill.variant} className="text-[11px]">
+              <StatusTag tone={pill.tone} className="text-[11px]">
                 {pill.label}
-              </Badge>
+              </StatusTag>
             )}
           </div>
-          <p className="truncate text-caption text-muted-foreground">
-            {a.target_job_title} · {a.target_level}
+          <p className="mt-0.5 truncate text-[11px] text-[#70757c]">
+            {a.target_job_title} &middot; {a.target_level}
           </p>
         </div>
 
-        {/* Exam */}
+        {/* Exam score */}
         <div className="hidden items-center gap-1 sm:flex">
-          <StageScore value={a.best_exam_percent} tone={scoreTone(a.best_exam_percent)} unit="exam %" />
+          <StageScore
+            value={a.best_exam_percent}
+            tone={scoreToneClass(a.best_exam_percent)}
+            unit="exam %"
+          />
           {a.exam_passed === true && (
-            <ClipboardCheck className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" />
+            <ClipboardCheck
+              size={14}
+              className="text-[#27c93f]"
+              aria-label="Exam passed"
+            />
           )}
         </div>
 
-        {/* Interview */}
+        {/* Interview score + status */}
         <div className="hidden items-center gap-1.5 md:flex">
           <StageScore
             value={a.interview_score !== null ? a.interview_score.toFixed(1) : null}
-            tone={a.interview_score !== null ? 'text-emerald-600' : 'text-muted-foreground'}
+            tone={a.interview_score !== null ? 'text-[#27c93f]' : 'text-[#70757c]'}
             unit="/10"
           />
-          <Badge variant={iv.variant} className="text-[11px]">
+          <StatusTag tone={iv.tone} className="text-[11px]">
             {iv.label}
-          </Badge>
+          </StatusTag>
         </div>
 
-        {/* Decision actions */}
+        {/* Decision quick buttons */}
         <div className="flex shrink-0 items-center gap-1">
           {canHire && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-emerald-600 hover:bg-emerald-50 hover:text-emerald-600"
+            <button
+              type="button"
+              className="flex h-8 w-8 items-center justify-center rounded-[9px] text-[#27c93f] hover:bg-[rgba(39,201,63,0.14)] transition-colors disabled:opacity-40"
               disabled={decideMut.isPending}
               onClick={() => decideMut.mutate('hired')}
               aria-label="Hire"
             >
               {decideMut.isPending && decideMut.variables === 'hired' ? (
-                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                <Loader2 size={16} className="animate-spin" aria-hidden="true" />
               ) : (
-                <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+                <CheckCircle2 size={16} aria-hidden="true" />
               )}
-            </Button>
+            </button>
           )}
           {canReject && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+            <button
+              type="button"
+              className="flex h-8 w-8 items-center justify-center rounded-[9px] text-[#e6714f] hover:bg-[rgba(230,113,79,0.14)] transition-colors disabled:opacity-40"
               disabled={decideMut.isPending}
               onClick={() => decideMut.mutate('rejected')}
               aria-label="Reject"
             >
-              <XCircle className="h-4 w-4" aria-hidden="true" />
-            </Button>
+              <XCircle size={16} aria-hidden="true" />
+            </button>
           )}
-          <Button
-            variant="ghost"
-            size="icon"
+          <button
+            type="button"
+            className="flex h-8 w-8 items-center justify-center rounded-[9px] text-[#888b91] hover:bg-white/[0.06] transition-colors"
             onClick={() => setOpen((v) => !v)}
-            aria-label="Toggle details"
+            aria-label={open ? 'Collapse details' : 'Expand details'}
             aria-expanded={open}
           >
-            <ChevronDown className={cn('h-4 w-4 transition-transform', open && 'rotate-180')} />
-          </Button>
+            <ChevronDown
+              size={16}
+              className={cn('transition-transform duration-200', open && 'rotate-180')}
+              aria-hidden="true"
+            />
+          </button>
         </div>
       </div>
 
+      {/* ── Expanded detail panel ── */}
       {open && (
-        <div className="space-y-3 border-t border-border px-4 py-3.5 text-sm">
-          <div className="grid gap-2 text-xs sm:grid-cols-2">
-            <div className="flex items-center gap-1.5">
-              <span className="w-20 shrink-0 text-muted-foreground">ATS</span>
-              <span className="font-medium text-foreground">{a.ats_overall ?? '—'}/100</span>
-              <Badge variant={rec.variant} className="text-[10px]">
-                {rec.label}
-              </Badge>
+        <div className="space-y-4 border-t border-white/[0.07] px-4 py-4 text-[13px]">
+          {/* Per-stage score grid */}
+          <div className="grid gap-3 sm:grid-cols-3">
+            {/* ATS */}
+            <div className="rounded-[14px] border border-white/[0.08] bg-[rgba(28,29,31,0.5)] p-3">
+              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.5px] text-[#70757c]">
+                ATS score
+              </p>
+              <div className="flex items-center gap-2">
+                <span className={cn('text-[18px] font-semibold', scoreToneClass(a.ats_overall))}>
+                  {a.ats_overall ?? '—'}
+                  <span className="text-[11px] font-normal text-[#70757c]">/100</span>
+                </span>
+                <StatusTag tone={rec.tone} className="text-[10px]">
+                  {rec.label}
+                </StatusTag>
+              </div>
             </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-20 shrink-0 text-muted-foreground">Exam</span>
-              <span className="font-medium text-foreground">{a.best_exam_percent ?? '—'}%</span>
-              <span className="text-muted-foreground">
-                {a.total_exam_attempts > 0
-                  ? `${a.total_exam_attempts} attempt${a.total_exam_attempts === 1 ? '' : 's'} · ${
-                      a.exam_passed ? 'passed' : 'not passed'
-                    }`
-                  : 'no exam'}
-              </span>
+
+            {/* Exam */}
+            <div className="rounded-[14px] border border-white/[0.08] bg-[rgba(28,29,31,0.5)] p-3">
+              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.5px] text-[#70757c]">
+                Exam
+              </p>
+              <div className="flex items-center gap-2">
+                <span
+                  className={cn('text-[18px] font-semibold', scoreToneClass(a.best_exam_percent))}
+                >
+                  {a.best_exam_percent !== null ? `${a.best_exam_percent}%` : '—'}
+                </span>
+                {a.total_exam_attempts > 0 && (
+                  <span className="text-[12px] text-[#70757c]">
+                    {a.total_exam_attempts} attempt{a.total_exam_attempts === 1 ? '' : 's'} &middot;{' '}
+                    {a.exam_passed ? 'passed' : 'not passed'}
+                  </span>
+                )}
+                {a.total_exam_attempts === 0 && (
+                  <span className="text-[12px] text-[#70757c]">no exam</span>
+                )}
+              </div>
             </div>
-            <div className="flex items-center gap-1.5 sm:col-span-2">
-              <span className="w-20 shrink-0 text-muted-foreground">Interview</span>
-              <span className="font-medium text-foreground">
-                {a.interview_score !== null ? `${a.interview_score.toFixed(1)}/10` : '—'}
-              </span>
-              <Badge variant={iv.variant} className="text-[10px]">
-                {iv.label}
-              </Badge>
-              {a.scorecard_id && (
-                <Link to={`/scorecard/${a.scorecard_id}`}>
-                  <Button variant="outline" size="sm" className="h-6 gap-1 px-2 text-[11px]">
-                    <BarChart3 className="h-3 w-3" aria-hidden="true" /> Scorecard
-                  </Button>
-                </Link>
-              )}
+
+            {/* Interview */}
+            <div className="rounded-[14px] border border-white/[0.08] bg-[rgba(28,29,31,0.5)] p-3">
+              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.5px] text-[#70757c]">
+                Interview
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[18px] font-semibold text-white">
+                  {a.interview_score !== null ? (
+                    <>
+                      {a.interview_score.toFixed(1)}
+                      <span className="text-[11px] font-normal text-[#70757c]">/10</span>
+                    </>
+                  ) : (
+                    <span className="text-[#70757c]">—</span>
+                  )}
+                </span>
+                <StatusTag tone={iv.tone} className="text-[10px]">
+                  {iv.label}
+                </StatusTag>
+                {a.scorecard_id && (
+                  <Link to={`/scorecard/${a.scorecard_id}`}>
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1 rounded-[8px] border border-white/[0.1] bg-transparent px-2 py-1 text-[11px] text-[#888b91] hover:text-white hover:border-white/[0.2] transition-colors"
+                    >
+                      <BarChart3 size={12} aria-hidden="true" /> Scorecard
+                    </button>
+                  </Link>
+                )}
+              </div>
             </div>
           </div>
 
+          {/* Rationale + decision buttons (persisted — audit trail) */}
           {(canHire || canReject) && (
-            <div className="space-y-2 border-t border-border pt-3">
-              <label className="block text-xs font-semibold text-foreground">
-                Hire decision
-                <span className="ml-1 font-normal text-muted-foreground">
-                  (rationale optional, logged for audit)
+            <div className="rounded-[14px] border border-white/[0.08] bg-[rgba(28,29,31,0.4)] p-3.5">
+              <label className="mb-2 block text-[12px] font-semibold text-white">
+                Hire decision{' '}
+                <span className="font-normal text-[#70757c]">
+                  — rationale is optional but logged for audit
                 </span>
               </label>
               <textarea
-                className="min-h-[40px] w-full resize-y rounded-[9px] border border-border bg-secondary px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                className="min-h-[44px] w-full resize-y rounded-[10px] border border-white/[0.1] bg-[rgba(28,29,31,0.6)] px-3 py-2 text-[12.5px] text-white placeholder:text-[#5a5f66] focus:outline-none focus:border-[var(--accent)] transition-colors"
                 placeholder="Why this decision? (optional)…"
                 value={rationale}
                 onChange={(e) => setRationale(e.target.value)}
                 aria-label="Decision rationale"
               />
-              <div className="flex gap-2">
+              <div className="mt-2.5 flex gap-2">
                 {canHire && (
-                  <Button
-                    size="sm"
-                    className="gap-1.5"
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1.5 rounded-[9999px] bg-white px-4 py-2 text-[13px] font-semibold text-black hover:bg-[#eaeaea] disabled:opacity-50 transition-colors"
                     disabled={decideMut.isPending}
                     onClick={() => decideMut.mutate('hired')}
+                    aria-busy={decideMut.isPending && decideMut.variables === 'hired'}
                   >
-                    <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" /> Hire
-                  </Button>
+                    {decideMut.isPending && decideMut.variables === 'hired' ? (
+                      <Loader2 size={14} className="animate-spin" aria-hidden="true" />
+                    ) : (
+                      <CheckCircle2 size={14} aria-hidden="true" />
+                    )}
+                    Hire
+                  </button>
                 )}
                 {canReject && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="gap-1.5 text-destructive hover:text-destructive"
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1.5 rounded-[9999px] bg-[rgba(230,113,79,0.14)] border border-[rgba(230,113,79,0.35)] px-4 py-2 text-[13px] font-semibold text-[#e6714f] hover:bg-[rgba(230,113,79,0.22)] disabled:opacity-50 transition-colors"
                     disabled={decideMut.isPending}
                     onClick={() => decideMut.mutate('rejected')}
+                    aria-busy={decideMut.isPending && decideMut.variables === 'rejected'}
                   >
-                    <XCircle className="h-3.5 w-3.5" aria-hidden="true" /> Reject
-                  </Button>
+                    {decideMut.isPending && decideMut.variables === 'rejected' ? (
+                      <Loader2 size={14} className="animate-spin" aria-hidden="true" />
+                    ) : (
+                      <XCircle size={14} aria-hidden="true" />
+                    )}
+                    Reject
+                  </button>
                 )}
               </div>
             </div>
@@ -312,6 +437,8 @@ function PipelineRow({ a }: { a: Row }) {
     </div>
   );
 }
+
+/* ── Page ───────────────────────────────────────────────────────────────────── */
 
 export default function HRPipeline() {
   const [stage, setStage] = useState<PipelineStage>('all');
@@ -330,96 +457,101 @@ export default function HRPipeline() {
     setOffset(0);
   }
 
+  const fromRow = count === 0 ? 0 : offset + 1;
+  const toRow = Math.min(offset + PAGE_SIZE, count);
+
   return (
-    <div className="space-y-8">
-      <div>
-        <h1 className="flex items-center gap-2.5 text-heading font-semibold text-foreground">
-          <TrendingUp className="h-6 w-6 text-primary" aria-hidden="true" />
-          Hiring pipeline
-        </h1>
-        <p className="mt-2 text-body-sm text-muted-foreground">
-          Every candidate, end to end — resume → exam → interview → decision. Hire or reject
-          shortlisted and interviewed candidates.
-        </p>
-      </div>
+    <div className="mx-auto max-w-[1400px] px-6 py-8 lg:px-8 space-y-8">
+      {/* ── Page header ── */}
+      <Reveal>
+        <div className="flex items-center gap-3">
+          <span className="inline-flex h-11 w-11 items-center justify-center rounded-2xl bg-[rgba(var(--accent-rgb),0.14)] text-[#60a5fa]">
+            <TrendingUp size={20} aria-hidden="true" />
+          </span>
+          <div>
+            <h1 className="text-[28px] font-semibold tracking-[-1px] text-white">
+              Hiring pipeline
+            </h1>
+            <p className="mt-1 text-[14px] text-[#888b91]">
+              Every candidate, end to end — resume &rarr; exam &rarr; interview &rarr; decision.
+            </p>
+          </div>
+        </div>
+      </Reveal>
 
-      <HrAnalyticsPanel />
+      {/* ── Embedded analytics panel ── */}
+      <HRAnalytics />
 
-      <div className="flex flex-wrap gap-1.5">
-        {STAGE_TABS.map((t) => (
-          <button
-            key={t.value}
-            type="button"
-            onClick={() => pickStage(t.value)}
-            className={cn(
-              'rounded-full px-3.5 py-1.5 text-xs font-medium transition-colors',
-              stage === t.value
-                ? 'bg-primary text-primary-foreground'
-                : 'border border-border bg-secondary text-muted-foreground hover:border-primary/30 hover:text-foreground',
-            )}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      {/* ── Stage filter tabs ── */}
+      <Reveal delay={0.05}>
+        <SegTabs
+          tabs={STAGE_TABS.map((t) => ({ key: t.value, label: t.label }))}
+          active={stage}
+          onChange={(k) => pickStage(k as PipelineStage)}
+        />
+      </Reveal>
 
-      <div className="space-y-3">
-        <h2 className="flex items-center gap-2 text-body-sm font-semibold text-foreground">
-          <Video className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-          Candidates ({count})
-        </h2>
+      {/* ── Candidates list ── */}
+      <section aria-label="Candidates">
+        <Reveal delay={0.08}>
+          <h2 className="mb-4 text-[14px] font-semibold text-white">
+            Candidates{count > 0 ? ` (${count})` : ''}
+          </h2>
+        </Reveal>
+
         {isLoading ? (
-          <Skeleton className="h-24 w-full rounded-xl" />
+          <div className="space-y-3" aria-busy="true" aria-label="Loading candidates">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="h-[68px] w-full rounded-[20px] bg-white/[0.05] animate-pulse" />
+            ))}
+          </div>
         ) : items.length === 0 ? (
-          <p className="py-8 text-center text-body-sm text-muted-foreground">
-            {stage === 'all'
-              ? 'No candidates yet — screen resumes to start the pipeline.'
-              : 'No candidates at this stage.'}
-          </p>
+          <GlassCard className="py-14 text-center">
+            <p className="text-[14px] text-[#888b91]">
+              {stage === 'all'
+                ? 'No candidates yet — screen resumes to start the pipeline.'
+                : `No candidates at the "${STAGE_TABS.find((t) => t.value === stage)?.label ?? stage}" stage.`}
+            </p>
+          </GlassCard>
         ) : (
           <>
-            <motion.div
-              initial="hidden"
-              animate="visible"
-              variants={{ hidden: {}, visible: { transition: { staggerChildren: 0.04 } } }}
-              className="space-y-2"
-            >
+            <Stagger className="flex flex-col gap-2.5">
               {items.map((a) => (
-                <motion.div
-                  key={a.applicant_id}
-                  variants={{ hidden: { opacity: 0, y: 8 }, visible: { opacity: 1, y: 0 } }}
-                >
-                  <PipelineRow a={a} />
-                </motion.div>
+                <StaggerItem key={a.applicant_id}>
+                  <PipelineCard a={a} />
+                </StaggerItem>
               ))}
-            </motion.div>
+            </Stagger>
 
+            {/* Pagination */}
             {count > PAGE_SIZE && (
-              <div className="flex items-center justify-between pt-2 text-sm">
-                <Button
-                  variant="outline"
-                  size="sm"
+              <div className="mt-5 flex items-center justify-between">
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1.5 rounded-[9999px] border border-white/[0.1] bg-transparent px-4 py-2 text-[13px] text-[#888b91] hover:text-white hover:border-white/[0.2] disabled:opacity-40 transition-colors"
                   disabled={offset === 0}
                   onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+                  aria-label="Previous page"
                 >
                   Previous
-                </Button>
-                <span className="text-caption text-muted-foreground">
-                  {offset + 1}–{Math.min(offset + PAGE_SIZE, count)} of {count}
+                </button>
+                <span className="text-[12px] text-[#70757c]" aria-live="polite">
+                  {fromRow}–{toRow} of {count}
                 </span>
-                <Button
-                  variant="outline"
-                  size="sm"
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1.5 rounded-[9999px] border border-white/[0.1] bg-transparent px-4 py-2 text-[13px] text-[#888b91] hover:text-white hover:border-white/[0.2] disabled:opacity-40 transition-colors"
                   disabled={offset + PAGE_SIZE >= count}
                   onClick={() => setOffset(offset + PAGE_SIZE)}
+                  aria-label="Next page"
                 >
                   Next
-                </Button>
+                </button>
               </div>
             )}
           </>
         )}
-      </div>
+      </section>
     </div>
   );
 }

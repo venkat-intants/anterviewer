@@ -10,8 +10,10 @@ const Card = React.forwardRef<
     ref={ref}
     className={cn(
       // Apple feature card: 28px radius, Snow white fill on the Fog canvas,
-      // hairline Silver-Mist border. NO shadow — elevation is value-only.
-      "rounded-[28px] border border-border bg-card text-card-foreground",
+      // hairline Silver-Mist border. Redesign adds a smooth transition baseline
+      // so any hover state (border/shadow/lift a page opts into) animates
+      // cleanly. Elevation stays value-only unless a page upgrades to GlowCard.
+      "rounded-[28px] border border-border bg-card text-card-foreground transition-[transform,box-shadow,border-color] duration-300 ease-out",
       className
     )}
     {...props}

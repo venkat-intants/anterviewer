@@ -1,10 +1,24 @@
 // AdminAnalytics — by-role bar chart, by-language breakdown, score distribution.
 // Route: /admin/analytics (inside AdminRoute + AppShell)
+//
+// Sources merged:
+//   A) Layout — design/screens/admin/AdminAnalytics.tsx (page header, GlassCard
+//      surfaces, Reveal wrappers, recharts styling, language pie legend shape)
+//   B) Behavior — current live AdminAnalytics.tsx (getByRole + getByLanguage +
+//      getScoreDistribution; by-role count bar horizontal; avg-axis-scores-by-role
+//      grouped bar; by-language pie + per-lang avg legend; score-distribution bar
+//      + 4 axis averages; loading/empty/error states)
+//
+// NOTE: Design's mock StatCards (Interviews MTD / Completion rate / Avg duration /
+//       Spend) and daily AreaChart are omitted — no live backing endpoint.
 
 import { useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { motion, type Variants } from 'framer-motion';
-import { BarChart3 } from 'lucide-react';
+import { useAccentColor } from '@/lib/useAccentColor';
+import {
+  BarChart3,
+  Activity,
+} from '@/design/components/icons';
 import {
   BarChart,
   Bar,
@@ -21,20 +35,24 @@ import {
 import { getByRole, getByLanguage, getScoreDistribution } from '@/api/admin';
 import { languageLabel } from '@/lib/formatters';
 import { toast } from '@/lib/toast';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Skeleton } from '@/components/ui/skeleton';
+import { GlassCard } from '@/design/components/primitives';
+import { Reveal } from '@/design/components/Reveal';
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
+// ── Dark chart theme tokens ────────────────────────────────────────────────────
 
-function fmtScore(v: number | null): string {
-  if (v === null) return '—';
-  return v.toFixed(2);
-}
+const CHART_GRID = 'rgba(255,255,255,0.08)';
+const CHART_TICKS = { fill: '#9a9aa0', fontSize: 11 } as const;
+const TOOLTIP_STYLE = {
+  background: '#1c1c1e',
+  border: '1px solid rgba(255,255,255,0.1)',
+  borderRadius: 12,
+  fontSize: 12,
+  color: '#f5f5f7',
+} as const;
 
-// Light categorical palette — Signal-Blue leads, cool secondaries follow.
-// Deterministic by index so series colours stay stable across renders.
+// Deterministic categorical palette — Signal-Blue leads, cool secondaries follow.
 const PALETTE = [
-  '#0071e3', // Signal-Blue (primary series)
+  '#0088ff', // Signal-Blue (primary series — fixed categorical anchor)
   '#8b5cf6', // violet
   '#10b981', // emerald
   '#f59e0b', // amber
@@ -43,34 +61,23 @@ const PALETTE = [
   '#ec4899', // pink
 ];
 
-// Light tooltip styling for recharts surfaces.
-const TOOLTIP_STYLE = {
-  background: '#ffffff',
-  border: '1px solid #e8e8ed',
-  borderRadius: '10px',
-  fontSize: 12,
-  color: '#1d1d1f',
-} as const;
+// ── Helpers ────────────────────────────────────────────────────────────────────
 
-const GRID_STROKE = '#e8e8ed';
-const AXIS_TICK = { fill: '#707070', fontSize: 11 } as const;
-
-// ── Animation ──────────────────────────────────────────────────────────────────
-
-const stagger: Variants = {
-  hidden: {},
-  visible: { transition: { staggerChildren: 0.07 } },
-};
-
-const fadeUp: Variants = {
-  hidden: { opacity: 0, y: 14 },
-  visible: { opacity: 1, y: 0, transition: { duration: 0.35, ease: [0.22, 1, 0.36, 1] } },
-};
+function fmtScore(v: number | null): string {
+  if (v === null) return '—';
+  return v.toFixed(2);
+}
 
 // ── Chart skeleton ─────────────────────────────────────────────────────────────
 
 function ChartSkeleton({ height = 220 }: { height?: number }) {
-  return <Skeleton className="w-full rounded-lg" style={{ height }} />;
+  return (
+    <div
+      className="w-full rounded-xl bg-white/[0.04] animate-pulse"
+      style={{ height }}
+      aria-hidden="true"
+    />
+  );
 }
 
 // ── Empty chart state ──────────────────────────────────────────────────────────
@@ -81,13 +88,13 @@ function ChartEmpty({ height = 220 }: { height?: number }) {
       className="flex flex-col items-center justify-center gap-3 text-center"
       style={{ height }}
     >
-      <BarChart3 className="h-8 w-8 text-muted-foreground/40" aria-hidden="true" />
-      <p className="text-body-sm text-muted-foreground">No data available yet.</p>
+      <BarChart3 className="h-8 w-8 text-[#888b91]/40" aria-hidden="true" />
+      <p className="text-[13px] text-[#888b91]">No data available yet.</p>
     </div>
   );
 }
 
-// ── By-role bar chart ──────────────────────────────────────────────────────────
+// ── By-role count bar chart (horizontal) ──────────────────────────────────────
 
 function ByRoleChart({
   data,
@@ -101,10 +108,10 @@ function ByRoleChart({
         layout="vertical"
         margin={{ top: 4, right: 24, bottom: 0, left: 8 }}
       >
-        <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} horizontal={false} />
+        <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID} horizontal={false} />
         <XAxis
           type="number"
-          tick={AXIS_TICK}
+          tick={CHART_TICKS}
           tickLine={false}
           axisLine={false}
           allowDecimals={false}
@@ -113,12 +120,12 @@ function ByRoleChart({
           type="category"
           dataKey="job_title"
           width={130}
-          tick={AXIS_TICK}
+          tick={CHART_TICKS}
           tickLine={false}
           axisLine={false}
         />
         <Tooltip
-          cursor={{ fill: 'rgba(0,0,0,0.04)' }}
+          cursor={{ fill: 'rgba(255,255,255,0.04)' }}
           contentStyle={TOOLTIP_STYLE}
           formatter={(value, name) => {
             if (name === 'interview_count') return [value ?? 0, 'Interviews'];
@@ -135,7 +142,7 @@ function ByRoleChart({
   );
 }
 
-// ── Avg score by role — grouped bar ───────────────────────────────────────────
+// ── Avg axis scores by role — grouped bar ─────────────────────────────────────
 
 function ByRoleScoreChart({
   data,
@@ -150,7 +157,7 @@ function ByRoleScoreChart({
   }[];
 }) {
   const chartData = data.map((d) => ({
-    name: d.job_title.length > 18 ? d.job_title.slice(0, 16) + '…' : d.job_title,
+    name: d.job_title.length > 18 ? `${d.job_title.slice(0, 16)}…` : d.job_title,
     Communication: d.avg_communication ?? 0,
     Technical: d.avg_technical ?? 0,
     'Problem Solving': d.avg_problem_solving ?? 0,
@@ -160,26 +167,27 @@ function ByRoleScoreChart({
   return (
     <ResponsiveContainer width="100%" height={240}>
       <BarChart data={chartData} margin={{ top: 4, right: 16, bottom: 0, left: 0 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} vertical={false} />
+        <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID} vertical={false} />
         <XAxis
           dataKey="name"
-          tick={AXIS_TICK}
+          tick={CHART_TICKS}
           tickLine={false}
           axisLine={false}
         />
         <YAxis
           domain={[0, 10]}
-          tick={AXIS_TICK}
+          tick={CHART_TICKS}
           tickLine={false}
           axisLine={false}
+          width={28}
         />
         <Tooltip
-          cursor={{ fill: 'rgba(0,0,0,0.04)' }}
+          cursor={{ fill: 'rgba(255,255,255,0.04)' }}
           contentStyle={TOOLTIP_STYLE}
-          formatter={(value, name) => [`${Number(value ?? 0).toFixed(2)} / 10`, name]}
+          formatter={(value, name) => [`${Number(value ?? 0).toFixed(2)} / 10`, name as string]}
         />
         <Legend
-          wrapperStyle={{ fontSize: 11, color: '#707070' }}
+          wrapperStyle={{ fontSize: 11, color: '#9a9aa0' }}
         />
         <Bar dataKey="Communication" fill={PALETTE[0]} fillOpacity={0.8} radius={[2, 2, 0, 0]} />
         <Bar dataKey="Technical" fill={PALETTE[1]} fillOpacity={0.8} radius={[2, 2, 0, 0]} />
@@ -190,7 +198,7 @@ function ByRoleScoreChart({
   );
 }
 
-// ── By-language pie chart ──────────────────────────────────────────────────────
+// ── By-language pie chart + per-lang avg legend ────────────────────────────────
 
 function ByLanguagePie({
   data,
@@ -201,52 +209,60 @@ function ByLanguagePie({
     name: languageLabel(d.language),
     value: d.interview_count,
     avg: d.avg_composite,
+    _raw: d.language,
   }));
 
   return (
     <div className="flex flex-col gap-4">
-      <ResponsiveContainer width="100%" height={200}>
-        <PieChart>
-          <Pie
-            data={pieData}
-            cx="50%"
-            cy="50%"
-            outerRadius={80}
-            dataKey="value"
-            label={({ name, percent }: { name?: string; percent?: number }) =>
-              `${name ?? ''} ${Math.round((percent ?? 0) * 100)}%`
-            }
-            labelLine={false}
-          >
-            {pieData.map((_, i) => (
-              <Cell key={i} fill={PALETTE[i % PALETTE.length]} />
-            ))}
-          </Pie>
-          <Tooltip
-            contentStyle={TOOLTIP_STYLE}
-            formatter={(value, _name, props) => [
-              `${Number(value ?? 0)} interviews · avg ${fmtScore((props.payload as { avg?: number | null } | undefined)?.avg ?? null)} / 10`,
-            ]}
-          />
-        </PieChart>
-      </ResponsiveContainer>
+      <div className="h-[180px] w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <PieChart>
+            <Pie
+              data={pieData}
+              cx="50%"
+              cy="50%"
+              innerRadius={48}
+              outerRadius={70}
+              paddingAngle={2}
+              dataKey="value"
+              stroke="none"
+              label={({ name, percent }: { name?: string; percent?: number }) =>
+                `${name ?? ''} ${Math.round((percent ?? 0) * 100)}%`
+              }
+              labelLine={false}
+            >
+              {pieData.map((_, i) => (
+                <Cell key={i} fill={PALETTE[i % PALETTE.length]} />
+              ))}
+            </Pie>
+            <Tooltip
+              contentStyle={TOOLTIP_STYLE}
+              formatter={(value, _name, props) => [
+                `${Number(value ?? 0)} interviews · avg ${fmtScore(
+                  (props.payload as { avg?: number | null } | undefined)?.avg ?? null,
+                )} / 10`,
+              ]}
+            />
+          </PieChart>
+        </ResponsiveContainer>
+      </div>
 
-      {/* Legend / table */}
-      <div className="space-y-1.5">
+      {/* Per-language avg legend */}
+      <div className="mt-2 flex flex-col gap-2">
         {data.map((d, i) => (
-          <div key={d.language} className="flex items-center justify-between text-body-sm">
-            <div className="flex items-center gap-2">
-              <span
-                className="inline-block h-3 w-3 rounded-sm"
-                style={{ background: PALETTE[i % PALETTE.length] }}
-                aria-hidden="true"
-              />
-              <span className="font-medium text-foreground">{languageLabel(d.language)}</span>
-            </div>
-            <div className="flex items-center gap-4 text-muted-foreground tabular-nums">
-              <span>{d.interview_count} interviews</span>
-              <span>avg {fmtScore(d.avg_composite)}</span>
-            </div>
+          <div key={d.language} className="flex items-center gap-2 text-[13px]">
+            <span
+              className="h-2.5 w-2.5 flex-none rounded-[3px]"
+              style={{ background: PALETTE[i % PALETTE.length] }}
+              aria-hidden="true"
+            />
+            <span className="font-medium text-white">{languageLabel(d.language)}</span>
+            <span className="ml-auto text-[#70757c] tabular-nums">
+              {d.interview_count} interviews
+            </span>
+            <span className="text-[#888b91] tabular-nums">
+              avg {fmtScore(d.avg_composite)}
+            </span>
           </div>
         ))}
       </div>
@@ -254,7 +270,7 @@ function ByLanguagePie({
   );
 }
 
-// ── Score distribution chart (reused from overview, but with axis avg table) ──
+// ── Score distribution + 4-axis averages ──────────────────────────────────────
 
 function DistributionSection({
   buckets,
@@ -269,38 +285,54 @@ function DistributionSection({
   avgProblemSolving: number | null;
   avgConfidence: number | null;
 }) {
+  const accent = useAccentColor();
   return (
     <div className="space-y-4">
-      <ResponsiveContainer width="100%" height={180}>
-        <BarChart data={buckets} margin={{ top: 4, right: 16, bottom: 0, left: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} vertical={false} />
-          <XAxis
-            dataKey="label"
-            tick={AXIS_TICK}
-            tickLine={false}
-            axisLine={false}
-          />
-          <YAxis
-            tick={AXIS_TICK}
-            tickLine={false}
-            axisLine={false}
-            allowDecimals={false}
-          />
-          <Tooltip
-            cursor={{ fill: 'rgba(0,0,0,0.04)' }}
-            contentStyle={TOOLTIP_STYLE}
-            formatter={(value) => [value ?? 0, 'Interviews']}
-          />
-          <Bar dataKey="count" fill="#0071e3" fillOpacity={0.85} radius={[4, 4, 0, 0]} />
-        </BarChart>
-      </ResponsiveContainer>
+      <div className="h-[220px] w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={buckets} margin={{ top: 4, right: 16, bottom: 0, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID} vertical={false} />
+            <XAxis
+              dataKey="label"
+              tick={CHART_TICKS}
+              tickLine={false}
+              axisLine={false}
+            />
+            <YAxis
+              tick={CHART_TICKS}
+              tickLine={false}
+              axisLine={false}
+              allowDecimals={false}
+              width={28}
+            />
+            <Tooltip
+              cursor={{ fill: 'rgba(0,136,255,0.06)' }}
+              contentStyle={TOOLTIP_STYLE}
+              formatter={(value) => [value ?? 0, 'Interviews']}
+            />
+            <Bar dataKey="count" fill={accent} fillOpacity={0.85} radius={[6, 6, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
 
       {/* Per-axis averages */}
-      <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-caption text-muted-foreground border-t border-border pt-3">
-        <span>Communication: <strong className="text-foreground font-semibold">{fmtScore(avgCommunication)}</strong></span>
-        <span>Technical: <strong className="text-foreground font-semibold">{fmtScore(avgTechnical)}</strong></span>
-        <span>Problem Solving: <strong className="text-foreground font-semibold">{fmtScore(avgProblemSolving)}</strong></span>
-        <span>Confidence: <strong className="text-foreground font-semibold">{fmtScore(avgConfidence)}</strong></span>
+      <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 border-t border-white/[0.06] pt-3 text-[12px] text-[#888b91]">
+        <span>
+          Communication:{' '}
+          <strong className="text-white font-semibold">{fmtScore(avgCommunication)}</strong>
+        </span>
+        <span>
+          Technical:{' '}
+          <strong className="text-white font-semibold">{fmtScore(avgTechnical)}</strong>
+        </span>
+        <span>
+          Problem Solving:{' '}
+          <strong className="text-white font-semibold">{fmtScore(avgProblemSolving)}</strong>
+        </span>
+        <span>
+          Confidence:{' '}
+          <strong className="text-white font-semibold">{fmtScore(avgConfidence)}</strong>
+        </span>
       </div>
     </div>
   );
@@ -346,24 +378,29 @@ export default function AdminAnalytics() {
     }
   }, [roleError, roleErr]);
 
+  // ── Page ──────────────────────────────────────────────────────────────────────
+
   return (
-    <motion.div initial="hidden" animate="visible" variants={stagger} className="space-y-8">
-      {/* Page heading */}
-      <motion.div variants={fadeUp}>
-        <h1 className="text-heading font-semibold text-foreground">Analytics</h1>
-        <p className="mt-2 text-body-sm text-muted-foreground">
+    <div className="mx-auto max-w-[1280px] px-0 py-0 space-y-8">
+
+      {/* Page heading — design layout */}
+      <div>
+        <div className="flex items-center gap-2 text-[13px] text-[#888b91]">
+          <Activity size={15} className="text-[#60a5fa]" aria-hidden="true" />
+          Usage, throughput and spend across the platform
+        </div>
+        <h1 className="mt-1 text-[28px] font-semibold tracking-[-1px] text-white">Analytics</h1>
+        <p className="mt-1 text-[14px] text-[#888b91]">
           Aggregated performance data broken down by role, language, and score distribution.
         </p>
-      </motion.div>
+      </div>
 
-      {/* Row 1: by-role count + by-role score breakdown */}
-      <motion.div variants={fadeUp} className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      {/* Row 1: by-role count + by-role axis-score breakdown */}
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
         {/* Interview count by role */}
-        <Card className="transition-shadow hover:shadow-card-hover">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-subheading font-semibold text-foreground">Interviews by Role</CardTitle>
-          </CardHeader>
-          <CardContent>
+        <Reveal dir="left">
+          <GlassCard className="p-5">
+            <h3 className="mb-4 text-[16px] font-semibold text-white">Interviews by Role</h3>
             {roleLoading ? (
               <ChartSkeleton height={240} />
             ) : !roleData || roleData.length === 0 ? (
@@ -371,15 +408,15 @@ export default function AdminAnalytics() {
             ) : (
               <ByRoleChart data={roleData} />
             )}
-          </CardContent>
-        </Card>
+          </GlassCard>
+        </Reveal>
 
-        {/* Axis-score averages by role */}
-        <Card className="transition-shadow hover:shadow-card-hover">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-subheading font-semibold text-foreground">Avg Axis Scores by Role</CardTitle>
-          </CardHeader>
-          <CardContent>
+        {/* Avg axis scores by role — unique live feature, preserved */}
+        <Reveal dir="right">
+          <GlassCard className="p-5">
+            <h3 className="mb-4 text-[16px] font-semibold text-white">
+              Avg Axis Scores by Role
+            </h3>
             {roleLoading ? (
               <ChartSkeleton height={240} />
             ) : !roleData || roleData.length === 0 ? (
@@ -387,38 +424,34 @@ export default function AdminAnalytics() {
             ) : (
               <ByRoleScoreChart data={roleData} />
             )}
-          </CardContent>
-        </Card>
-      </motion.div>
+          </GlassCard>
+        </Reveal>
+      </div>
 
-      {/* Row 2: by-language + score distribution */}
-      <motion.div variants={fadeUp} className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* By language */}
-        <Card className="transition-shadow hover:shadow-card-hover">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-subheading font-semibold text-foreground">Interviews by Language</CardTitle>
-          </CardHeader>
-          <CardContent>
+      {/* Row 2: by-language pie + score distribution — design's bottom section */}
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
+        {/* By language — design gives this the right-panel slot */}
+        <Reveal dir="right">
+          <GlassCard className="h-full p-5">
+            <h3 className="mb-3 text-[16px] font-semibold text-white">Language Mix</h3>
             {langLoading ? (
-              <ChartSkeleton height={200} />
+              <ChartSkeleton height={180} />
             ) : !langData || langData.length === 0 ? (
-              <ChartEmpty height={200} />
+              <ChartEmpty height={180} />
             ) : (
               <ByLanguagePie data={langData} />
             )}
-          </CardContent>
-        </Card>
+          </GlassCard>
+        </Reveal>
 
-        {/* Score distribution */}
-        <Card className="transition-shadow hover:shadow-card-hover">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-subheading font-semibold text-foreground">Score Distribution</CardTitle>
-          </CardHeader>
-          <CardContent>
+        {/* Score distribution + axis averages — design's 2-col span section */}
+        <Reveal dir="left" className="lg:col-span-2">
+          <GlassCard className="p-5">
+            <h3 className="mb-4 text-[16px] font-semibold text-white">Score Distribution</h3>
             {distLoading ? (
-              <ChartSkeleton height={180} />
+              <ChartSkeleton height={220} />
             ) : !distData ? (
-              <ChartEmpty height={180} />
+              <ChartEmpty height={220} />
             ) : (
               <DistributionSection
                 buckets={distData.buckets}
@@ -428,9 +461,9 @@ export default function AdminAnalytics() {
                 avgConfidence={distData.avg_confidence}
               />
             )}
-          </CardContent>
-        </Card>
-      </motion.div>
-    </motion.div>
+          </GlassCard>
+        </Reveal>
+      </div>
+    </div>
   );
 }

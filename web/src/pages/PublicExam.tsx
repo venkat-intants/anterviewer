@@ -3,12 +3,24 @@
 // PUBLIC, no login. The magic-link token comes from the URL #fragment (never sent
 // to the server in the URL) and is forwarded as the X-Exam-Token header by the
 // publicExam API client. No app shell — a clean, focused full-screen experience.
+//
+// SECURITY: token MUST come from window.location.hash — NOT useParams.
+// Design mockup used useParams; that has been deliberately rejected here.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
-import { Loader2, AlertCircle, CheckCircle2, XCircle, Clock, ClipboardList } from 'lucide-react';
+import {
+  Loader2,
+  AlertCircle,
+  CheckCircle2,
+  XCircle,
+  Clock,
+  ListChecks,
+  Languages,
+  ShieldCheck,
+} from '@/design/components/icons';
 import {
   getPublicExam,
   startExam,
@@ -16,9 +28,8 @@ import {
   type ExamResult,
 } from '@/api/publicExam';
 import { cn } from '@/lib/utils';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { Card } from '@/components/ui/card';
+import { AuroraField } from '@/design/components/AuroraField';
+import { GlassCard, Pill, StatusTag } from '@/design/components/primitives';
 
 function fmt(totalSec: number): string {
   const s = Math.max(0, totalSec);
@@ -27,9 +38,31 @@ function fmt(totalSec: number): string {
 
 type Phase = 'intro' | 'taking' | 'result';
 
+// ── Full-page dark centred layout (shared by loading / error / result states) ──
+function PageWrap({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="relative flex min-h-screen flex-col items-center justify-center bg-midnight px-6 py-12 font-sans text-foreground">
+      <AuroraField />
+      {/* Logo mark */}
+      <div className="absolute left-6 top-6 z-10 flex items-center gap-2.5">
+        <span className="flex h-8 w-8 items-center justify-center rounded-[9px] bg-[linear-gradient(135deg,#112d72,#a887dc)]">
+          <span className="h-2.5 w-2.5 rounded-full bg-white" />
+        </span>
+        <span className="text-[15px] font-semibold text-foreground">Anterview</span>
+      </div>
+      <div className="relative z-10 flex w-full max-w-[520px] flex-col items-center gap-4 text-center">
+        {children}
+      </div>
+    </div>
+  );
+}
+
 export default function PublicExam() {
   const { t } = useTranslation();
+
+  // SECURITY: token from #fragment — never from a path param.
   const [token] = useState(() => window.location.hash.replace(/^#/, '').trim());
+  const [consent, setConsent] = useState(false);
 
   const examQ = useQuery({
     queryKey: ['public-exam', token],
@@ -98,34 +131,36 @@ export default function PublicExam() {
   // ── No token / invalid / expired ──
   if (!token || examQ.isError) {
     return (
-      <Centered>
-        <span className="inline-flex h-12 w-12 items-center justify-center rounded-[9px] bg-amber-50 text-amber-600">
+      <PageWrap>
+        <span className="inline-flex h-12 w-12 items-center justify-center rounded-[9px] bg-[rgba(255,183,100,0.15)] text-amber-glow">
           <AlertCircle className="h-6 w-6" aria-hidden="true" />
         </span>
         <h1 className="text-subheading font-semibold text-foreground">
           {t('publicExam.invalidTitle')}
         </h1>
-        <p className="max-w-sm text-body-sm text-muted-foreground">{t('publicExam.invalidDesc')}</p>
-      </Centered>
+        <p className="max-w-sm text-body-sm text-muted-foreground">
+          {t('publicExam.invalidDesc')}
+        </p>
+      </PageWrap>
     );
   }
 
   if (examQ.isLoading || !examQ.data) {
     return (
-      <Centered>
-        <Loader2 className="h-8 w-8 animate-spin text-primary" aria-hidden="true" />
+      <PageWrap>
+        <Loader2 className="h-8 w-8 animate-spin text-electric" aria-hidden="true" />
         <p className="text-body-sm text-muted-foreground">{t('publicExam.loading')}</p>
-      </Centered>
+      </PageWrap>
     );
   }
 
   const exam = examQ.data;
 
-  // ── Already completed (single-shot) ──
+  // ── Already completed (single-shot / no retake) ──
   if (phase !== 'result' && exam.already_submitted && !exam.allow_retake) {
     return (
-      <Centered>
-        <span className="inline-flex h-12 w-12 items-center justify-center rounded-[9px] bg-emerald-50 text-emerald-600">
+      <PageWrap>
+        <span className="inline-flex h-12 w-12 items-center justify-center rounded-[9px] bg-[rgba(39,201,63,0.15)] text-vivid-mint">
           <CheckCircle2 className="h-6 w-6" aria-hidden="true" />
         </span>
         <h1 className="text-subheading font-semibold text-foreground">
@@ -134,103 +169,185 @@ export default function PublicExam() {
         <p className="max-w-sm text-body-sm text-muted-foreground">
           {t('publicExam.completedDesc')}
         </p>
-      </Centered>
+      </PageWrap>
     );
   }
 
   // ── Result ──
   if (phase === 'result' && result) {
     return (
-      <Centered>
+      <PageWrap>
         <motion.div
           initial={{ opacity: 0, scale: 0.92 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ type: 'spring', stiffness: 220, damping: 20 }}
-          className="flex flex-col items-center gap-4"
+          className="w-full"
         >
-          <span
-            className={cn(
-              'inline-flex h-16 w-16 items-center justify-center rounded-3xl',
-              result.passed ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600',
-            )}
-          >
-            {result.passed ? (
-              <CheckCircle2 className="h-8 w-8" aria-hidden="true" />
-            ) : (
-              <XCircle className="h-8 w-8" aria-hidden="true" />
-            )}
-          </span>
-          <h1 className="text-heading-lg font-semibold tracking-heading-lg text-foreground">
-            {result.score_percent}%
-          </h1>
-          <p className="text-body-sm text-muted-foreground">
-            {t('publicExam.points', { raw: result.score_raw, max: result.score_max })}
-            {result.status === 'expired' ? t('publicExam.submittedAtLimit') : ''}
-          </p>
-          <Badge variant={result.passed ? 'success' : 'destructive'}>
-            {result.passed ? t('publicExam.passed') : t('publicExam.notThisTime')}
-          </Badge>
-          <p className="max-w-sm text-body-sm text-muted-foreground">
-            {t('publicExam.resultThanks')}
-          </p>
+          <GlassCard className="flex flex-col items-center gap-4 p-8 text-center">
+            <span
+              className={cn(
+                'inline-flex h-16 w-16 items-center justify-center rounded-3xl',
+                result.passed
+                  ? 'bg-[rgba(39,201,63,0.15)] text-vivid-mint'
+                  : 'bg-[rgba(230,113,79,0.15)] text-ember',
+              )}
+            >
+              {result.passed ? (
+                <CheckCircle2 className="h-8 w-8" aria-hidden="true" />
+              ) : (
+                <XCircle className="h-8 w-8" aria-hidden="true" />
+              )}
+            </span>
+            <h1 className="text-heading font-semibold tracking-heading text-foreground">
+              {result.score_percent}%
+            </h1>
+            <p className="text-body-sm text-muted-foreground">
+              {t('publicExam.points', { raw: result.score_raw, max: result.score_max })}
+              {result.status === 'expired' ? t('publicExam.submittedAtLimit') : ''}
+            </p>
+            <StatusTag tone={result.passed ? 'forest' : 'ember'} dot>
+              {result.passed ? t('publicExam.passed') : t('publicExam.notThisTime')}
+            </StatusTag>
+            <p className="max-w-sm text-body-sm text-muted-foreground">
+              {t('publicExam.resultThanks')}
+            </p>
+          </GlassCard>
         </motion.div>
-      </Centered>
+      </PageWrap>
     );
   }
 
   // ── Intro ──
   if (phase === 'intro') {
+    const facts = [
+      {
+        icon: ListChecks,
+        label: t('publicExam.factQuestions'),
+        value: t('publicExam.questionsCount', { count: exam.total_questions }),
+      },
+      ...(exam.time_limit_seconds
+        ? [
+            {
+              icon: Clock,
+              label: t('publicExam.factDuration'),
+              value: t('publicExam.minutes', {
+                count: Math.round(exam.time_limit_seconds / 60),
+              }),
+            },
+          ]
+        : []),
+      {
+        icon: Languages,
+        label: t('publicExam.factLanguage'),
+        value: 'EN · हि · తె',
+      },
+    ];
+
     return (
-      <Centered>
-        <motion.div
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-        >
-          <Card className="flex w-full max-w-lg flex-col items-center gap-4 p-8 shadow-elevated ring-1 ring-primary/10">
-            <span className="inline-flex h-14 w-14 items-center justify-center rounded-[9px] bg-secondary text-foreground">
-              <ClipboardList className="h-7 w-7" aria-hidden="true" />
+      <div className="relative flex min-h-screen flex-col items-center justify-center bg-midnight px-6 py-12 font-sans text-foreground">
+        <AuroraField />
+        <div className="relative z-10 w-full max-w-[520px]">
+          {/* Logo */}
+          <div className="mb-6 flex items-center gap-2.5">
+            <span className="flex h-8 w-8 items-center justify-center rounded-[9px] bg-[linear-gradient(135deg,#112d72,#a887dc)]">
+              <span className="h-2.5 w-2.5 rounded-full bg-white" />
             </span>
-            <h1 className="text-subheading font-semibold text-foreground">{exam.title}</h1>
-            {exam.description && (
-              <p className="max-w-md text-body-sm text-muted-foreground">{exam.description}</p>
-            )}
-            <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-body-sm text-muted-foreground">
-              <span>{t('publicExam.questionsCount', { count: exam.total_questions })}</span>
-              {exam.time_limit_seconds && (
-                <span className="flex items-center gap-1.5">
-                  <Clock className="h-4 w-4 text-primary" aria-hidden="true" />
-                  {t('publicExam.minutes', { count: Math.round(exam.time_limit_seconds / 60) })}
-                </span>
-              )}
+            <span className="text-[15px] font-semibold text-foreground">Anterview</span>
+          </div>
+
+          <GlassCard className="p-8">
+            {/* Header row */}
+            <div className="flex items-center justify-between">
+              <StatusTag tone="forest" dot>
+                {t('publicExam.liveExam')}
+              </StatusTag>
+              <span className="font-mono text-[11px] text-fog">
+                #{token.slice(0, 10)}
+              </span>
             </div>
-            {exam.time_limit_seconds && (
-              <p className="text-caption text-amber-600">{t('publicExam.timerNote')}</p>
+
+            <h1 className="mt-4 text-[26px] font-semibold tracking-[-0.8px] text-foreground">
+              {exam.title}
+            </h1>
+
+            {exam.description && (
+              <p className="mt-1.5 text-body-sm text-muted-foreground">{exam.description}</p>
             )}
-            <Button
-              size="lg"
-              disabled={startMut.isPending}
-              onClick={() => startMut.mutate()}
-              className="mt-1 gap-2"
+
+            {/* Fact grid */}
+            <div
+              className={cn(
+                'mt-6 grid gap-3',
+                facts.length === 3 ? 'grid-cols-3' : 'grid-cols-2',
+              )}
             >
-              {startMut.isPending ? <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" /> : null}
+              {facts.map((f) => {
+                const Icon = f.icon;
+                return (
+                  <div
+                    key={f.label}
+                    className="rounded-[12px] border border-white/[0.08] bg-white/[0.02] p-4"
+                  >
+                    <Icon size={16} className="text-electric" aria-hidden="true" />
+                    <div className="mt-2 text-[11px] uppercase tracking-[0.5px] text-fog">
+                      {f.label}
+                    </div>
+                    <div className="mt-0.5 text-[13.5px] font-medium text-foreground">
+                      {f.value}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Timer warning */}
+            {exam.time_limit_seconds && (
+              <p className="mt-4 text-caption text-amber-glow">{t('publicExam.timerNote')}</p>
+            )}
+
+            {/* DPDP consent */}
+            <label className="mt-6 flex cursor-pointer items-start gap-2.5 rounded-[12px] border border-white/[0.08] bg-white/[0.02] p-4 text-[12.5px] text-mist">
+              <input
+                type="checkbox"
+                checked={consent}
+                onChange={(e) => setConsent(e.target.checked)}
+                className="mt-0.5 h-4 w-4 flex-none accent-electric"
+              />
+              <span className="flex items-center gap-1.5">
+                <ShieldCheck size={14} className="flex-none text-vivid-mint" aria-hidden="true" />
+                {t('publicExam.consentLabel')}
+              </span>
+            </label>
+
+            <Pill
+              className="mt-6 w-full py-3.5"
+              disabled={!consent || startMut.isPending}
+              onClick={() => startMut.mutate()}
+            >
+              {startMut.isPending ? (
+                <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />
+              ) : null}
               {t('publicExam.startExam')}
-            </Button>
+            </Pill>
+
             {startMut.isError && (
-              <p className="text-body-sm text-rose-600">
-                {startMut.error instanceof Error ? startMut.error.message : t('publicExam.couldNotStart')}
+              <p className="mt-3 text-center text-body-sm text-ember">
+                {startMut.error instanceof Error
+                  ? startMut.error.message
+                  : t('publicExam.couldNotStart')}
               </p>
             )}
-          </Card>
-        </motion.div>
-      </Centered>
+          </GlassCard>
+        </div>
+      </div>
     );
   }
 
   // ── Taking ──
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-midnight font-sans">
       {/* Sticky bar */}
-      <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-border bg-white/80 px-4 py-3 backdrop-blur-xl">
+      <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-white/[0.08] bg-obsidian/80 px-4 py-3 backdrop-blur-xl">
         <div className="min-w-0">
           <p className="truncate text-body-sm font-semibold text-foreground">{exam.title}</p>
           <p className="text-caption text-muted-foreground">
@@ -241,8 +358,12 @@ export default function PublicExam() {
           <div
             className={cn(
               'flex items-center gap-1.5 rounded-full px-3 py-1.5 text-body-sm font-medium tabular-nums',
-              remaining <= 30 ? 'bg-rose-50 text-rose-600' : 'bg-secondary text-foreground',
+              remaining <= 30
+                ? 'bg-[rgba(230,113,79,0.15)] text-ember'
+                : 'bg-white/[0.06] text-foreground',
             )}
+            aria-live="polite"
+            aria-label={t('publicExam.timeRemaining', { time: fmt(remaining) })}
           >
             <Clock className="h-4 w-4" aria-hidden="true" />
             {fmt(remaining)}
@@ -256,22 +377,23 @@ export default function PublicExam() {
             key={q.id}
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: i * 0.04 }}
           >
-            <Card className="p-6 transition-shadow hover:shadow-card-hover">
+            <GlassCard className="rounded-[16px] p-6 transition-colors hover:border-electric/30">
               <p className="text-body font-medium text-foreground">
                 {i + 1}. {q.prompt}
               </p>
-              <div className="mt-4 space-y-2">
+              <div className="mt-4 space-y-2" role="radiogroup" aria-label={q.prompt}>
                 {q.options.map((opt, oi) => {
                   const checked = answers[q.id] === oi;
                   return (
                     <label
                       key={oi}
                       className={cn(
-                        'flex cursor-pointer items-center gap-3 rounded-xl border px-3 py-2.5 text-body-sm transition-colors',
+                        'flex cursor-pointer items-center gap-3 rounded-[12px] border px-3 py-2.5 text-body-sm transition-colors',
                         checked
-                          ? 'border-primary/60 bg-primary/10 text-foreground'
-                          : 'border-border text-muted-foreground hover:bg-accent',
+                          ? 'border-electric/60 bg-electric/10 text-foreground'
+                          : 'border-white/[0.08] text-muted-foreground hover:border-white/20 hover:bg-white/[0.03]',
                       )}
                     >
                       <input
@@ -279,14 +401,14 @@ export default function PublicExam() {
                         name={q.id}
                         checked={checked}
                         onChange={() => setAnswers((prev) => ({ ...prev, [q.id]: oi }))}
-                        className="h-4 w-4 accent-primary"
+                        className="h-4 w-4 accent-electric"
                       />
                       {opt}
                     </label>
                   );
                 })}
               </div>
-            </Card>
+            </GlassCard>
           </motion.div>
         ))}
 
@@ -296,25 +418,24 @@ export default function PublicExam() {
               ? t('publicExam.unanswered', { count: questions.length - answeredCount })
               : t('publicExam.allAnswered')}
           </p>
-          <Button onClick={doSubmit} disabled={submitMut.isPending} size="lg" className="gap-2">
-            {submitMut.isPending ? <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" /> : null}
+          <Pill
+            onClick={doSubmit}
+            disabled={submitMut.isPending}
+          >
+            {submitMut.isPending ? (
+              <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />
+            ) : null}
             {t('publicExam.submitExam')}
-          </Button>
+          </Pill>
         </div>
         {submitMut.isError && (
-          <p className="text-right text-body-sm text-rose-600">
-            {submitMut.error instanceof Error ? submitMut.error.message : t('publicExam.submitFailed')}
+          <p className="text-right text-body-sm text-ember">
+            {submitMut.error instanceof Error
+              ? submitMut.error.message
+              : t('publicExam.submitFailed')}
           </p>
         )}
       </div>
-    </div>
-  );
-}
-
-function Centered({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="relative flex min-h-screen flex-col items-center justify-center gap-3 overflow-hidden bg-background px-6 text-center">
-      <div className="relative z-10 flex flex-col items-center gap-3">{children}</div>
     </div>
   );
 }

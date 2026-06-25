@@ -6,21 +6,29 @@
 // state token is single-use (Redis get-then-delete) and React StrictMode
 // double-invokes effects in development — a second call would burn the token.
 //
-// Presentation rebuilt to match the auth page visual language (brand logo,
-// design tokens, framer-motion). OAuth mechanics are completely unchanged.
+// Presentation = aurora-dark design language. OAuth mechanics are UNCHANGED.
 
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
-import { AlertCircle } from 'lucide-react';
 import { completeGoogleLogin } from '@/api/sso';
 import { getMe } from '@/api/auth';
 import { useAuth } from '@/context/AuthContext';
 import { toast } from '@/lib/toast';
-import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
+import { AuroraField } from '@/design/components/AuroraField';
+import { Pill } from '@/design/components/primitives';
+import { AlertCircle } from '@/design/components/icons';
 import type { AuthUser } from '@/types/auth';
+
+/** Brand dot-in-rounded-square mark (matches the design auth shell). */
+function BrandMark() {
+  return (
+    <span className="inline-flex h-12 w-12 items-center justify-center rounded-[11px] bg-[linear-gradient(135deg,#112d72,#a887dc)] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.2)]">
+      <span className="h-3.5 w-3.5 rounded-full bg-white" />
+    </span>
+  );
+}
 
 export default function GoogleCallback() {
   const { t } = useTranslation();
@@ -70,49 +78,47 @@ export default function GoogleCallback() {
   }, [params, navigate, setAuth, t]);
 
   return (
-    <main className="min-h-screen bg-background flex items-center justify-center px-4 py-12">
+    <main className="relative flex min-h-screen items-center justify-center bg-black px-4 py-12 font-sans text-white">
+      <AuroraField />
       {error ? (
         /* ── Error state ────────────────────────────────────────────────────── */
         <motion.div
           initial={{ opacity: 0, scale: 0.96 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 0.3 }}
-          className="w-full max-w-md"
+          className="relative z-10 w-full max-w-md"
         >
-          {/* Brand */}
-          <div className="text-center mb-8">
+          <div className="mb-8 flex justify-center">
             <Link
               to="/"
-              className="inline-flex flex-col items-center gap-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-[9px]"
+              className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] rounded-[11px]"
             >
-              <span className="inline-flex h-12 w-12 items-center justify-center rounded-[9px] bg-primary text-primary-foreground text-xl font-semibold select-none">
-                I
-              </span>
+              <BrandMark />
             </Link>
           </div>
 
-          <Card
+          <div
             role="alert"
-            className="p-8 text-center shadow-card"
+            className="rounded-[24px] border border-[rgba(230,113,79,0.2)] bg-[#0f0f10] p-8 text-center"
           >
-            <div className="flex justify-center mb-4">
-              <span className="inline-flex h-12 w-12 items-center justify-center rounded-full bg-destructive/10">
-                <AlertCircle className="h-6 w-6 text-destructive" aria-hidden="true" />
+            <div className="mb-4 flex justify-center">
+              <span className="inline-flex h-12 w-12 items-center justify-center rounded-full bg-[rgba(230,113,79,0.16)]">
+                <AlertCircle className="h-6 w-6 text-[#e6714f]" aria-hidden="true" />
               </span>
             </div>
-            <h1 className="text-subheading font-semibold text-foreground mb-2">
+            <h1 className="mb-2 text-[20px] font-semibold tracking-[-0.4px] text-white">
               {t('googleCallback.failedTitle')}
             </h1>
-            <p className="text-body-sm text-muted-foreground mb-6">{error}</p>
-            <div className="flex flex-col sm:flex-row gap-3 justify-center">
-              <Button asChild variant="default">
-                <Link to="/login">{t('googleCallback.backToSignIn')}</Link>
-              </Button>
-              <Button type="button" variant="outline" onClick={() => window.location.reload()}>
+            <p className="mb-6 text-[13.5px] text-[#888b91]">{error}</p>
+            <div className="flex flex-col justify-center gap-3 sm:flex-row">
+              <Link to="/login">
+                <Pill className="w-full sm:w-auto">{t('googleCallback.backToSignIn')}</Pill>
+              </Link>
+              <Pill variant="ghost" type="button" onClick={() => window.location.reload()}>
                 {t('googleCallback.retry')}
-              </Button>
+              </Pill>
             </div>
-          </Card>
+          </div>
         </motion.div>
       ) : (
         /* ── Loading state ──────────────────────────────────────────────────── */
@@ -120,24 +126,20 @@ export default function GoogleCallback() {
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.3 }}
-          className="text-center"
+          className="relative z-10 text-center"
         >
-          {/* Brand mark */}
-          <span className="inline-flex h-12 w-12 items-center justify-center rounded-[9px] bg-primary text-primary-foreground text-xl font-semibold select-none mb-6">
-            I
-          </span>
-
-          {/* Spinner */}
-          <div className="flex justify-center mb-4">
+          <div className="mb-6 flex justify-center">
+            <BrandMark />
+          </div>
+          <div className="mb-4 flex justify-center">
             <div
-              className="h-8 w-8 animate-spin rounded-full border-[3px] border-primary border-t-transparent"
+              className="h-8 w-8 animate-spin rounded-full border-[3px] border-[var(--accent)] border-t-transparent"
               role="status"
               aria-label={t('googleCallback.completing')}
             />
           </div>
-
-          <p className="text-body-sm font-medium text-foreground">{t('googleCallback.completing')}</p>
-          <p className="mt-1 text-caption text-muted-foreground">{t('googleCallback.momentSub')}</p>
+          <p className="text-[14px] font-medium text-white">{t('googleCallback.completing')}</p>
+          <p className="mt-1 text-[12px] text-[#888b91]">{t('googleCallback.momentSub')}</p>
         </motion.div>
       )}
     </main>

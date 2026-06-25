@@ -129,7 +129,9 @@ async def score_resume(
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.2,
-            "maxOutputTokens": 2048,
+            # Generous budget so the structured JSON body is never truncated
+            # (thinking-capable models spend part of this on reasoning).
+            "maxOutputTokens": 4096,
             "responseMimeType": "application/json",
         },
     }
@@ -165,6 +167,13 @@ async def score_resume(
     cleaned = raw_text.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    # Tolerate any prose the model wraps around the object: parse the outermost
+    # {...} span. With responseMimeType=json this is usually a no-op, but it
+    # prevents brittle failures when the model prepends a stray token.
+    if not cleaned.startswith("{"):
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        if start != -1 and end > start:
+            cleaned = cleaned[start : end + 1]
     try:
         parsed: dict[str, Any] = json.loads(cleaned)
     except json.JSONDecodeError as exc:

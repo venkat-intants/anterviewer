@@ -49,6 +49,8 @@ from app.routers.hr_pipeline import router as hr_pipeline_router
 from app.routers.interview_take import router as interview_take_router
 from app.routers.jd import router as jd_router
 from app.routers.jobs import router as jobs_router
+from app.routers.notifications import router as notifications_router
+from app.routers.profile import router as profile_router
 from app.routers.resume import router as resume_router
 from app.routers.sso_google import router as sso_google_router
 from app.routers.sso_naipunyam import router as sso_naipunyam_router
@@ -195,6 +197,8 @@ app.include_router(interview_take_router)
 app.include_router(hr_pipeline_router)
 app.include_router(consent_router)
 app.include_router(jobs_router)
+app.include_router(notifications_router)
+app.include_router(profile_router)
 app.include_router(resume_router)
 app.include_router(jd_router)
 app.include_router(sso_naipunyam_router)

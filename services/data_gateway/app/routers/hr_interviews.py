@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.interview_link import hash_interview_token, mint_interview_token
 from app.models import Applicant, InterviewInvite, Job, Scorecard
+from app.notifications_util import create_notification
 from app.routers.hr_applicants import DbSessionDep, HrCtxDep, _get_owned
 
 log = structlog.get_logger(__name__)
@@ -271,6 +272,15 @@ async def create_invite(body: InviteCreateIn, ctx: HrCtxDep, db: DbSessionDep) -
         updated_at=now,
     )
     db.add(invite)
+    # Notify the inviting HR (their own activity feed).
+    await create_notification(
+        db,
+        user_id=hr_uid,
+        kind="invite_sent",
+        title="Interview invite sent",
+        body=f"{applicant.full_name} · {job.title}",
+        link="/hr/interviews",
+    )
     await db.commit()
 
     base = settings.interview_link_base_url.rstrip("/")
@@ -321,6 +331,15 @@ async def list_invites(
             inv.status = "completed"
             inv.updated_at = now
             dirty = True
+            # Notify the inviting HR that the interview finished + is scored.
+            await create_notification(
+                db,
+                user_id=inv.created_by_user_id,
+                kind="interview_completed",
+                title="Interview completed",
+                body=f"{name} finished their interview — scorecard ready",
+                link="/hr/interviews",
+            )
         out.append(
             InviteOut(
                 invite_id=str(inv.id), applicant_id=str(inv.applicant_id), applicant_name=name,

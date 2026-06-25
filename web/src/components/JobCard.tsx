@@ -17,9 +17,9 @@ const LEVEL_KEY: Record<string, string> = {
 
 // Level chip tints — light-system tinted pills
 const LEVEL_CLASS: Record<string, string> = {
-  entry: 'border-transparent bg-emerald-50 text-emerald-700',
-  mid: 'border-transparent bg-blue-50 text-blue-700',
-  senior: 'border-transparent bg-violet-50 text-violet-700',
+  entry: 'border-transparent bg-emerald-500/15 text-emerald-400',
+  mid: 'border-transparent bg-blue-500/15 text-blue-400',
+  senior: 'border-transparent bg-violet-500/15 text-violet-400',
 };
 
 // Language names stay in their own script across all locales (proper nouns).

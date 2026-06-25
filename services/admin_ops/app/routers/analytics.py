@@ -848,6 +848,63 @@ async def get_interview_detail(
 
 
 # ---------------------------------------------------------------------------
+# 3b. GET /admin/interviews/{session_id}/transcript — conversation turns
+# ---------------------------------------------------------------------------
+
+
+class TranscriptTurn(BaseModel):
+    turn_number: int
+    speaker: str  # interviewer | candidate
+    text: str | None
+    created_at: str | None
+
+
+class TranscriptResponse(BaseModel):
+    session_id: str
+    turns: list[TranscriptTurn]
+
+
+@router.get(
+    "/interviews/{session_id}/transcript",
+    response_model=TranscriptResponse,
+    summary="Interview transcript (ordered conversation turns)",
+)
+async def get_interview_transcript(
+    session_id: uuid.UUID,
+    admin_sub: AdminDep,
+    db: DbSessionDep,
+) -> TranscriptResponse:
+    """Ordered conversation turns for a session (admin drill-in)."""
+    rows = (
+        await db.execute(
+            sa_text(
+                """
+                SELECT t.turn_number, t.speaker, t.text_content, t.created_at
+                FROM turns t
+                JOIN sessions s ON s.id = t.session_id
+                WHERE t.session_id = :session_id AND s.deleted_at IS NULL
+                ORDER BY t.turn_number ASC
+                """
+            ),
+            {"session_id": session_id},
+        )
+    ).mappings().all()
+    log.info("analytics.interview.transcript", actor=admin_sub, session_id=str(session_id))
+    return TranscriptResponse(
+        session_id=str(session_id),
+        turns=[
+            TranscriptTurn(
+                turn_number=int(r["turn_number"]),
+                speaker=str(r["speaker"]),
+                text=str(r["text_content"]) if r["text_content"] else None,
+                created_at=_iso(r["created_at"]),
+            )
+            for r in rows
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
 # 4. GET /admin/analytics/by-role
 # ---------------------------------------------------------------------------
 

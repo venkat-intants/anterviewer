@@ -1,11 +1,17 @@
 // AdminInterviews — filterable, sortable, paginated admin interview list.
 // Route: /admin/interviews (inside AdminRoute + AppShell)
-// Filters: date range, status, language, score range, free-text search (q).
-// Sort: created_at (default desc) or composite_score.
-// Row click: navigates to /admin/interviews/:sessionId
-// Export: CSV download via exportInterviewsCsv().
+//
+// Sources merged:
+//   A) Layout — design/screens/admin/AdminInterviews.tsx (page header, search pill,
+//      SegTabs, GlassCard grid rows, Avatar + StatusTag treatment, ArrowRight chevron)
+//   B) Behavior — current live AdminInterviews.tsx (listInterviews query, debounced
+//      search, status/language/sort filters, exportInterviewsCsv, PER_PAGE=20
+//      pagination, row→/admin/interviews/:id + keyboard nav, columns: Name/Email/
+//      Role/Status/Language/Score/Date/Duration, all test-ids, empty/error/loading)
+//
+// No @/components/ui/* — replaced with native styled HTML throughout.
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { motion, type Variants } from 'framer-motion';
@@ -16,32 +22,14 @@ import {
   ChevronRight,
   AlertCircle,
   ClipboardList,
-  ArrowUpDown,
-} from 'lucide-react';
+  ArrowRight,
+} from '@/design/components/icons';
 import { listInterviews, exportInterviewsCsv } from '@/api/admin';
 import type { InterviewListItem, InterviewFilters } from '@/api/admin';
 import { toast } from '@/lib/toast';
 import { formatDate, formatDuration, statusProps, languageLabel } from '@/lib/formatters';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Badge } from '@/components/ui/badge';
-import { Skeleton } from '@/components/ui/skeleton';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
+import { GlassCard, SegTabs, StatusTag, Avatar } from '@/design/components/primitives';
+import { cn } from '@/lib/utils';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -50,6 +38,55 @@ const PER_PAGE = 20;
 function fmtScore(v: number | null): string {
   if (v === null) return '—';
   return v.toFixed(2);
+}
+
+function scoreColorInline(score: number): string {
+  const pct = score * 10;
+  if (pct >= 85) return '#27c93f';
+  if (pct >= 70) return 'var(--accent)';
+  if (pct >= 55) return '#ffb764';
+  return '#e6714f';
+}
+
+function statusTone(status: string): 'forest' | 'electric' | 'amber' | 'ember' | 'neutral' {
+  switch (status) {
+    case 'completed':
+      return 'forest';
+    case 'in_progress':
+      return 'electric';
+    case 'abandoned':
+      return 'amber';
+    case 'failed':
+      return 'ember';
+    default:
+      return 'neutral';
+  }
+}
+
+function initialsOf(name: string | null, email: string): string {
+  if (name) {
+    return name
+      .split(' ')
+      .map((w) => w[0] ?? '')
+      .join('')
+      .slice(0, 2)
+      .toUpperCase();
+  }
+  return email.slice(0, 2).toUpperCase();
+}
+
+const GRADIENTS = [
+  'linear-gradient(135deg,var(--accent),#a887dc)',
+  'linear-gradient(135deg,#16c253,var(--accent))',
+  'linear-gradient(135deg,#dd55e7,#a887dc)',
+  'linear-gradient(135deg,#ffb764,#dd55e7)',
+  'linear-gradient(135deg,#0fb7fa,#16c253)',
+  'linear-gradient(135deg,#a887dc,var(--accent))',
+];
+
+function gradientFor(id: string): string {
+  const seed = id.charCodeAt(0) + id.charCodeAt(id.length - 1);
+  return GRADIENTS[Math.abs(seed) % GRADIENTS.length];
 }
 
 // ── Animation ──────────────────────────────────────────────────────────────────
@@ -64,6 +101,45 @@ const fadeUp: Variants = {
   visible: { opacity: 1, y: 0, transition: { duration: 0.35, ease: [0.22, 1, 0.36, 1] } },
 };
 
+// ── Status tabs (SegTabs) ──────────────────────────────────────────────────────
+
+const STATUS_TABS = [
+  { key: '__all__', label: 'All' },
+  { key: 'in_progress', label: 'Live' },
+  { key: 'completed', label: 'Completed' },
+  { key: 'abandoned', label: 'Abandoned' },
+  { key: 'failed', label: 'Failed' },
+];
+
+// ── Native <select> styled to the dark palette ─────────────────────────────────
+
+interface DarkSelectProps {
+  value: string;
+  onChange: (v: string) => void;
+  'aria-label': string;
+  className?: string;
+  children: ReactNode;
+}
+
+function DarkSelect({ value, onChange, 'aria-label': ariaLabel, className, children }: DarkSelectProps) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      aria-label={ariaLabel}
+      className={cn(
+        'rounded-[9999px] border border-white/[0.08] bg-[rgba(28,29,31,0.7)]',
+        'px-3.5 py-2 text-[13px] text-[#b8babf] focus:outline-none',
+        'focus-visible:ring-2 focus-visible:ring-[var(--accent)]',
+        'appearance-none cursor-pointer',
+        className,
+      )}
+    >
+      {children}
+    </select>
+  );
+}
+
 // ── Filter bar ─────────────────────────────────────────────────────────────────
 
 interface FilterBarProps {
@@ -76,7 +152,7 @@ interface FilterBarProps {
 function FilterBar({ filters, onFiltersChange, onExport, exporting }: FilterBarProps) {
   const [localQ, setLocalQ] = useState(filters.q ?? '');
 
-  // Debounce the search field: apply after 400 ms idle
+  // Debounce 400 ms
   useEffect(() => {
     const id = setTimeout(() => {
       const next = localQ.trim() || undefined;
@@ -87,114 +163,104 @@ function FilterBar({ filters, onFiltersChange, onExport, exporting }: FilterBarP
     return () => clearTimeout(id);
   }, [localQ, filters.q, onFiltersChange]);
 
+  const sortValue = `${filters.sort_by ?? 'created_at'}_${String(filters.sort_desc !== false)}`;
+
+  function handleSortChange(v: string) {
+    const i = v.lastIndexOf('_');
+    const by = v.slice(0, i) as 'created_at' | 'composite_score';
+    const descStr = v.slice(i + 1);
+    onFiltersChange({ sort_by: by, sort_desc: descStr === 'true', page: 1 });
+  }
+
   return (
     <div className="flex flex-wrap gap-3 items-end">
-      {/* Full-text search */}
-      <div className="relative min-w-[180px] flex-1">
-        <Search
-          className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none"
-          aria-hidden="true"
-        />
-        <Input
+      {/* Search — design's dark pill input */}
+      <div className="relative min-w-[180px] flex-1 flex items-center gap-2 rounded-[9999px] border border-white/[0.08] bg-[rgba(28,29,31,0.7)] px-3.5 py-2.5">
+        <Search size={15} className="text-[#70757c] shrink-0" aria-hidden="true" />
+        <input
           type="search"
-          placeholder="Search candidate…"
           value={localQ}
           onChange={(e) => setLocalQ(e.target.value)}
-          className="pl-8"
+          placeholder="Search candidate…"
           aria-label="Search by candidate name or email"
           data-testid="filter-search"
+          className="min-w-0 flex-1 bg-transparent text-[13px] text-white placeholder:text-[#5a5f66] focus:outline-none"
         />
       </div>
 
-      {/* Status filter */}
-      <Select
-        value={filters.status ?? '__all__'}
-        onValueChange={(v) =>
-          onFiltersChange({ status: v === '__all__' ? undefined : v, page: 1 })
+      {/* Status — SegTabs (design pattern) */}
+      <SegTabs
+        tabs={STATUS_TABS}
+        active={filters.status ?? '__all__'}
+        onChange={(key) =>
+          onFiltersChange({ status: key === '__all__' ? undefined : key, page: 1 })
         }
-      >
-        <SelectTrigger className="w-[140px]" aria-label="Filter by status">
-          <SelectValue placeholder="Status" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="__all__">All statuses</SelectItem>
-          <SelectItem value="completed">Completed</SelectItem>
-          <SelectItem value="in_progress">In Progress</SelectItem>
-          <SelectItem value="abandoned">Abandoned</SelectItem>
-          <SelectItem value="failed">Failed</SelectItem>
-        </SelectContent>
-      </Select>
+      />
 
       {/* Language filter */}
-      <Select
+      <DarkSelect
         value={filters.language ?? '__all__'}
-        onValueChange={(v) =>
+        onChange={(v) =>
           onFiltersChange({ language: v === '__all__' ? undefined : v, page: 1 })
         }
+        aria-label="Filter by language"
+        className="w-[130px]"
       >
-        <SelectTrigger className="w-[130px]" aria-label="Filter by language">
-          <SelectValue placeholder="Language" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="__all__">All languages</SelectItem>
-          <SelectItem value="en">English</SelectItem>
-          <SelectItem value="hi">Hindi</SelectItem>
-          <SelectItem value="te">Telugu</SelectItem>
-        </SelectContent>
-      </Select>
+        <option value="__all__">All languages</option>
+        <option value="en">English</option>
+        <option value="hi">Hindi</option>
+        <option value="te">Telugu</option>
+      </DarkSelect>
 
       {/* Sort */}
-      <Select
-        value={`${filters.sort_by ?? 'created_at'}_${String(filters.sort_desc !== false)}`}
-        onValueChange={(v) => {
-          const i = v.lastIndexOf('_');
-          const by = v.slice(0, i) as 'created_at' | 'composite_score';
-          const descStr = v.slice(i + 1);
-          onFiltersChange({ sort_by: by, sort_desc: descStr === 'true', page: 1 });
-        }}
+      <DarkSelect
+        value={sortValue}
+        onChange={handleSortChange}
+        aria-label="Sort order"
+        className="w-[160px]"
       >
-        <SelectTrigger className="w-[160px]" aria-label="Sort order">
-          <ArrowUpDown className="h-3.5 w-3.5 mr-1.5 text-primary" aria-hidden="true" />
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="created_at_true">Newest first</SelectItem>
-          <SelectItem value="created_at_false">Oldest first</SelectItem>
-          <SelectItem value="composite_score_true">Score (high → low)</SelectItem>
-          <SelectItem value="composite_score_false">Score (low → high)</SelectItem>
-        </SelectContent>
-      </Select>
+        <option value="created_at_true">Newest first</option>
+        <option value="created_at_false">Oldest first</option>
+        <option value="composite_score_true">Score (high → low)</option>
+        <option value="composite_score_false">Score (low → high)</option>
+      </DarkSelect>
 
       {/* Export CSV */}
-      <Button
-        variant="outline"
-        size="sm"
+      <button
+        type="button"
         onClick={onExport}
         disabled={exporting}
-        className="gap-1.5 shrink-0"
+        className={cn(
+          'inline-flex items-center gap-2 rounded-[9999px] border border-white/[0.12] bg-[rgba(var(--accent-rgb),0.14)] px-4 py-2',
+          'text-[13px] font-semibold text-[#60a5fa] transition-colors',
+          'hover:bg-[rgba(var(--accent-rgb),0.22)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]',
+          'disabled:cursor-not-allowed disabled:opacity-50',
+        )}
         aria-label="Export interviews as CSV"
         data-testid="export-csv-btn"
       >
-        <Download className="h-4 w-4" aria-hidden="true" />
+        <Download size={14} aria-hidden="true" />
         {exporting ? 'Exporting…' : 'Export CSV'}
-      </Button>
+      </button>
     </div>
   );
 }
 
-// ── Loading skeletons ──────────────────────────────────────────────────────────
+// ── Loading skeleton rows ──────────────────────────────────────────────────────
 
 function LoadingRows() {
   return (
     <>
       {Array.from({ length: 6 }).map((_, i) => (
-        <TableRow key={i} aria-hidden="true">
+        <div
+          key={i}
+          aria-hidden="true"
+          className="grid grid-cols-[1.6fr_1.2fr_1.4fr_1.2fr_0.8fr_0.9fr_1fr_0.4fr] items-center gap-3 border-b border-white/[0.04] px-6 py-3.5 last:border-0"
+        >
           {Array.from({ length: 8 }).map((__, j) => (
-            <TableCell key={j}>
-              <Skeleton className="h-4 w-full rounded" />
-            </TableCell>
+            <div key={j} className="h-4 rounded bg-white/[0.06] animate-pulse" />
           ))}
-        </TableRow>
+        </div>
       ))}
     </>
   );
@@ -204,28 +270,27 @@ function LoadingRows() {
 
 function EmptyState({ hasFilters }: { hasFilters: boolean }) {
   return (
-    <div
-      className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-card py-20 text-center gap-4"
-      data-testid="interviews-empty-state"
-    >
-      <div className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-muted/60">
-        <ClipboardList className="h-7 w-7 text-muted-foreground/40" aria-hidden="true" />
-      </div>
-      <div>
-        <p className="font-semibold text-foreground">
-          {hasFilters ? 'No interviews match your filters' : 'No interviews yet'}
-        </p>
-        <p className="mt-1.5 text-body-sm text-muted-foreground">
-          {hasFilters
-            ? 'Try adjusting your search or filters.'
-            : 'Interview sessions will appear here once candidates start.'}
-        </p>
-      </div>
+    <div data-testid="interviews-empty-state">
+      <GlassCard className="flex flex-col items-center justify-center py-20 text-center gap-4">
+        <div className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-white/[0.06]">
+          <ClipboardList className="h-7 w-7 text-[#70757c]" aria-hidden="true" />
+        </div>
+        <div>
+          <p className="text-[15px] font-semibold text-white">
+            {hasFilters ? 'No interviews match your filters' : 'No interviews yet'}
+          </p>
+          <p className="mt-1.5 text-[13px] text-[#888b91]">
+            {hasFilters
+              ? 'Try adjusting your search or filters.'
+              : 'Interview sessions will appear here once candidates start.'}
+          </p>
+        </div>
+      </GlassCard>
     </div>
   );
 }
 
-// ── Table row ──────────────────────────────────────────────────────────────────
+// ── Interview row — design grid layout ────────────────────────────────────────
 
 interface InterviewRowProps {
   item: InterviewListItem;
@@ -233,15 +298,17 @@ interface InterviewRowProps {
 }
 
 function InterviewRow({ item, onClick }: InterviewRowProps) {
-  const { label, variant } = statusProps(item.status);
+  const { label } = statusProps(item.status);
+  const tone = statusTone(item.status);
 
   return (
-    <TableRow
-      className="cursor-pointer border-border hover:bg-muted/40 transition-colors"
+    <div
+      className="grid grid-cols-[1.6fr_1.2fr_1.4fr_1.2fr_0.8fr_0.9fr_1fr_0.4fr] items-center gap-3 border-b border-white/[0.04] px-6 py-3.5 last:border-0 cursor-pointer transition-colors hover:bg-white/[0.03] focus-visible:outline-none focus-visible:bg-white/[0.05]"
+      role="row"
+      tabIndex={0}
       onClick={() => onClick(item.session_id)}
       data-testid={`interview-row-${item.session_id}`}
       aria-label={`Interview for ${item.candidate_name ?? item.candidate_email}`}
-      tabIndex={0}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
@@ -249,33 +316,71 @@ function InterviewRow({ item, onClick }: InterviewRowProps) {
         }
       }}
     >
-      <TableCell className="font-medium text-foreground max-w-[160px] truncate">
-        {item.candidate_name ?? <span className="text-muted-foreground">—</span>}
-      </TableCell>
-      <TableCell className="text-muted-foreground text-body-sm max-w-[200px] truncate">
+      {/* Name + avatar */}
+      <div className="flex items-center gap-3 min-w-0">
+        <Avatar
+          initials={initialsOf(item.candidate_name, item.candidate_email)}
+          gradient={gradientFor(item.session_id)}
+          size={32}
+        />
+        <div className="min-w-0">
+          <div className="truncate text-[13.5px] font-medium text-white">
+            {item.candidate_name ?? <span className="text-[#70757c]">—</span>}
+          </div>
+          <div className="font-mono text-[11px] text-[#70757c] truncate">
+            {item.session_id.slice(0, 8)}…
+          </div>
+        </div>
+      </div>
+
+      {/* Email */}
+      <div className="truncate text-[12.5px] text-[#888b91]">
         {item.candidate_email}
-      </TableCell>
-      <TableCell className="text-body-sm text-muted-foreground max-w-[140px] truncate">
-        {item.job_title ?? <span className="text-muted-foreground">—</span>}
-      </TableCell>
-      <TableCell>
-        <Badge variant={variant} className="text-xs whitespace-nowrap">
+      </div>
+
+      {/* Role */}
+      <div className="truncate text-[13px] text-[#b8babf]">
+        {item.job_title ?? <span className="text-[#70757c]">—</span>}
+      </div>
+
+      {/* Status — design StatusTag */}
+      <div>
+        <StatusTag tone={tone} dot={item.status === 'in_progress'}>
           {label}
-        </Badge>
-      </TableCell>
-      <TableCell className="text-body-sm text-muted-foreground whitespace-nowrap">
+        </StatusTag>
+      </div>
+
+      {/* Language */}
+      <div className="text-[12.5px] text-[#888b91] whitespace-nowrap">
         {languageLabel(item.language)}
-      </TableCell>
-      <TableCell className="text-body-sm tabular-nums text-right font-semibold text-foreground">
+      </div>
+
+      {/* Score */}
+      <div
+        className="text-[14px] font-semibold tabular-nums"
+        style={{
+          color:
+            item.composite_score === null
+              ? '#70757c'
+              : scoreColorInline(item.composite_score),
+        }}
+      >
         {fmtScore(item.composite_score)}
-      </TableCell>
-      <TableCell className="text-body-sm text-muted-foreground whitespace-nowrap">
+      </div>
+
+      {/* Date */}
+      <div className="text-[12.5px] text-[#888b91] whitespace-nowrap">
         {formatDate(item.created_at)}
-      </TableCell>
-      <TableCell className="text-body-sm text-muted-foreground whitespace-nowrap">
-        {formatDuration(item.duration_seconds)}
-      </TableCell>
-    </TableRow>
+      </div>
+
+      {/* Duration + arrow */}
+      <div className="flex items-center justify-between gap-1">
+        <span className="text-[12.5px] text-[#888b91] whitespace-nowrap">
+          {formatDuration(item.duration_seconds)}
+        </span>
+        <ArrowRight size={15} className="text-[#70757c] flex-none" aria-hidden="true" />
+      </div>
+    </div>
   );
 }
 
@@ -295,35 +400,45 @@ function PaginationBar({ page, totalPages, total, perPage, onPrev, onNext }: Pag
   const end = Math.min(page * perPage, total);
   return (
     <div className="flex items-center justify-between pt-2 flex-wrap gap-2" aria-label="Pagination">
-      <span className="text-body-sm text-muted-foreground tabular-nums">
+      <span className="text-[12.5px] text-[#888b91] tabular-nums">
         {total > 0 ? `${start}–${end} of ${total.toLocaleString()}` : '0 results'}
       </span>
       <div className="flex items-center gap-2">
-        <Button
-          variant="outline"
-          size="sm"
+        <button
+          type="button"
           onClick={onPrev}
           disabled={page <= 1}
           aria-label="Previous page"
-          className="gap-1.5"
+          className={cn(
+            'inline-flex items-center gap-1.5 rounded-[9999px] border border-white/[0.08]',
+            'bg-transparent px-3.5 py-1.5 text-[13px] text-[#b8babf] transition-colors',
+            'hover:text-white hover:bg-white/[0.06]',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]',
+            'disabled:cursor-not-allowed disabled:opacity-40',
+          )}
         >
           <ChevronLeft className="h-4 w-4" aria-hidden="true" />
           Previous
-        </Button>
-        <span className="text-body-sm text-muted-foreground tabular-nums">
+        </button>
+        <span className="text-[12.5px] text-[#888b91] tabular-nums px-1">
           {page} / {totalPages}
         </span>
-        <Button
-          variant="outline"
-          size="sm"
+        <button
+          type="button"
           onClick={onNext}
           disabled={page >= totalPages}
           aria-label="Next page"
-          className="gap-1.5"
+          className={cn(
+            'inline-flex items-center gap-1.5 rounded-[9999px] border border-white/[0.08]',
+            'bg-transparent px-3.5 py-1.5 text-[13px] text-[#b8babf] transition-colors',
+            'hover:text-white hover:bg-white/[0.06]',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]',
+            'disabled:cursor-not-allowed disabled:opacity-40',
+          )}
         >
           Next
           <ChevronRight className="h-4 w-4" aria-hidden="true" />
-        </Button>
+        </button>
       </div>
     </div>
   );
@@ -401,8 +516,8 @@ export default function AdminInterviews() {
     <motion.div initial="hidden" animate="visible" variants={stagger} className="space-y-6">
       {/* Page heading */}
       <motion.div variants={fadeUp}>
-        <h1 className="text-heading font-semibold text-foreground">Interviews</h1>
-        <p className="mt-2 text-body-sm text-muted-foreground">
+        <h1 className="text-[28px] font-semibold tracking-[-1px] text-white">Interviews</h1>
+        <p className="mt-1 text-[14px] text-[#888b91]">
           All candidate interview sessions. Click a row to view full detail.
         </p>
       </motion.div>
@@ -417,79 +532,81 @@ export default function AdminInterviews() {
         />
       </motion.div>
 
-      {/* Table */}
+      {/* Content area */}
       <motion.div variants={fadeUp}>
         {isError && !isLoading ? (
-          <div
-            role="alert"
-            className="flex flex-col items-center justify-center rounded-2xl border border-destructive/20 bg-destructive/5 py-16 gap-3 text-center"
-          >
-            <AlertCircle className="h-8 w-8 text-destructive" aria-hidden="true" />
-            <p className="font-semibold text-foreground">Failed to load interviews</p>
-            <p className="text-body-sm text-muted-foreground">
-              {error instanceof Error ? error.message : 'Unknown error'}
-            </p>
+          <div role="alert">
+            <GlassCard className="flex flex-col items-center justify-center py-16 gap-3 text-center">
+              <AlertCircle className="h-8 w-8 text-[#e6714f]" aria-hidden="true" />
+              <p className="text-[15px] font-semibold text-white">Failed to load interviews</p>
+              <p className="text-[13px] text-[#888b91]">
+                {error instanceof Error ? error.message : 'Unknown error'}
+              </p>
+            </GlassCard>
           </div>
         ) : !isLoading && items.length === 0 ? (
           <EmptyState hasFilters={hasFilters} />
         ) : (
-          <Card className="rounded-2xl shadow-elevated transition-shadow hover:shadow-card-hover">
-            <CardHeader className="pb-3">
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <div>
-                  <CardTitle className="text-subheading font-semibold text-foreground">Sessions</CardTitle>
-                  <CardDescription className="mt-0.5 text-muted-foreground">
-                    {isLoading ? 'Loading…' : `${total.toLocaleString()} interview${total !== 1 ? 's' : ''}`}
-                  </CardDescription>
-                </div>
+          <GlassCard className="overflow-hidden p-0">
+            {/* Card header row */}
+            <div className="flex items-center justify-between flex-wrap gap-2 border-b border-white/[0.06] px-6 py-4">
+              <div>
+                <p className="text-[15px] font-semibold text-white">Sessions</p>
+                <p className="text-[12.5px] text-[#888b91] mt-0.5">
+                  {isLoading
+                    ? 'Loading…'
+                    : `${total.toLocaleString()} interview${total !== 1 ? 's' : ''}`}
+                </p>
               </div>
-            </CardHeader>
-            <CardContent className="p-0">
-              <div className="overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="border-border hover:bg-transparent">
-                      <TableHead className="text-muted-foreground uppercase text-xs tracking-wide">Name</TableHead>
-                      <TableHead className="text-muted-foreground uppercase text-xs tracking-wide">Email</TableHead>
-                      <TableHead className="text-muted-foreground uppercase text-xs tracking-wide">Role</TableHead>
-                      <TableHead className="text-muted-foreground uppercase text-xs tracking-wide">Status</TableHead>
-                      <TableHead className="text-muted-foreground uppercase text-xs tracking-wide">Language</TableHead>
-                      <TableHead className="text-right text-muted-foreground uppercase text-xs tracking-wide">Score</TableHead>
-                      <TableHead className="text-muted-foreground uppercase text-xs tracking-wide">Date</TableHead>
-                      <TableHead className="text-muted-foreground uppercase text-xs tracking-wide">Duration</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {isLoading ? (
-                      <LoadingRows />
-                    ) : (
-                      items.map((item) => (
-                        <InterviewRow
-                          key={item.session_id}
-                          item={item}
-                          onClick={handleRowClick}
-                        />
-                      ))
-                    )}
-                  </TableBody>
-                </Table>
-              </div>
+              <span className="ml-auto text-[12.5px] text-[#70757c]">
+                {!isLoading && `${items.length} shown`}
+              </span>
+            </div>
 
-              {/* Pagination */}
-              {!isLoading && totalPages > 1 && (
-                <div className="px-6 pb-5 pt-2">
-                  <PaginationBar
-                    page={page}
-                    totalPages={totalPages}
-                    total={total}
-                    perPage={perPage}
-                    onPrev={() => updateFilters({ page: Math.max(1, page - 1) })}
-                    onNext={() => updateFilters({ page: Math.min(totalPages, page + 1) })}
+            {/* Column headers */}
+            <div
+              role="row"
+              className="grid grid-cols-[1.6fr_1.2fr_1.4fr_1.2fr_0.8fr_0.9fr_1fr_0.4fr] gap-3 border-b border-white/[0.06] px-6 py-3.5 text-[11.5px] uppercase tracking-[0.5px] text-[#70757c]"
+            >
+              <div>Candidate</div>
+              <div>Email</div>
+              <div>Role</div>
+              <div>Status</div>
+              <div>Language</div>
+              <div>Score</div>
+              <div>Date</div>
+              <div />
+            </div>
+
+            {/* Rows */}
+            <div role="rowgroup">
+              {isLoading ? (
+                <LoadingRows />
+              ) : (
+                items.map((item) => (
+                  <InterviewRow
+                    key={item.session_id}
+                    item={item}
+                    onClick={handleRowClick}
                   />
-                </div>
+                ))
               )}
-            </CardContent>
-          </Card>
+            </div>
+
+            {/* Pagination */}
+            {!isLoading && totalPages > 1 && (
+              <div className="border-t border-white/[0.06] px-6 pb-5 pt-3">
+                <PaginationBar
+                  page={page}
+                  totalPages={totalPages}
+                  total={total}
+                  perPage={perPage}
+                  onPrev={() => updateFilters({ page: Math.max(1, page - 1) })}
+                  onNext={() => updateFilters({ page: Math.min(totalPages, page + 1) })}
+                />
+              </div>
+            )}
+          </GlassCard>
         )}
       </motion.div>
     </motion.div>

@@ -28,6 +28,8 @@ const JobsList = lazy(() => import('./pages/JobsList'));
 const StartInterview = lazy(() => import('./pages/StartInterview'));
 const History = lazy(() => import('./pages/History'));
 const Resume = lazy(() => import('./pages/Resume'));
+const Profile = lazy(() => import('./pages/Profile'));
+const ProfileView = lazy(() => import('./pages/ProfileView'));
 
 // ── Interview / scorecard (no shell — full-screen experience) ─────────────────
 const Interview = lazy(() => import('./pages/Interview'));
@@ -106,6 +108,9 @@ export default function App() {
               <Route path="/start" element={<StartInterview />} />
               <Route path="/history" element={<History />} />
               <Route path="/resume" element={<Resume />} />
+              <Route path="/profile" element={<Profile />} />
+              {/* View another user's profile — HR/admin only (enforced server-side) */}
+              <Route path="/u/:userId" element={<ProfileView />} />
             </Route>
 
             {/* Full-screen pages — own header/chrome */}

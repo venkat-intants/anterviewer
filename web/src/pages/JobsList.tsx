@@ -2,23 +2,28 @@
 // of job cards. "Start Interview" is gated by DPDP Act 2023 consent (S3-011).
 // Language picker persisted to localStorage ('intants:interview-language').
 // AppShell provides the top bar — this page does NOT render its own header.
+//
+// Design: anterview-pages/src/screens/candidate/JobsList.tsx layout merged
+// with all live behavior (consent, session start, i18n, filters).
 
 import { useState, useCallback, useEffect } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { motion, type Variants } from 'framer-motion';
-import { Briefcase, X } from 'lucide-react';
+
 import { useAuth } from '@/context/AuthContext';
 import { useConsent } from '@/context/ConsentContext';
 import { getJobs } from '@/api/jobs';
 import { createSession } from '@/api/sessions';
 import JobCard from '@/components/JobCard';
 import ConsentModal from '@/components/ConsentModal';
-import { Button } from '@/components/ui/button';
-import { Skeleton } from '@/components/ui/skeleton';
+import { Reveal, Stagger, StaggerItem } from '@/design/components/Reveal';
+import { GlassCard, SegTabs } from '@/design/components/primitives';
+import { Search, Briefcase, X, AlertTriangle, RefreshCw } from '@/design/components/icons';
 import { cn } from '@/lib/utils';
 import type { Language } from '@/types/interview';
+
+// ── Constants ──────────────────────────────────────────────────────────────────
 
 const LANGUAGE_STORAGE_KEY = 'intants:interview-language';
 
@@ -38,42 +43,60 @@ const LEVEL_OPTIONS = [
 
 type LevelFilter = '' | 'entry' | 'mid' | 'senior';
 
-const stagger: Variants = {
-  hidden: {},
-  visible: { transition: { staggerChildren: 0.06 } },
-};
+// SegTabs items for the level filter — labels resolved once per render inside
+// the component where t() is available.
+const LEVEL_TAB_KEYS = [
+  { key: '', labelKey: 'jobs.allLevels' },
+  { key: 'entry', labelKey: 'jobs.levelEntry' },
+  { key: 'mid', labelKey: 'jobs.levelMid' },
+  { key: 'senior', labelKey: 'jobs.levelSenior' },
+] as const;
 
-const fadeUp: Variants = {
-  hidden: { opacity: 0, y: 12 },
-  visible: { opacity: 1, y: 0, transition: { duration: 0.3, ease: [0.22, 1, 0.36, 1] } },
-};
+// ── Inline skeleton — avoids @/components/ui/* shadcn dep ────────────────────
 
-// ── Loading skeleton card ─────────────────────────────────────────────────────
+function Sk({ className }: { className?: string }) {
+  return (
+    <div
+      className={cn('animate-pulse rounded-md bg-white/[0.06]', className)}
+      aria-hidden="true"
+    />
+  );
+}
+
+// ── Loading skeleton card ──────────────────────────────────────────────────────
 
 function JobCardSkeleton() {
   return (
     <div
-      className="rounded-2xl border border-border bg-card shadow-card p-6 flex flex-col gap-4 animate-pulse"
+      className="rounded-[24px] border border-white/[0.08] bg-[#0f0f10] p-5 flex flex-col gap-4"
       aria-hidden="true"
     >
-      <div className="flex items-start justify-between gap-3">
-        <Skeleton className="h-4 w-3/4 rounded" />
-        <Skeleton className="h-5 w-20 rounded-full" />
+      <div className="flex items-start gap-3">
+        <Sk className="h-12 w-12 flex-none rounded-[12px]" />
+        <div className="flex-1 space-y-2">
+          <Sk className="h-4 w-3/4 rounded" />
+          <Sk className="h-3 w-1/2 rounded" />
+        </div>
+        <Sk className="h-5 w-20 rounded-full" />
       </div>
-      <div className="space-y-2 flex-1">
-        <Skeleton className="h-3 w-full rounded" />
-        <Skeleton className="h-3 w-5/6 rounded" />
-        <Skeleton className="h-3 w-2/3 rounded" />
+      <div className="flex flex-wrap gap-1.5">
+        <Sk className="h-5 w-16 rounded-full" />
+        <Sk className="h-5 w-20 rounded-full" />
+        <Sk className="h-5 w-14 rounded-full" />
       </div>
-      <div className="flex items-center justify-between pt-2 border-t border-border">
-        <Skeleton className="h-5 w-16 rounded-full" />
-        <Skeleton className="h-8 w-28 rounded-[9px]" />
+      <div className="flex items-center gap-4">
+        <Sk className="h-3 w-24 rounded" />
+        <Sk className="h-3 w-16 rounded" />
+      </div>
+      <div className="flex items-center gap-2.5 border-t border-white/[0.06] pt-4">
+        <Sk className="h-10 flex-1 rounded-full" />
+        <Sk className="h-10 w-20 rounded-full" />
       </div>
     </div>
   );
 }
 
-// ── JobsList page ─────────────────────────────────────────────────────────────
+// ── JobsList page ──────────────────────────────────────────────────────────────
 
 export default function JobsList() {
   const { t } = useTranslation();
@@ -95,6 +118,9 @@ export default function JobsList() {
   // Level filter (client-side only)
   const [levelFilter, setLevelFilter] = useState<LevelFilter>('');
 
+  // Design search box — additive presentation only (no backend; filters by title)
+  const [searchQuery, setSearchQuery] = useState('');
+
   // Pending job that was clicked while consent was needed
   const [pendingJobId, setPendingJobId] = useState<string | null>(null);
   // Whether the consent modal is visible
@@ -104,6 +130,8 @@ export default function JobsList() {
   const [consentError, setConsentError] = useState<string | null>(null);
   // Banner shown after Decline
   const [showDeclineBanner, setShowDeclineBanner] = useState(false);
+
+  // ── Data fetching ───────────────────────────────────────────────────────────
 
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['jobs'],
@@ -168,7 +196,7 @@ export default function JobsList() {
     } finally {
       setIsSubmittingConsent(false);
     }
-  }, [recordConsent, pendingJobId, proceedToSession]);
+  }, [recordConsent, pendingJobId, proceedToSession, t]);
 
   /** User clicked "Decline" or pressed Esc in the modal */
   const handleDecline = useCallback(() => {
@@ -179,17 +207,37 @@ export default function JobsList() {
     void navigate('/jobs');
   }, [navigate]);
 
+  // ── Derived data ────────────────────────────────────────────────────────────
+
+  const allJobs = data?.items ?? [];
+
+  const jobs = allJobs.filter((j) => {
+    const matchesLevel = levelFilter === '' || j.level === levelFilter;
+    const matchesSearch =
+      searchQuery === '' || j.title.toLowerCase().includes(searchQuery.toLowerCase());
+    return matchesLevel && matchesSearch;
+  });
+
+  // SegTabs labels built with t() — fine to compute inline since hooks aren't called
+  const levelTabs = LEVEL_TAB_KEYS.map((opt) => ({ key: opt.key, label: t(opt.labelKey) }));
+
   // ── Loading state ───────────────────────────────────────────────────────────
+
   if (isLoading || consentLoading) {
     return (
-      <div className="space-y-6">
-        {/* Toolbar skeleton */}
-        <div className="flex flex-wrap items-center gap-3">
-          <Skeleton className="h-10 w-44 rounded-[9px]" />
-          <Skeleton className="h-10 w-36 rounded-[9px]" />
+      <div className="mx-auto max-w-[1100px] px-6 py-8 lg:px-8 space-y-6">
+        <div>
+          <Sk className="h-7 w-40 rounded mb-2" />
+          <Sk className="h-4 w-72 rounded" />
         </div>
-        <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-          {Array.from({ length: 3 }).map((_, i) => (
+        <div className="flex flex-wrap items-center gap-3">
+          <Sk className="h-10 w-[260px] rounded-full" />
+          <Sk className="h-10 w-52 rounded-full" />
+          <Sk className="h-10 w-44 rounded-[9px]" />
+          <Sk className="h-10 w-36 rounded-[9px]" />
+        </div>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          {Array.from({ length: 4 }).map((_, i) => (
             <JobCardSkeleton key={i} />
           ))}
         </div>
@@ -198,56 +246,71 @@ export default function JobsList() {
   }
 
   // ── Error state ─────────────────────────────────────────────────────────────
+
   if (isError) {
     return (
-      <div
-        role="alert"
-        className="rounded-3xl border border-destructive/30 bg-destructive/5 p-6 flex flex-col sm:flex-row items-start sm:items-center gap-4"
-      >
-        <p className="text-body-sm text-destructive flex-1">
-          {error instanceof Error ? error.message : t('jobs.loadError')}
-        </p>
-        <Button type="button" variant="destructive" size="sm" onClick={() => void refetch()}>
-          {t('jobs.retry')}
-        </Button>
+      <div className="mx-auto max-w-[1100px] px-6 py-8 lg:px-8">
+        <div
+          role="alert"
+          className="rounded-[24px] border border-[rgba(230,113,79,0.3)] bg-[rgba(230,113,79,0.07)] p-6 flex flex-col sm:flex-row items-start sm:items-center gap-4"
+        >
+          <AlertTriangle className="h-5 w-5 text-[#e6714f] shrink-0" aria-hidden="true" />
+          <p className="text-[14px] text-[#e6714f] flex-1">
+            {error instanceof Error ? error.message : t('jobs.loadError')}
+          </p>
+          <button
+            type="button"
+            onClick={() => void refetch()}
+            className="inline-flex items-center gap-1.5 rounded-[9999px] border border-[rgba(230,113,79,0.35)] bg-[rgba(230,113,79,0.1)] px-4 py-2 text-[13px] font-medium text-[#e6714f] hover:bg-[rgba(230,113,79,0.18)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#e6714f]"
+          >
+            <RefreshCw size={14} aria-hidden="true" />
+            {t('jobs.retry')}
+          </button>
+        </div>
       </div>
     );
   }
 
-  const allJobs = data?.items ?? [];
-  const jobs = levelFilter === '' ? allJobs : allJobs.filter((j) => j.level === levelFilter);
-
   // ── Main render ─────────────────────────────────────────────────────────────
+
   return (
-    <div className="space-y-6">
-      {/* ── Decline banner ─────────────────────────────────────────────────── */}
+    <div className="mx-auto max-w-[1100px] px-6 py-8 lg:px-8">
+
+      {/* ── Page heading ─────────────────────────────────────────────────────── */}
+      <Reveal>
+        <h1 className="text-[28px] font-semibold tracking-[-1px]">
+          {t('jobs.pageTitle')}
+        </h1>
+        <p className="mt-1 text-[14px] text-[#888b91]">
+          {t('jobs.pageSubtitle')}
+        </p>
+      </Reveal>
+
+      {/* ── Decline banner ───────────────────────────────────────────────────── */}
       {showDeclineBanner && (
-        <motion.div
-          initial={{ opacity: 0, y: -8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.25 }}
+        <div
           role="alert"
-          className="rounded-2xl border border-amber-600/30 bg-amber-50 px-4 py-3 flex items-start justify-between gap-4"
+          className="mt-4 rounded-[16px] border border-[rgba(255,183,100,0.3)] bg-[rgba(255,183,100,0.08)] px-4 py-3 flex items-start justify-between gap-4"
         >
-          <p className="text-body-sm text-amber-600">{t('jobs.declineBanner')}</p>
+          <p className="text-[14px] text-[#ffb764]">{t('jobs.declineBanner')}</p>
           <button
             type="button"
             onClick={() => setShowDeclineBanner(false)}
             aria-label={t('jobs.dismiss')}
-            className="shrink-0 rounded text-amber-600/80 hover:text-amber-600 focus:outline-none focus:ring-2 focus:ring-amber-600/50"
+            className="shrink-0 rounded text-[#ffb764]/80 hover:text-[#ffb764] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#ffb764]/50"
           >
             <X className="h-4 w-4" aria-hidden="true" />
           </button>
-        </motion.div>
+        </div>
       )}
 
-      {/* ── Session-start error banner ──────────────────────────────────────── */}
+      {/* ── Session-start error banner ────────────────────────────────────────── */}
       {startInterviewMutation.isError && (
         <div
           role="alert"
-          className="rounded-2xl border border-destructive/30 bg-destructive/5 px-4 py-3"
+          className="mt-4 rounded-[16px] border border-[rgba(230,113,79,0.3)] bg-[rgba(230,113,79,0.07)] px-4 py-3"
         >
-          <p className="text-body-sm text-destructive">
+          <p className="text-[14px] text-[#e6714f]">
             {startInterviewMutation.error instanceof Error
               ? startInterviewMutation.error.message
               : t('jobs.startError')}
@@ -255,13 +318,38 @@ export default function JobsList() {
         </div>
       )}
 
-      {/* ── Toolbar: language picker + level filter + count ─────────────────── */}
-      <div className="flex flex-wrap items-center gap-3">
-        {/* Interview language — native <select> so tests can use selectOptions()
-            and toHaveValue(); styled to match the design system. */}
+      {/* ── Toolbar ──────────────────────────────────────────────────────────── */}
+      {/*
+        Layout: [search box] [SegTabs for level] [language select] [level select (sr-only + hidden)] [count]
+        The native <select id="interview-language"> and <select id="level-filter"> MUST remain
+        present for test-suite compatibility (tests use them directly). SegTabs is additive UX;
+        it syncs with the hidden level select.
+      */}
+      <div className="mt-6 flex flex-wrap items-center gap-3">
+
+        {/* Design search box — additive; client-filters by title */}
+        <div className="flex w-[260px] items-center gap-2 rounded-[9999px] border border-white/[0.08] bg-[rgba(28,29,31,0.7)] px-3.5 py-2.5">
+          <Search size={15} className="text-[#70757c] shrink-0" aria-hidden="true" />
+          <input
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder={t('jobs.searchPlaceholder')}
+            aria-label={t('jobs.searchPlaceholder')}
+            className="min-w-0 flex-1 bg-transparent text-[13px] text-white placeholder:text-[#5a5f66] focus:outline-none"
+          />
+        </div>
+
+        {/* SegTabs for level — additive design element, synced with hidden select */}
+        <SegTabs
+          tabs={levelTabs}
+          active={levelFilter}
+          onChange={(key) => setLevelFilter(key as LevelFilter)}
+        />
+
+        {/* Interview language label + native select — test-id accessible */}
         <label
           htmlFor="interview-language"
-          className="text-body-sm font-medium text-muted-foreground shrink-0"
+          className="text-[12.5px] font-medium text-[#888b91] shrink-0"
         >
           {t('jobs.interviewLanguage')}
         </label>
@@ -269,7 +357,12 @@ export default function JobsList() {
           id="interview-language"
           value={selectedLanguage}
           onChange={(e) => setSelectedLanguage(e.target.value as Language)}
-          className="h-10 rounded-[9px] border border-border bg-secondary px-3 py-2 text-body-sm text-foreground ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+          className={cn(
+            'h-10 rounded-[9px] border border-white/[0.08] bg-[rgba(28,29,31,0.7)]',
+            'px-3 py-2 text-[13px] text-white',
+            'focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-black',
+            'disabled:cursor-not-allowed disabled:opacity-50',
+          )}
         >
           {LANGUAGE_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>
@@ -278,7 +371,8 @@ export default function JobsList() {
           ))}
         </select>
 
-        {/* Level filter — native select so there are no Radix empty-value constraints */}
+        {/* Level filter — native select (sr-only label); SegTabs above is the visible UI.
+            This element MUST stay in the DOM — tests use #level-filter selectOptions() */}
         <label htmlFor="level-filter" className="sr-only">
           {t('jobs.filterByLevel')}
         </label>
@@ -286,7 +380,12 @@ export default function JobsList() {
           id="level-filter"
           value={levelFilter}
           onChange={(e) => setLevelFilter(e.target.value as LevelFilter)}
-          className="h-10 rounded-[9px] border border-border bg-secondary px-3 py-2 text-body-sm text-foreground ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+          className={cn(
+            'h-10 rounded-[9px] border border-white/[0.08] bg-[rgba(28,29,31,0.7)]',
+            'px-3 py-2 text-[13px] text-white',
+            'focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-black',
+            'disabled:cursor-not-allowed disabled:opacity-50',
+          )}
         >
           {LEVEL_OPTIONS.map((opt) => (
             <option key={`level-${opt.value}`} value={opt.value}>
@@ -296,53 +395,67 @@ export default function JobsList() {
         </select>
 
         {/* Count */}
-        <p className="ml-auto text-body-sm text-muted-foreground">
+        <p className="ml-auto text-[12.5px] text-[#70757c] whitespace-nowrap">
           {t('jobs.positionsCount', { count: jobs.length })}
-          {levelFilter && (
-            <span className="ml-1 text-caption">
+          {(levelFilter || searchQuery) && (
+            <span className="ml-1 text-[11.5px] text-[#5a5f66]">
               {t('jobs.filteredFrom', { count: allJobs.length })}
             </span>
           )}
         </p>
       </div>
 
-      {/* ── Empty state ─────────────────────────────────────────────────────── */}
-      {jobs.length === 0 && (
-        <div
-          className={cn(
-            'rounded-2xl border border-dashed border-border bg-muted/40',
-            'flex flex-col items-center justify-center py-20 px-6 text-center gap-4',
-          )}
-        >
-          <div className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-primary/10">
-            <Briefcase className="h-7 w-7 text-primary" aria-hidden="true" />
+      {/* ── Empty state — no jobs at all ─────────────────────────────────────── */}
+      {jobs.length === 0 && allJobs.length === 0 && (
+        <GlassCard className="mt-5 flex flex-col items-center justify-center py-20 px-6 text-center gap-4">
+          <div className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-[rgba(var(--accent-rgb),0.1)] border border-[rgba(var(--accent-rgb),0.2)]">
+            <Briefcase className="h-7 w-7 text-[#60a5fa]" aria-hidden="true" />
           </div>
           <div>
-            <p className="text-body font-semibold text-foreground">{t('jobs.noPositionsTitle')}</p>
-            <p className="mt-1 text-body-sm text-muted-foreground">
-              {levelFilter ? t('jobs.noPositionsFiltered') : t('jobs.noPositionsEmpty')}
+            <p className="text-[16px] font-semibold text-white">
+              {t('jobs.noPositionsTitle')}
+            </p>
+            <p className="mt-1 text-[14px] text-[#888b91]">
+              {t('jobs.noPositionsEmpty')}
             </p>
           </div>
-          {levelFilter && (
-            <Button type="button" variant="outline" size="sm" onClick={() => setLevelFilter('')}>
-              {t('jobs.clearFilter')}
-            </Button>
-          )}
-        </div>
+        </GlassCard>
       )}
 
-      {/* ── Job grid ────────────────────────────────────────────────────────── */}
+      {/* ── Empty state — filters returned no results ─────────────────────────── */}
+      {jobs.length === 0 && allJobs.length > 0 && (
+        <GlassCard className="mt-5 flex flex-col items-center justify-center py-20 px-6 text-center gap-4">
+          <div className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-[rgba(var(--accent-rgb),0.1)] border border-[rgba(var(--accent-rgb),0.2)]">
+            <Briefcase className="h-7 w-7 text-[#60a5fa]" aria-hidden="true" />
+          </div>
+          <div>
+            <p className="text-[16px] font-semibold text-white">
+              {t('jobs.noPositionsTitle')}
+            </p>
+            <p className="mt-1 text-[14px] text-[#888b91]">
+              {t('jobs.noPositionsFiltered')}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setLevelFilter('');
+              setSearchQuery('');
+            }}
+            className="inline-flex items-center gap-1.5 rounded-[9999px] border border-white/10 bg-transparent px-4 py-2 text-[13px] font-medium text-white hover:bg-white/[0.06] hover:border-white/20 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+          >
+            {t('jobs.clearFilter')}
+          </button>
+        </GlassCard>
+      )}
+
+      {/* ── Job grid ─────────────────────────────────────────────────────────── */}
       {jobs.length > 0 && (
-        <motion.ul
-          initial="hidden"
-          animate="visible"
-          variants={stagger}
-          className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3"
-          role="list"
-          aria-label="Job listings"
+        <Stagger
+          className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2"
         >
           {jobs.map((job) => (
-            <motion.li key={job.id} variants={fadeUp}>
+            <StaggerItem key={job.id}>
               <JobCard
                 job={job}
                 onStartInterview={handleStartInterview}
@@ -351,12 +464,12 @@ export default function JobsList() {
                   startInterviewMutation.variables?.jobId === job.id
                 }
               />
-            </motion.li>
+            </StaggerItem>
           ))}
-        </motion.ul>
+        </Stagger>
       )}
 
-      {/* Consent gate modal — rendered outside the grid so it overlays everything */}
+      {/* Consent gate modal — overlays everything */}
       {showConsent && (
         <ConsentModal
           onAgree={handleAgree}

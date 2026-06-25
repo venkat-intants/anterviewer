@@ -1,38 +1,49 @@
-// HRAnalytics — company-scoped hiring funnel panel (HR workflow Phase 4).
-// Funnel metric tiles + a horizontal funnel bar chart (recharts — existing dep).
-// Default export = the panel (embeddable on /hr/pipeline); named HRAnalyticsPage
-// = the standalone /hr/analytics route. Field names match the backend contract
-// ({ funnel, averages }).
+// HRAnalytics — company-scoped hiring analytics.
+// Layout: faithfully reproduces anterview-pages/src/screens/hr/HRAnalytics.tsx
+//   (hiring-funnel horizontal bars, language-mix donut, score-distribution bar
+//    chart, interviews & avg-score line chart).
+// Behavior: live getHrAnalytics query (funnel + averages); charts use real data
+//   where available and gracefully empty-state where there is no backing API.
+//   BOTH exports preserved:
+//     default HRAnalytics — embeddable panel used by HRPipeline.
+//     HRAnalyticsPage     — standalone /hr/analytics route.
 
 import { useQuery } from '@tanstack/react-query';
-import { motion, type Variants } from 'framer-motion';
-import { Users, Star, ClipboardCheck, Video, Trophy, BarChart3 } from 'lucide-react';
+import { useAccentColor } from '@/lib/useAccentColor';
 import {
   BarChart,
   Bar,
   XAxis,
   YAxis,
-  CartesianGrid,
-  Tooltip,
   ResponsiveContainer,
   Cell,
+  PieChart,
+  Pie,
+  LineChart,
+  Line,
+  Tooltip,
+  CartesianGrid,
 } from 'recharts';
 import { getHrAnalytics, type HrAnalytics } from '@/api/pipeline';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Skeleton } from '@/components/ui/skeleton';
+import { Reveal } from '@/design/components/Reveal';
+import { GlassCard } from '@/design/components/primitives';
 
-const stagger: Variants = { hidden: {}, visible: { transition: { staggerChildren: 0.07 } } };
-const fadeUp: Variants = {
-  hidden: { opacity: 0, y: 14 },
-  visible: { opacity: 1, y: 0, transition: { duration: 0.35, ease: [0.22, 1, 0.36, 1] } },
-};
+// ── Tooltip style (design spec) ───────────────────────────────────────────────
+const TOOLTIP_STYLE = {
+  background: '#0f0f10',
+  border: '1px solid rgba(255,255,255,0.1)',
+  borderRadius: 12,
+  color: '#fff',
+  fontSize: 12,
+} as const;
 
-// Light-palette categorical series: Signal-Blue leads, then violet, emerald, amber, rose.
-const PALETTE = ['#0071e3', '#8b5cf6', '#10b981', '#f59e0b', '#ef4444'];
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-function fmtScore(v: number | null | undefined, max: number): string {
-  if (v === null || v === undefined) return '—';
-  return `${v.toFixed(max === 10 ? 1 : 0)}${max === 10 ? '/10' : ''}`;
+function scoreColor(v: number): string {
+  if (v >= 85) return '#27c93f';
+  if (v >= 70) return '#0088ff';
+  if (v >= 55) return '#ffb764';
+  return '#e6714f';
 }
 
 function rate(part: number, whole: number): string {
@@ -40,98 +51,60 @@ function rate(part: number, whole: number): string {
   return `${Math.round((part / whole) * 100)}%`;
 }
 
-function MetricTile({
-  icon,
-  label,
-  value,
-  sub,
-  loading,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: React.ReactNode;
-  sub?: string;
-  loading?: boolean;
-}) {
-  return (
-    <Card className="transition-shadow hover:shadow-card-hover">
-      <CardContent className="flex items-start gap-3 pb-3 pt-4">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px] bg-secondary text-foreground">
-          {icon}
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            {label}
-          </p>
-          {loading ? (
-            <Skeleton className="h-6 w-12 rounded" />
-          ) : (
-            <p className="text-xl font-semibold leading-none text-foreground">{value}</p>
-          )}
-          {sub && !loading && <p className="mt-1 text-[11px] text-muted-foreground">{sub}</p>}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
+// ── Static chart data (language-mix + score-dist + trend).
+//    These have no backing API yet; they render as empty states until
+//    the analytics endpoint expands. When the API ships, replace these
+//    with derived data from getHrAnalytics. ────────────────────────────────────
+const LANG_MIX_STATIC: { label: string; value: number; color: string }[] = [];
 
-function FunnelChart({ a }: { a: HrAnalytics }) {
-  const f = a.funnel;
-  const data = [
-    { stage: 'Applicants', count: f.total_applicants },
-    { stage: 'Shortlisted', count: f.shortlisted },
-    { stage: 'Exam passed', count: f.exam_passed },
-    { stage: 'Interviewed', count: f.interview_completed },
-    { stage: 'Hired', count: f.hired },
+const SCORE_DIST_STATIC: { label: string; value: number }[] = [];
+
+const HR_TREND_STATIC: { day: string; interviews: number; avg: number }[] = [];
+
+// ── FunnelBars — horizontal bar chart using real funnel data ─────────────────
+function FunnelBars({ f }: { f: HrAnalytics['funnel'] }) {
+  const max = f.total_applicants || 1;
+  const rows = [
+    { label: 'Applied',     value: f.total_applicants },
+    { label: 'Shortlisted', value: f.shortlisted },
+    { label: 'Exam passed', value: f.exam_passed },
+    { label: 'Interviewed', value: f.interview_completed },
+    { label: 'Hired',       value: f.hired },
   ];
-  if (!data.some((d) => d.count > 0)) {
+
+  if (!rows.some((r) => r.value > 0)) {
     return (
-      <div className="flex h-[220px] flex-col items-center justify-center gap-3 text-center">
-        <BarChart3 className="h-8 w-8 text-muted-foreground/40" aria-hidden="true" />
-        <p className="text-body-sm text-muted-foreground">No pipeline data yet.</p>
+      <div className="flex h-[140px] items-center justify-center">
+        <p className="text-[13px] text-[#888b91]">No pipeline data yet.</p>
       </div>
     );
   }
+
   return (
-    <ResponsiveContainer width="100%" height={220}>
-      <BarChart data={data} layout="vertical" margin={{ top: 4, right: 24, bottom: 0, left: 8 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#e8e8ed" horizontal={false} />
-        <XAxis
-          type="number"
-          allowDecimals={false}
-          tick={{ fill: '#707070', fontSize: 11 }}
-          tickLine={false}
-          axisLine={false}
-        />
-        <YAxis
-          type="category"
-          dataKey="stage"
-          width={84}
-          tick={{ fill: '#707070', fontSize: 11 }}
-          tickLine={false}
-          axisLine={false}
-        />
-        <Tooltip
-          contentStyle={{
-            background: '#ffffff',
-            border: '1px solid #e8e8ed',
-            borderRadius: '10px',
-            fontSize: 12,
-            color: '#1d1d1f',
-          }}
-          formatter={(value) => [value ?? 0, 'Candidates']}
-          cursor={{ fill: '#f4f4f5', opacity: 0.6 }}
-        />
-        <Bar dataKey="count" radius={[0, 4, 4, 0]}>
-          {data.map((_, i) => (
-            <Cell key={i} fill={PALETTE[i % PALETTE.length]} fillOpacity={0.9} />
-          ))}
-        </Bar>
-      </BarChart>
-    </ResponsiveContainer>
+    <div className="flex flex-col gap-2.5">
+      {rows.map((row) => {
+        const pct = Math.round((row.value / max) * 100);
+        return (
+          <div key={row.label} className="flex items-center gap-3.5">
+            <div className="w-[84px] text-[13px] text-[#b8babf]">{row.label}</div>
+            <div className="h-7 flex-1 overflow-hidden rounded-[8px] bg-white/[0.05]">
+              {pct > 0 && (
+                <div
+                  className="flex h-full items-center rounded-[8px] bg-[linear-gradient(90deg,var(--accent),#a887dc)] pl-3 text-[12px] font-semibold"
+                  style={{ width: `${pct}%` }}
+                >
+                  {row.value.toLocaleString('en-IN')}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
+// ── Default export: embeddable panel (used by HRPipeline) ─────────────────────
 export default function HRAnalytics() {
   const { data, isLoading } = useQuery({
     queryKey: ['hr', 'analytics'],
@@ -141,77 +114,234 @@ export default function HRAnalytics() {
   const f = data?.funnel;
   const avg = data?.averages;
 
-  return (
-    <motion.div initial="hidden" animate="visible" variants={stagger} className="space-y-4">
-      <motion.div variants={fadeUp} className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-        <MetricTile
-          icon={<Users className="h-4 w-4" />}
-          label="Applicants"
-          value={f?.total_applicants ?? 0}
-          sub={avg ? `avg ATS ${fmtScore(avg.avg_ats, 100)}` : undefined}
-          loading={isLoading}
-        />
-        <MetricTile
-          icon={<Star className="h-4 w-4" />}
-          label="Shortlisted"
-          value={f?.shortlisted ?? 0}
-          sub={f ? `${rate(f.shortlisted, f.total_applicants)} of applicants` : undefined}
-          loading={isLoading}
-        />
-        <MetricTile
-          icon={<ClipboardCheck className="h-4 w-4" />}
-          label="Exam passed"
-          value={f?.exam_passed ?? 0}
-          sub={f ? `${rate(f.exam_passed, f.exam_taken)} pass rate` : undefined}
-          loading={isLoading}
-        />
-        <MetricTile
-          icon={<Video className="h-4 w-4" />}
-          label="Interviewed"
-          value={f?.interview_completed ?? 0}
-          sub={avg ? `avg ${fmtScore(avg.avg_interview_composite, 10)}` : undefined}
-          loading={isLoading}
-        />
-        <MetricTile
-          icon={<Trophy className="h-4 w-4" />}
-          label="Hired"
-          value={f?.hired ?? 0}
-          sub={f ? `${rate(f.hired, f.interview_completed)} of interviewed` : undefined}
-          loading={isLoading}
-        />
-      </motion.div>
+  const distData = SCORE_DIST_STATIC.map((d) => ({
+    ...d,
+    color: scoreColor(parseInt(d.label, 10) + 5),
+  }));
+  const accent = useAccentColor();
 
-      <motion.div variants={fadeUp}>
-        <Card className="rounded-2xl shadow-elevated">
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-body-lg font-semibold text-foreground">
-              <BarChart3 className="h-4 w-4 text-primary" aria-hidden="true" />
-              Hiring funnel
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
+  return (
+    <div className="space-y-5">
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
+        {/* Hiring funnel — real data */}
+        <Reveal dir="left" className="lg:col-span-2">
+          <GlassCard className="p-5">
+            <h3 className="mb-5 text-[16px] font-semibold">Hiring funnel</h3>
             {isLoading ? (
-              <Skeleton className="h-[220px] w-full rounded-xl" />
-            ) : data ? (
-              <FunnelChart a={data} />
+              <div className="space-y-2.5">
+                {[0, 1, 2, 3, 4].map((i) => (
+                  <div key={i} className="h-7 animate-pulse rounded-[8px] bg-white/[0.05]" />
+                ))}
+              </div>
+            ) : f ? (
+              <FunnelBars f={f} />
             ) : null}
-          </CardContent>
-        </Card>
-      </motion.div>
-    </motion.div>
+            {/* Conversion rates subtitle when data is available */}
+            {f && avg && (
+              <div className="mt-4 flex flex-wrap gap-4 text-[12px] text-[#70757c]">
+                <span>
+                  Shortlist rate:{' '}
+                  <span className="text-[#b8babf]">
+                    {rate(f.shortlisted, f.total_applicants)}
+                  </span>
+                </span>
+                <span>
+                  Pass rate:{' '}
+                  <span className="text-[#b8babf]">{rate(f.exam_passed, f.exam_taken)}</span>
+                </span>
+                <span>
+                  Hire rate:{' '}
+                  <span className="text-[#b8babf]">
+                    {rate(f.hired, f.interview_completed)}
+                  </span>
+                </span>
+              </div>
+            )}
+          </GlassCard>
+        </Reveal>
+
+        {/* Language mix donut */}
+        <Reveal dir="right">
+          <GlassCard className="h-full p-5">
+            <h3 className="mb-3 text-[16px] font-semibold">Language mix</h3>
+            {LANG_MIX_STATIC.length > 0 ? (
+              <>
+                <div className="h-[180px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={LANG_MIX_STATIC}
+                        dataKey="value"
+                        nameKey="label"
+                        innerRadius={48}
+                        outerRadius={70}
+                        paddingAngle={2}
+                        stroke="none"
+                      >
+                        {LANG_MIX_STATIC.map((s) => (
+                          <Cell key={s.label} fill={s.color} />
+                        ))}
+                      </Pie>
+                      <Tooltip contentStyle={TOOLTIP_STYLE} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="mt-2 flex flex-col gap-2">
+                  {LANG_MIX_STATIC.map((s) => (
+                    <div key={s.label} className="flex items-center gap-2 text-[13px]">
+                      <span
+                        className="h-2.5 w-2.5 rounded-[3px]"
+                        style={{ background: s.color }}
+                      />
+                      {s.label}
+                      <span className="ml-auto text-[#70757c]">{s.value}%</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="flex h-[180px] items-center justify-center">
+                <p className="text-[13px] text-[#888b91]">No language data yet.</p>
+              </div>
+            )}
+          </GlassCard>
+        </Reveal>
+      </div>
+
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+        {/* Score distribution */}
+        <Reveal dir="left">
+          <GlassCard className="p-5">
+            <h3 className="mb-4 text-[16px] font-semibold">Score distribution</h3>
+            {distData.length > 0 ? (
+              <div className="h-[220px] w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={distData}>
+                    <CartesianGrid vertical={false} stroke="rgba(255,255,255,0.05)" />
+                    <XAxis
+                      dataKey="label"
+                      tick={{ fill: '#70757c', fontSize: 11 }}
+                      axisLine={false}
+                      tickLine={false}
+                    />
+                    <YAxis
+                      tick={{ fill: '#70757c', fontSize: 11 }}
+                      axisLine={false}
+                      tickLine={false}
+                      width={28}
+                    />
+                    <Tooltip
+                      cursor={{ fill: 'rgba(255,255,255,0.04)' }}
+                      contentStyle={TOOLTIP_STYLE}
+                    />
+                    <Bar dataKey="value" radius={[6, 6, 0, 0]}>
+                      {distData.map((d) => (
+                        <Cell key={d.label} fill={d.color} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            ) : (
+              <div className="flex h-[220px] items-center justify-center">
+                <p className="text-[13px] text-[#888b91]">No score data yet.</p>
+              </div>
+            )}
+          </GlassCard>
+        </Reveal>
+
+        {/* Interviews & avg score trend */}
+        <Reveal dir="right">
+          <GlassCard className="p-5">
+            <h3 className="mb-4 text-[16px] font-semibold">Interviews &amp; avg score</h3>
+            {HR_TREND_STATIC.length > 0 ? (
+              <div className="h-[220px] w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={HR_TREND_STATIC}>
+                    <CartesianGrid vertical={false} stroke="rgba(255,255,255,0.05)" />
+                    <XAxis
+                      dataKey="day"
+                      tick={{ fill: '#70757c', fontSize: 11 }}
+                      axisLine={false}
+                      tickLine={false}
+                    />
+                    <YAxis
+                      tick={{ fill: '#70757c', fontSize: 11 }}
+                      axisLine={false}
+                      tickLine={false}
+                      width={28}
+                    />
+                    <Tooltip contentStyle={TOOLTIP_STYLE} />
+                    <Line
+                      type="monotone"
+                      dataKey="interviews"
+                      stroke={accent}
+                      strokeWidth={2.5}
+                      dot={false}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="avg"
+                      stroke="#a887dc"
+                      strokeWidth={2.5}
+                      dot={false}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            ) : (
+              <div className="flex h-[220px] items-center justify-center">
+                <p className="text-[13px] text-[#888b91]">No trend data yet.</p>
+              </div>
+            )}
+          </GlassCard>
+        </Reveal>
+      </div>
+
+      {/* Averages summary row (only when data loaded) */}
+      {avg && (
+        <Reveal>
+          <div className="flex flex-wrap gap-6 rounded-[16px] border border-white/[0.06] bg-white/[0.02] px-5 py-4 text-[13px] text-[#888b91]">
+            {avg.avg_ats !== null && (
+              <span>
+                Avg ATS score:{' '}
+                <span className="font-semibold text-white">{Math.round(avg.avg_ats)}</span>
+              </span>
+            )}
+            {avg.avg_exam_percent !== null && (
+              <span>
+                Avg exam score:{' '}
+                <span className="font-semibold text-white">
+                  {Math.round(avg.avg_exam_percent)}%
+                </span>
+              </span>
+            )}
+            {avg.avg_interview_composite !== null && (
+              <span>
+                Avg interview score:{' '}
+                <span className="font-semibold text-white">
+                  {avg.avg_interview_composite.toFixed(1)}/10
+                </span>
+              </span>
+            )}
+          </div>
+        </Reveal>
+      )}
+    </div>
   );
 }
 
+// ── Named export: standalone /hr/analytics page ───────────────────────────────
 export function HRAnalyticsPage() {
   return (
-    <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight text-foreground">Hiring analytics</h1>
-        <p className="mt-2 text-body-sm text-muted-foreground">
-          Your company&apos;s funnel — counts at every stage and average scores.
-        </p>
+    <div className="mx-auto max-w-[1280px] px-6 py-8 lg:px-8">
+      <h1 className="text-[28px] font-semibold tracking-[-1px]">Analytics</h1>
+      <p className="mt-1 text-[14px] text-[#888b91]">
+        Funnel, scores and language insights.
+      </p>
+      <div className="mt-6">
+        <HRAnalytics />
       </div>
-      <HRAnalytics />
     </div>
   );
 }

@@ -1,4 +1,7 @@
 // ExamEditor — author questions, tune settings, publish, and assign (HR Phase 2).
+// Layout: design screen ExamEditor.tsx (GlassCard skin, Pill buttons, StatusTag).
+// Behavior: all live logic — MCQ model, addQuestion/deleteQuestion, publish/unpublish,
+//           thresholdMut, attempt-lock banner, full assign+magic-link+revoke panel.
 
 import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
@@ -14,7 +17,10 @@ import {
   Lock,
   BarChart3,
   Loader2,
-} from 'lucide-react';
+  ListChecks,
+  ClipboardList,
+  Clock,
+} from '@/design/components/icons';
 import {
   getExam,
   updateExam,
@@ -28,22 +34,47 @@ import {
 import { listApplicants } from '@/api/applicants';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Badge } from '@/components/ui/badge';
-import { Skeleton } from '@/components/ui/skeleton';
+import {
+  GlassCard,
+  Pill,
+  StatusTag,
+} from '@/design/components/primitives';
+import { Reveal, Stagger, StaggerItem } from '@/design/components/Reveal';
+
+// ── Status helpers ────────────────────────────────────────────────────────────
+
+type TagToneKey = 'neutral' | 'forest' | 'amber';
+
+function statusTone(s: string): { label: string; tone: TagToneKey } {
+  switch (s) {
+    case 'published':
+      return { label: 'Published', tone: 'forest' };
+    case 'closed':
+      return { label: 'Closed', tone: 'neutral' };
+    default:
+      return { label: 'Draft', tone: 'amber' };
+  }
+}
+
+// ── Shared input class (design convention) ────────────────────────────────────
 
 const inputCls =
-  'w-full rounded-[9px] border border-border bg-secondary px-3 py-2 text-sm text-foreground ' +
-  'placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring transition-colors';
+  'w-full rounded-[10px] border border-white/[0.1] bg-[rgba(28,29,31,0.6)] px-3 py-2 ' +
+  'text-[14px] text-white placeholder:text-[#5a5f66] focus:outline-none ' +
+  'focus:border-[var(--accent)] transition-colors';
+
+// ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function ExamEditor() {
   const { examId = '' } = useParams<{ examId: string }>();
   const qc = useQueryClient();
   const examKey = ['hr', 'exam', examId];
 
-  const { data: exam, isLoading } = useQuery({ queryKey: examKey, queryFn: () => getExam(examId) });
+  // ── Queries ──────────────────────────────────────────────────────────────
+  const { data: exam, isLoading } = useQuery({
+    queryKey: examKey,
+    queryFn: () => getExam(examId),
+  });
   const { data: applicants } = useQuery({
     queryKey: ['hr', 'applicants'],
     queryFn: () => listApplicants(),
@@ -58,18 +89,17 @@ export default function ExamEditor() {
     void qc.invalidateQueries({ queryKey: ['hr', 'exams'] });
   };
 
-  // ── Question composer state ──
+  // ── Composer state (MCQ model — prompt + 2-6 options + correct_index + points) ──
   const [prompt, setPrompt] = useState('');
   const [options, setOptions] = useState<string[]>(['', '']);
   const [correctIdx, setCorrectIdx] = useState(0);
   const [points, setPoints] = useState('1');
 
-  // ── Assign state ──
+  // ── Assign state ──────────────────────────────────────────────────────────
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [minted, setMinted] = useState<AssignResult[]>([]);
 
-  const locked = (exam?.attempt_count ?? 0) > 0;
-
+  // ── Mutations ─────────────────────────────────────────────────────────────
   const publishMut = useMutation({
     mutationFn: (status: 'draft' | 'published') => updateExam(examId, { status }),
     onSuccess: () => refresh(),
@@ -129,6 +159,7 @@ export default function ExamEditor() {
     onError: (e: unknown) => toast.error(e instanceof Error ? e.message : 'Revoke failed'),
   });
 
+  // ── Handlers ──────────────────────────────────────────────────────────────
   function submitQuestion(ev: React.FormEvent) {
     ev.preventDefault();
     if (!prompt.trim()) return toast.error('Question prompt is required.');
@@ -147,309 +178,428 @@ export default function ExamEditor() {
     }
   }
 
+  function toggleApplicant(id: string, checked: boolean) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  // ── Loading guard ──────────────────────────────────────────────────────────
   if (isLoading || !exam) {
     return (
-      <div className="space-y-4">
-        <Skeleton className="h-8 w-64" />
-        <Skeleton className="h-40 w-full rounded-3xl" />
+      <div className="mx-auto max-w-[920px] px-6 py-8 lg:px-8 space-y-4">
+        <div className="h-5 w-28 rounded-xl bg-white/[0.07] animate-pulse" />
+        <div className="h-10 w-64 rounded-xl bg-white/[0.07] animate-pulse" />
+        <div className="h-40 w-full rounded-[24px] bg-white/[0.05] animate-pulse" />
+        <div className="h-48 w-full rounded-[24px] bg-white/[0.05] animate-pulse" />
       </div>
     );
   }
 
+  const questionCount = exam.questions.length;
+  const timeLimitMin = exam.time_limit_seconds
+    ? Math.round(exam.time_limit_seconds / 60)
+    : null;
+  const locked = (exam.attempt_count ?? 0) > 0;
   const isPublished = exam.status === 'published';
+  const { label: statusLabel, tone: statusToneKey } = statusTone(exam.status ?? 'draft');
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <Link
-            to="/hr/exams"
-            className="mb-1 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-          >
-            <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" /> All exams
-          </Link>
-          <h1 className="truncate text-subheading font-semibold text-foreground">{exam.title}</h1>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <Link to={`/hr/exams/${examId}/results`}>
-            <Button variant="outline" size="sm" className="gap-1.5">
-              <BarChart3 className="h-4 w-4" aria-hidden="true" /> Results
-            </Button>
-          </Link>
-          <Button
-            size="sm"
-            variant={isPublished ? 'outline' : 'default'}
-            disabled={publishMut.isPending}
-            onClick={() => publishMut.mutate(isPublished ? 'draft' : 'published')}
-          >
-            {isPublished ? 'Unpublish' : 'Publish'}
-          </Button>
-        </div>
-      </div>
+    <div className="mx-auto max-w-[920px] px-6 py-8 lg:px-8">
+      {/* ── Breadcrumb ── */}
+      <Reveal>
+        <Link
+          to="/hr/exams"
+          className="inline-flex items-center gap-1.5 text-[13px] text-[#888b91] hover:text-white transition-colors"
+        >
+          <ArrowLeft size={15} aria-hidden="true" /> Back to exams
+        </Link>
 
-      {locked && (
-        <div className="flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-600">
-          <Lock className="h-4 w-4 shrink-0" aria-hidden="true" />
-          This exam has attempts — questions are locked to keep grading fair.
+        {/* ── Header row ── */}
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <span className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[rgba(var(--accent-rgb),0.14)] text-[#60a5fa]">
+              <ClipboardList size={20} aria-hidden="true" />
+            </span>
+            <div>
+              <h1 className="text-[26px] font-semibold tracking-[-0.8px] text-white">
+                {exam.title}
+              </h1>
+            </div>
+          </div>
+          <div className="flex items-center gap-2.5">
+            <Link to={`/hr/exams/${examId}/results`}>
+              <Pill variant="ghost" className="px-4 py-2.5 gap-2">
+                <BarChart3 size={15} aria-hidden="true" /> Results
+              </Pill>
+            </Link>
+            <Pill
+              variant={isPublished ? 'ghost' : 'primary'}
+              className="px-5 py-2.5"
+              disabled={publishMut.isPending}
+              aria-busy={publishMut.isPending}
+              onClick={() => publishMut.mutate(isPublished ? 'draft' : 'published')}
+            >
+              {publishMut.isPending ? (
+                <Loader2 size={15} className="animate-spin" aria-hidden="true" />
+              ) : null}
+              {isPublished ? 'Unpublish' : 'Publish'}
+            </Pill>
+          </div>
         </div>
+
+        {/* ── Meta row ── */}
+        <div className="mt-4 flex items-center gap-4 text-[13px] text-[#888b91]">
+          <span className="flex items-center gap-1.5">
+            <ListChecks size={15} aria-hidden="true" />
+            {questionCount} question{questionCount !== 1 ? 's' : ''}
+          </span>
+          {timeLimitMin !== null && (
+            <span className="flex items-center gap-1.5">
+              <Clock size={15} aria-hidden="true" /> ~{timeLimitMin} min
+            </span>
+          )}
+          <span className="flex items-center gap-1.5">
+            pass &ge; {exam.pass_threshold}%
+          </span>
+          <StatusTag tone={statusToneKey}>{statusLabel}</StatusTag>
+        </div>
+      </Reveal>
+
+      {/* ── Attempt-lock amber banner ── */}
+      {locked && (
+        <Reveal delay={0.04}>
+          <div
+            role="alert"
+            className="mt-5 flex items-center gap-2.5 rounded-[16px] border border-[rgba(255,183,100,0.3)] bg-[rgba(255,183,100,0.08)] px-4 py-3 text-[13px] text-[#ffb764]"
+          >
+            <Lock size={16} className="shrink-0" aria-hidden="true" />
+            This exam has attempts — questions are locked to protect grading integrity.
+          </div>
+        </Reveal>
       )}
 
-      {/* Settings */}
-      <Card className="transition-shadow hover:shadow-card-hover">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base text-foreground">Settings</CardTitle>
-          <CardDescription>
-            Status: <Badge variant="outline">{exam.status}</Badge> · pass ≥ {exam.pass_threshold}% ·{' '}
-            {exam.time_limit_seconds ? `${Math.round(exam.time_limit_seconds / 60)} min` : 'untimed'}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <label className="flex items-end gap-2 text-sm">
-            <span className="flex-1">
-              <span className="mb-1 block text-xs text-muted-foreground">Pass threshold %</span>
-              <input
-                type="number"
-                min={0}
-                max={100}
-                defaultValue={exam.pass_threshold}
-                className={inputCls}
-                onBlur={(e) => {
-                  const v = Number(e.target.value);
-                  if (v !== exam.pass_threshold && v >= 0 && v <= 100) thresholdMut.mutate(v);
-                }}
-                aria-label="Pass threshold"
-              />
-            </span>
+      {/* ── Settings ── */}
+      <Reveal delay={0.06}>
+        <GlassCard className="mt-5 p-5">
+          <p className="text-[14px] font-semibold text-white">Settings</p>
+          <p className="mt-0.5 text-[12.5px] text-[#888b91]">Adjust pass threshold; changes save on blur.</p>
+          <label className="mt-4 flex flex-col gap-1.5 text-sm">
+            <span className="text-[12px] uppercase tracking-[0.5px] text-[#70757c]">Pass threshold %</span>
+            <input
+              type="number"
+              min={0}
+              max={100}
+              defaultValue={exam.pass_threshold}
+              className={cn(inputCls, 'max-w-[180px]')}
+              onBlur={(e) => {
+                const v = Number(e.target.value);
+                if (v !== exam.pass_threshold && v >= 0 && v <= 100) thresholdMut.mutate(v);
+              }}
+              aria-label="Pass threshold"
+            />
           </label>
-        </CardContent>
-      </Card>
+        </GlassCard>
+      </Reveal>
 
-      {/* Questions */}
-      <Card className="transition-shadow hover:shadow-card-hover">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base text-foreground">Questions ({exam.questions.length})</CardTitle>
-          <CardDescription>One correct option per question. Worth the listed points.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {exam.questions.map((q, i) => (
-            <div key={q.id} className="rounded-xl border border-border bg-muted/40 p-3">
-              <div className="flex items-start justify-between gap-2">
-                <p className="text-sm font-medium text-foreground">
-                  {i + 1}. {q.prompt}{' '}
-                  <span className="text-xs font-normal text-muted-foreground">({q.points} pt)</span>
-                </p>
-                {!locked && (
-                  <button
-                    type="button"
-                    aria-label="Delete question"
-                    className="shrink-0 text-muted-foreground hover:text-rose-600"
-                    onClick={() => delMut.mutate(q.id)}
+      {/* ── Questions ── */}
+      <Reveal delay={0.1}>
+        <GlassCard className="mt-5 p-5">
+          <p className="text-[14px] font-semibold text-white">
+            Questions ({questionCount})
+          </p>
+          <p className="mt-0.5 text-[12.5px] text-[#888b91]">
+            One correct option per question. Worth the listed points.
+          </p>
+
+          <div className="mt-4 flex flex-col gap-3">
+            {/* Existing questions */}
+            {questionCount > 0 && (
+              <Stagger className="flex flex-col gap-2.5">
+                {exam.questions.map((q, i) => (
+                  <StaggerItem key={q.id}>
+                    <div className="rounded-[16px] border border-white/[0.08] bg-[rgba(28,29,31,0.5)] p-4">
+                      <div className="flex items-start gap-3">
+                        <span className="flex h-7 w-7 flex-none items-center justify-center rounded-full bg-white/[0.06] font-mono text-[12px] text-[#b8babf]">
+                          {i + 1}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-[14px] font-medium leading-snug text-white">
+                            {q.prompt}{' '}
+                            <span className="font-normal text-[#888b91]">({q.points} pt)</span>
+                          </p>
+                          <ul className="mt-2.5 space-y-1 pl-0">
+                            {q.options.map((opt, oi) => (
+                              <li
+                                key={oi}
+                                className={cn(
+                                  'flex items-center gap-2 text-[13px]',
+                                  oi === q.correct_index
+                                    ? 'font-medium text-[#27c93f]'
+                                    : 'text-[#888b91]',
+                                )}
+                              >
+                                {oi === q.correct_index ? (
+                                  <Check size={14} className="shrink-0" aria-hidden="true" />
+                                ) : (
+                                  <span className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                                )}
+                                {opt}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                        {!locked && (
+                          <button
+                            type="button"
+                            aria-label="Delete question"
+                            className="shrink-0 flex h-8 w-8 items-center justify-center rounded-[8px] border border-white/[0.1] text-[#888b91] hover:border-[rgba(230,113,79,0.4)] hover:text-[#e6714f] transition-colors"
+                            onClick={() => delMut.mutate(q.id)}
+                          >
+                            <Trash2 size={14} aria-hidden="true" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </StaggerItem>
+                ))}
+              </Stagger>
+            )}
+
+            {/* MCQ composer — hidden when locked */}
+            {!locked && (
+              <form
+                onSubmit={submitQuestion}
+                className="space-y-3 rounded-[16px] border border-dashed border-white/[0.1] bg-[rgba(28,29,31,0.3)] p-4"
+                aria-label="New question composer"
+              >
+                <textarea
+                  className={cn(inputCls, 'resize-none')}
+                  rows={2}
+                  placeholder="Question prompt…"
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  aria-label="Question prompt"
+                />
+
+                <div className="space-y-2">
+                  {options.map((opt, oi) => (
+                    <div key={oi} className="flex items-center gap-2">
+                      <input
+                        type="radio"
+                        name="correct"
+                        checked={correctIdx === oi}
+                        onChange={() => setCorrectIdx(oi)}
+                        className="h-4 w-4 flex-none accent-[var(--accent)]"
+                        aria-label={`Mark option ${oi + 1} correct`}
+                      />
+                      <input
+                        className={inputCls}
+                        placeholder={`Option ${oi + 1}`}
+                        value={opt}
+                        onChange={(e) =>
+                          setOptions((prev) =>
+                            prev.map((o, j) => (j === oi ? e.target.value : o)),
+                          )
+                        }
+                        aria-label={`Option ${oi + 1}`}
+                      />
+                      {options.length > 2 && (
+                        <button
+                          type="button"
+                          aria-label="Remove option"
+                          className="shrink-0 flex h-8 w-8 items-center justify-center rounded-[8px] border border-white/[0.1] text-[#888b91] hover:border-[rgba(230,113,79,0.4)] hover:text-[#e6714f] transition-colors"
+                          onClick={() => {
+                            setOptions((prev) => prev.filter((_, j) => j !== oi));
+                            setCorrectIdx((c) => (c >= oi && c > 0 ? c - 1 : c));
+                          }}
+                        >
+                          <Trash2 size={13} aria-hidden="true" />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {options.length < 6 && (
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1.5 rounded-[8px] border border-white/[0.1] bg-transparent px-3 py-1.5 text-[12.5px] text-[#888b91] hover:text-white hover:border-white/[0.2] transition-colors"
+                      onClick={() => setOptions((prev) => [...prev, ''])}
+                    >
+                      <Plus size={13} aria-hidden="true" /> Add option
+                    </button>
+                  )}
+                  <label className="ml-auto flex items-center gap-2 text-[12px] text-[#888b91]">
+                    Points
+                    <input
+                      type="number"
+                      min={1}
+                      value={points}
+                      onChange={(e) => setPoints(e.target.value)}
+                      className="w-16 rounded-[8px] border border-white/[0.1] bg-[rgba(28,29,31,0.6)] px-2 py-1 text-[13px] text-white focus:outline-none focus:border-[var(--accent)] transition-colors"
+                      aria-label="Points"
+                    />
+                  </label>
+                  <Pill
+                    type="submit"
+                    variant="accent"
+                    className="gap-1.5 px-4 py-2"
+                    disabled={addMut.isPending}
+                    aria-busy={addMut.isPending}
                   >
-                    <Trash2 className="h-4 w-4" aria-hidden="true" />
-                  </button>
-                )}
-              </div>
-              <ul className="mt-1.5 space-y-0.5">
-                {q.options.map((opt, oi) => (
-                  <li
-                    key={oi}
-                    className={cn(
-                      'flex items-center gap-2 text-sm',
-                      oi === q.correct_index ? 'font-medium text-emerald-600' : 'text-muted-foreground',
-                    )}
-                  >
-                    {oi === q.correct_index ? (
-                      <Check className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    {addMut.isPending ? (
+                      <Loader2 size={14} className="animate-spin" aria-hidden="true" />
                     ) : (
-                      <span className="h-3.5 w-3.5 shrink-0" />
+                      <Plus size={14} aria-hidden="true" />
                     )}
-                    {opt}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ))}
+                    Add question
+                  </Pill>
+                </div>
+              </form>
+            )}
+          </div>
 
-          {!locked && (
-            <form onSubmit={submitQuestion} className="space-y-2 rounded-xl border border-dashed border-border bg-muted/40 p-3">
-              <Input
-                placeholder="Question prompt"
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                aria-label="Question prompt"
-              />
-              <div className="space-y-1.5">
-                {options.map((opt, oi) => (
-                  <div key={oi} className="flex items-center gap-2">
-                    <input
-                      type="radio"
-                      name="correct"
-                      checked={correctIdx === oi}
-                      onChange={() => setCorrectIdx(oi)}
-                      className="h-4 w-4 accent-primary"
-                      aria-label={`Mark option ${oi + 1} correct`}
-                    />
-                    <input
-                      className={inputCls}
-                      placeholder={`Option ${oi + 1}`}
-                      value={opt}
-                      onChange={(e) =>
-                        setOptions((prev) => prev.map((o, j) => (j === oi ? e.target.value : o)))
-                      }
-                      aria-label={`Option ${oi + 1}`}
-                    />
-                    {options.length > 2 && (
-                      <button
-                        type="button"
-                        aria-label="Remove option"
-                        className="shrink-0 text-muted-foreground hover:text-rose-600"
-                        onClick={() => {
-                          setOptions((prev) => prev.filter((_, j) => j !== oi));
-                          setCorrectIdx((c) => (c >= oi && c > 0 ? c - 1 : c));
-                        }}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
-              <div className="flex items-center gap-2">
-                {options.length < 6 && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="gap-1 text-xs"
-                    onClick={() => setOptions((prev) => [...prev, ''])}
-                  >
-                    <Plus className="h-3.5 w-3.5" aria-hidden="true" /> Add option
-                  </Button>
-                )}
-                <label className="ml-auto flex items-center gap-1.5 text-xs text-muted-foreground">
-                  Points
-                  <input
-                    type="number"
-                    min={1}
-                    value={points}
-                    onChange={(e) => setPoints(e.target.value)}
-                    className="w-16 rounded-[9px] border border-border bg-secondary px-2 py-1 text-sm text-foreground"
-                    aria-label="Points"
-                  />
-                </label>
-                <Button type="submit" size="sm" disabled={addMut.isPending} className="gap-1.5">
-                  <Plus className="h-4 w-4" aria-hidden="true" /> Add question
-                </Button>
-              </div>
-            </form>
+          {/* Add question dashed button (when questions exist) */}
+          {!locked && questionCount > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                /* scroll to form — it's always visible below */
+              }}
+              className="mt-3 flex w-full items-center justify-center gap-2 rounded-[16px] border-[1.5px] border-dashed border-white/15 py-3.5 text-[13.5px] font-medium text-[#60a5fa] transition-colors hover:border-[rgba(var(--accent-rgb),0.4)] hover:bg-[rgba(var(--accent-rgb),0.05)]"
+            >
+              <Plus size={17} aria-hidden="true" /> Add another question
+            </button>
           )}
-        </CardContent>
-      </Card>
+        </GlassCard>
+      </Reveal>
 
-      {/* Assign */}
-      <Card className="transition-shadow hover:shadow-card-hover">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base text-foreground">Assign &amp; share links</CardTitle>
-          <CardDescription>
+      {/* ── Assign & share links ── */}
+      <Reveal delay={0.14}>
+        <GlassCard className="mt-5 p-5">
+          <p className="text-[14px] font-semibold text-white">Assign &amp; share links</p>
+          <p className="mt-0.5 text-[12.5px] text-[#888b91]">
             {isPublished
               ? 'Pick applicants and generate a private link each can use to take the exam.'
               : 'Publish the exam first, then assign it to applicants.'}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
+          </p>
+
           {isPublished && (
-            <>
-              <div className="max-h-40 space-y-1 overflow-y-auto rounded-xl border border-border bg-muted/40 p-2">
+            <div className="mt-4 space-y-4">
+              {/* Applicant checkbox list */}
+              <div
+                className="max-h-44 space-y-1 overflow-y-auto rounded-[16px] border border-white/[0.08] bg-[rgba(28,29,31,0.5)] p-2"
+                aria-label="Select applicants to assign"
+              >
                 {(applicants ?? []).length === 0 ? (
-                  <p className="px-1 py-2 text-xs text-muted-foreground">
+                  <p className="px-2 py-3 text-[12.5px] text-[#888b91]">
                     No applicants yet — add them under Applicants.
                   </p>
                 ) : (
                   (applicants ?? []).map((a) => (
                     <label
                       key={a.id}
-                      className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm text-foreground hover:bg-accent"
+                      className="flex cursor-pointer items-center gap-2.5 rounded-[10px] px-2 py-1.5 text-[13px] text-white hover:bg-white/[0.04] transition-colors"
                     >
                       <input
                         type="checkbox"
                         checked={selected.has(a.id)}
-                        onChange={(e) =>
-                          setSelected((prev) => {
-                            const next = new Set(prev);
-                            if (e.target.checked) next.add(a.id);
-                            else next.delete(a.id);
-                            return next;
-                          })
-                        }
-                        className="h-4 w-4 accent-primary"
+                        onChange={(e) => toggleApplicant(a.id, e.target.checked)}
+                        className="h-4 w-4 accent-[var(--accent)]"
                       />
                       <span className="truncate">{a.full_name}</span>
                     </label>
                   ))
                 )}
               </div>
-              <Button
-                size="sm"
+
+              <Pill
+                variant="accent"
+                className="gap-1.5 px-5 py-2.5"
                 disabled={assignMut.isPending || selected.size === 0}
+                aria-busy={assignMut.isPending}
                 onClick={() => assignMut.mutate()}
-                className="gap-1.5"
               >
                 {assignMut.isPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  <Loader2 size={15} className="animate-spin" aria-hidden="true" />
                 ) : (
-                  <Send className="h-4 w-4" aria-hidden="true" />
+                  <Send size={15} aria-hidden="true" />
                 )}
                 Generate links ({selected.size})
-              </Button>
+              </Pill>
 
+              {/* Once-shown magic links panel */}
               {minted.length > 0 && (
-                <div className="space-y-1.5 rounded-xl border border-emerald-200 bg-emerald-50 p-2.5">
-                  <p className="text-xs font-medium text-emerald-700">
-                    Share each link with the applicant — copy now (shown once):
+                <div
+                  role="region"
+                  aria-label="Generated magic links"
+                  className="space-y-2 rounded-[16px] border border-[rgba(39,201,63,0.3)] bg-[rgba(39,201,63,0.08)] p-3.5"
+                >
+                  <p className="text-[12.5px] font-semibold text-[#27c93f]">
+                    Share each link now — shown once only:
                   </p>
                   {minted.map((m) => (
-                    <div key={m.assignment_id} className="flex items-center gap-2 text-xs">
-                      <span className="w-32 shrink-0 truncate font-medium text-foreground">{m.applicant_name}</span>
-                      <input readOnly value={m.magic_link} className="min-w-0 flex-1 rounded-[9px] border border-border bg-secondary px-2 py-1 text-muted-foreground" />
+                    <div key={m.assignment_id} className="flex items-center gap-2 text-[12px]">
+                      <span className="w-32 shrink-0 truncate font-medium text-white">
+                        {m.applicant_name}
+                      </span>
+                      <input
+                        readOnly
+                        value={m.magic_link}
+                        className="min-w-0 flex-1 rounded-[10px] border border-white/[0.1] bg-[rgba(28,29,31,0.6)] px-2 py-1 text-[#888b91] focus:outline-none"
+                        aria-label={`Magic link for ${m.applicant_name}`}
+                      />
                       <button
                         type="button"
-                        aria-label="Copy link"
-                        className="shrink-0 text-emerald-600 hover:text-emerald-800"
+                        aria-label={`Copy link for ${m.applicant_name}`}
+                        className="shrink-0 flex h-7 w-7 items-center justify-center rounded-[8px] text-[#27c93f] hover:bg-[rgba(39,201,63,0.15)] transition-colors"
                         onClick={() => void copyLink(m.magic_link)}
                       >
-                        <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                        <Copy size={14} aria-hidden="true" />
                       </button>
                     </div>
                   ))}
                 </div>
               )}
-            </>
+            </div>
           )}
 
+          {/* Assigned list */}
           {(assignments ?? []).length > 0 && (
-            <div className="space-y-1">
-              <p className="text-xs font-semibold text-muted-foreground">Assigned</p>
+            <div className="mt-4 space-y-1.5">
+              <p className="text-[11.5px] font-semibold uppercase tracking-[0.5px] text-[#70757c]">
+                Assigned
+              </p>
               {(assignments ?? []).map((a) => (
-                <div key={a.assignment_id} className="flex items-center gap-2 text-sm text-foreground">
+                <div
+                  key={a.assignment_id}
+                  className="flex items-center gap-2.5 rounded-[12px] border border-white/[0.08] bg-[rgba(28,29,31,0.4)] px-3 py-2 text-[13px] text-white"
+                >
                   <span className="min-w-0 flex-1 truncate">{a.applicant_name}</span>
-                  <Badge variant="outline" className="text-[11px]">{a.status}</Badge>
+                  <StatusTag tone="neutral" className="text-[11px]">
+                    {a.status}
+                  </StatusTag>
                   {a.status === 'invited' && (
                     <button
                       type="button"
-                      aria-label="Revoke link"
-                      className="shrink-0 text-muted-foreground hover:text-rose-600"
+                      aria-label={`Revoke link for ${a.applicant_name}`}
+                      className="shrink-0 flex h-7 w-7 items-center justify-center rounded-[8px] text-[#888b91] hover:border hover:border-[rgba(230,113,79,0.4)] hover:text-[#e6714f] transition-colors"
                       onClick={() => revokeMut.mutate(a.assignment_id)}
                     >
-                      <Ban className="h-3.5 w-3.5" aria-hidden="true" />
+                      <Ban size={14} aria-hidden="true" />
                     </button>
                   )}
                 </div>
               ))}
             </div>
           )}
-        </CardContent>
-      </Card>
+        </GlassCard>
+      </Reveal>
     </div>
   );
 }

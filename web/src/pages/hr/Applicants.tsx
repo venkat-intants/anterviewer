@@ -1,21 +1,25 @@
-// Applicants — HR resume screening dashboard (HR workflow Phase 1).
-// Upload applicant resumes -> auto ATS score -> ranked list -> shortlist/reject.
+// Applicants — HR resume screening dashboard.
+// Layout: design screen Applicants.tsx (GlassCard table, SegTabs, Avatar, StatusTag, Pill).
+// Behavior: all live logic — listApplicants query, bulk PDF upload (multi/de-dupe/cap 25),
+//           progress bar, failure list, shortlist/reject/rescore mutations,
+//           real ats_breakdown/strengths/concerns in the detail drawer.
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
   Upload,
-  FileSearch,
-  CheckCircle2,
-  XCircle,
-  RefreshCw,
-  ChevronDown,
-  Star,
   FileText,
   X,
   AlertTriangle,
-} from 'lucide-react';
+  CheckCircle2,
+  XCircle,
+  RefreshCw,
+  Search,
+  Star,
+  ArrowRight,
+} from '@/design/components/icons';
 import {
   listApplicants,
   bulkUploadApplicants,
@@ -27,37 +31,40 @@ import {
 } from '@/api/applicants';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Badge } from '@/components/ui/badge';
-import { Skeleton } from '@/components/ui/skeleton';
+import {
+  GlassCard,
+  StatusTag,
+  Avatar,
+  SegTabs,
+  Pill,
+  type TagTone,
+} from '@/design/components/primitives';
+import { Reveal } from '@/design/components/Reveal';
+import { staggerParent, staggerChild } from '@/design/lib/motion';
+import { initialsOf, gradientFor, scoreColor } from '@/design/data/shared';
 
-const inputCls =
-  'w-full rounded-[9px] border border-border bg-secondary px-3 py-2 text-sm text-foreground ' +
-  'placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring transition-colors';
+// ── Constants ────────────────────────────────────────────────────────────────
 
-function scoreTone(n: number | null): string {
-  if (n === null) return 'text-muted-foreground';
-  if (n >= 70) return 'text-emerald-600';
-  if (n >= 45) return 'text-amber-600';
-  return 'text-rose-600';
-}
+const MAX_BULK_FILES = 25;
 
-type RecBadgeResult = { label: string; variant: 'success' | 'destructive' | 'warning' | 'secondary' };
+const STATUS_FILTERS = [
+  { key: 'all', label: 'All' },
+  { key: 'new', label: 'New' },
+  { key: 'shortlisted', label: 'Shortlisted' },
+  { key: 'rejected', label: 'Rejected' },
+];
 
-function recBadge(rec: string | null): RecBadgeResult {
-  switch (rec) {
-    case 'strong_fit':
-      return { label: 'Strong fit', variant: 'success' };
-    case 'weak_fit':
-      return { label: 'Weak fit', variant: 'destructive' };
-    case 'moderate_fit':
-      return { label: 'Moderate fit', variant: 'warning' };
-    default:
-      return { label: 'Unscored', variant: 'secondary' };
-  }
-}
+const STATUS_TONE: Record<ApplicantStatus, TagTone> = {
+  new: 'neutral',
+  shortlisted: 'forest',
+  rejected: 'ember',
+};
+
+const STATUS_LABEL: Record<ApplicantStatus, string> = {
+  new: 'New',
+  shortlisted: 'Shortlisted',
+  rejected: 'Rejected',
+};
 
 const BREAKDOWN_LABELS: Record<string, string> = {
   skills_match: 'Skills',
@@ -66,159 +73,511 @@ const BREAKDOWN_LABELS: Record<string, string> = {
   role_alignment: 'Role alignment',
 };
 
-// ── Applicant row ────────────────────────────────────────────────────────────
-function ApplicantRow({ a }: { a: Applicant }) {
-  const qc = useQueryClient();
-  const [open, setOpen] = useState(false);
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
-  const statusMut = useMutation({
-    mutationFn: (status: ApplicantStatus) => updateApplicantStatus(a.id, status),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: ['hr', 'applicants'] }),
-    onError: (e: unknown) => toast.error(e instanceof Error ? e.message : 'Update failed'),
-  });
-  const rescoreMut = useMutation({
-    mutationFn: () => rescoreApplicant(a.id),
-    onSuccess: () => {
-      toast.success('Rescored');
-      void qc.invalidateQueries({ queryKey: ['hr', 'applicants'] });
-    },
-    onError: (e: unknown) => toast.error(e instanceof Error ? e.message : 'Rescore failed'),
-  });
+type RecInfo = { label: string; tone: TagTone };
 
-  const rec = recBadge(a.ats_recommendation);
+function recInfo(rec: string | null): RecInfo {
+  switch (rec) {
+    case 'strong_fit':
+      return { label: 'Strong fit', tone: 'forest' };
+    case 'moderate_fit':
+      return { label: 'Moderate fit', tone: 'amber' };
+    case 'weak_fit':
+      return { label: 'Weak fit', tone: 'ember' };
+    default:
+      return { label: 'Unscored', tone: 'neutral' };
+  }
+}
+
+function seedFrom(name: string): number {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (Math.imul(31, h) + name.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+// ── Input base class ─────────────────────────────────────────────────────────
+
+const inputCls =
+  'w-full rounded-[10px] border border-white/[0.1] bg-[rgba(28,29,31,0.6)] px-3 py-2 ' +
+  'text-[14px] text-white placeholder:text-[#5a5f66] focus:outline-none ' +
+  'focus:border-[var(--accent)] transition-colors';
+
+// ── Slide-in drawer ───────────────────────────────────────────────────────────
+
+interface DrawerProps {
+  applicant: Applicant | null;
+  onClose: () => void;
+  onShortlist: (id: string) => void;
+  onReject: (id: string) => void;
+  onRescore: (id: string) => void;
+  statusPending: boolean;
+  rescorePending: boolean;
+}
+
+function ApplicantDrawer({
+  applicant: a,
+  onClose,
+  onShortlist,
+  onReject,
+  onRescore,
+  statusPending,
+  rescorePending,
+}: DrawerProps) {
+  if (!a) return null;
+
+  const seed = seedFrom(a.full_name);
+  const atsDisplay = a.ats_overall ?? null;
+  const rec = recInfo(a.ats_recommendation);
 
   return (
-    <div className="rounded-xl border border-border bg-card shadow-card transition-shadow hover:shadow-card-hover">
-      <div className="flex items-center gap-3 p-3">
-        {/* Score */}
-        <div className="w-12 shrink-0 text-center">
-          <div className={cn('text-xl font-semibold leading-none tracking-tight', scoreTone(a.ats_overall))}>
-            {a.ats_overall ?? '—'}
-          </div>
-          <div className="text-[11px] text-muted-foreground">ATS</div>
-        </div>
-        {/* Identity */}
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 flex-wrap">
-            <p className="text-sm font-medium text-foreground truncate">{a.full_name}</p>
-            <Badge variant={rec.variant} className="text-[11px]">
-              {rec.label}
-            </Badge>
-            {a.status === 'shortlisted' && (
-              <Badge variant="success" className="text-[11px] gap-1">
-                <Star className="h-3 w-3" aria-hidden="true" /> Shortlisted
-              </Badge>
-            )}
-            {a.status === 'rejected' && (
-              <Badge variant="destructive" className="text-[11px]">
-                Rejected
-              </Badge>
-            )}
-          </div>
-          <p className="text-xs text-muted-foreground truncate">
-            {a.target_job_title} · {a.target_level}
-            {a.email ? ` · ${a.email}` : ''}
-          </p>
-        </div>
-        {/* Actions */}
-        <div className="flex items-center gap-1 shrink-0">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-emerald-600 hover:bg-emerald-50 hover:text-emerald-700"
-            disabled={statusMut.isPending || a.status === 'shortlisted'}
-            onClick={() => statusMut.mutate('shortlisted')}
-            aria-label="Shortlist"
-          >
-            <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-rose-600 hover:bg-rose-50 hover:text-rose-700"
-            disabled={statusMut.isPending || a.status === 'rejected'}
-            onClick={() => statusMut.mutate('rejected')}
-            aria-label="Reject"
-          >
-            <XCircle className="h-4 w-4" aria-hidden="true" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => setOpen((v) => !v)}
-            aria-label="Toggle details"
-            aria-expanded={open}
-          >
-            <ChevronDown className={cn('h-4 w-4 transition-transform', open && 'rotate-180')} />
-          </Button>
-        </div>
-      </div>
+    <div
+      className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="absolute right-0 top-0 h-full w-full max-w-[420px] overflow-y-auto border-l border-white/10 bg-[#0a0b0d] p-7"
+        style={{ animation: 'av-drawer-in 0.32s cubic-bezier(.2,.7,.2,1)' }}
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${a.full_name} applicant details`}
+      >
+        <style>{`@keyframes av-drawer-in{from{transform:translateX(100%)}to{transform:translateX(0)}}`}</style>
 
-      {/* Detail */}
-      {open && (
-        <div className="border-t border-border px-4 py-3 space-y-3 text-sm">
-          {a.ats_summary && <p className="text-muted-foreground">{a.ats_summary}</p>}
-          {a.ats_breakdown && (
-            <div className="grid gap-1.5 sm:grid-cols-2">
+        {/* Header */}
+        <div className="flex items-center justify-between">
+          <span className="text-[12px] uppercase tracking-[1px] text-[#70757c]">Candidate</span>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-8 w-8 items-center justify-center rounded-[9px] border border-white/10 bg-white/[0.05] text-[#b8babf] hover:text-white transition-colors"
+          >
+            <X size={16} aria-hidden="true" />
+          </button>
+        </div>
+
+        {/* Identity */}
+        <div className="mt-5 flex items-center gap-4">
+          <Avatar initials={initialsOf(a.full_name)} gradient={gradientFor(seed)} size={58} />
+          <div>
+            <div className="text-[20px] font-semibold tracking-[-0.5px] text-white">{a.full_name}</div>
+            <div className="text-[13px] text-[#70757c]">{a.email ?? 'No email on file'}</div>
+            {a.user_id && (
+              <Link
+                to={`/u/${a.user_id}`}
+                className="mt-1 inline-flex items-center gap-1 text-[12px] font-medium text-[#60a5fa] hover:underline"
+              >
+                View full profile <ArrowRight size={12} aria-hidden="true" />
+              </Link>
+            )}
+          </div>
+        </div>
+
+        {/* Score + status tiles */}
+        <div className="mt-5 grid grid-cols-2 gap-2.5">
+          <div className="rounded-[12px] border border-white/[0.08] bg-[#0f0f10] p-4">
+            <div className="text-[11px] uppercase tracking-[0.5px] text-[#70757c]">ATS score</div>
+            <div
+              className="mt-1 text-[28px] font-semibold tracking-[-1px]"
+              style={{ color: atsDisplay !== null ? scoreColor(atsDisplay) : '#70757c' }}
+            >
+              {atsDisplay ?? '—'}
+            </div>
+          </div>
+          <div className="rounded-[12px] border border-white/[0.08] bg-[#0f0f10] p-4">
+            <div className="text-[11px] uppercase tracking-[0.5px] text-[#70757c]">Status</div>
+            <div className="mt-2">
+              <StatusTag tone={STATUS_TONE[a.status]} dot>
+                {STATUS_LABEL[a.status]}
+              </StatusTag>
+            </div>
+          </div>
+        </div>
+
+        {/* Role meta */}
+        <div className="mt-3 space-y-1 text-[12.5px] text-[#70757c]">
+          <p>
+            Role &middot;{' '}
+            <span className="text-[#b8babf]">
+              {a.target_job_title} ({a.target_level})
+            </span>
+          </p>
+          <div>
+            <StatusTag tone={rec.tone} className="text-[11.5px]">
+              {rec.label}
+            </StatusTag>
+          </div>
+        </div>
+
+        {/* ATS summary */}
+        {a.ats_summary && (
+          <p className="mt-4 text-[13px] leading-relaxed text-[#888b91]">{a.ats_summary}</p>
+        )}
+
+        {/* ATS breakdown bars — REAL data, not fabricated competencies */}
+        {a.ats_breakdown && Object.keys(a.ats_breakdown).length > 0 && (
+          <div className="mt-5">
+            <div className="text-[13px] font-semibold text-white">Score breakdown</div>
+            <div className="mt-3 flex flex-col gap-3">
               {Object.entries(a.ats_breakdown).map(([k, v]) => (
-                <div key={k} className="flex items-center gap-2">
-                  <span className="w-28 shrink-0 text-xs text-muted-foreground">
-                    {BREAKDOWN_LABELS[k] ?? k}
-                  </span>
-                  <div className="h-1.5 flex-1 rounded-full bg-border">
+                <div key={k}>
+                  <div className="mb-1 flex justify-between text-[12.5px]">
+                    <span className="text-[#b8babf]">{BREAKDOWN_LABELS[k] ?? k}</span>
+                    <span className="font-mono text-[#888b91]">{v}</span>
+                  </div>
+                  <div className="h-1.5 rounded-full bg-white/[0.07]">
                     <div
-                      className="h-1.5 rounded-full bg-primary"
+                      className="h-full rounded-full bg-[linear-gradient(90deg,var(--accent),#a887dc)]"
                       style={{ width: `${Math.max(0, Math.min(100, v))}%` }}
                     />
                   </div>
-                  <span className="w-7 text-right text-xs font-medium text-foreground">{v}</span>
                 </div>
               ))}
             </div>
-          )}
-          <div className="grid gap-3 sm:grid-cols-2">
+          </div>
+        )}
+
+        {/* Strengths + Concerns */}
+        {((a.ats_strengths && a.ats_strengths.length > 0) ||
+          (a.ats_concerns && a.ats_concerns.length > 0)) && (
+          <div className="mt-5 grid gap-4 sm:grid-cols-2">
             {a.ats_strengths && a.ats_strengths.length > 0 && (
               <div>
-                <p className="text-xs font-semibold text-emerald-600">Strengths</p>
-                <ul className="mt-1 list-disc pl-4 text-xs text-muted-foreground space-y-0.5">
+                <p className="text-[12.5px] font-semibold text-[#27c93f]">Strengths</p>
+                <ul className="mt-2 space-y-1">
                   {a.ats_strengths.map((s, i) => (
-                    <li key={i}>{s}</li>
+                    <li key={i} className="flex items-start gap-1.5 text-[12px] text-[#70757c]">
+                      <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[#27c93f]" />
+                      {s}
+                    </li>
                   ))}
                 </ul>
               </div>
             )}
             {a.ats_concerns && a.ats_concerns.length > 0 && (
               <div>
-                <p className="text-xs font-semibold text-rose-600">Concerns</p>
-                <ul className="mt-1 list-disc pl-4 text-xs text-muted-foreground space-y-0.5">
+                <p className="text-[12.5px] font-semibold text-[#e6714f]">Concerns</p>
+                <ul className="mt-2 space-y-1">
                   {a.ats_concerns.map((c, i) => (
-                    <li key={i}>{c}</li>
+                    <li key={i} className="flex items-start gap-1.5 text-[12px] text-[#70757c]">
+                      <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[#e6714f]" />
+                      {c}
+                    </li>
                   ))}
                 </ul>
               </div>
             )}
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1.5"
-            disabled={rescoreMut.isPending}
-            onClick={() => rescoreMut.mutate()}
+        )}
+
+        {/* Actions */}
+        <div className="mt-7 flex flex-wrap gap-2.5">
+          <Pill
+            variant="ghost"
+            onClick={() => onShortlist(a.id)}
+            disabled={statusPending || a.status === 'shortlisted'}
+            aria-label="Shortlist"
+            className="flex-1 gap-1.5"
           >
-            <RefreshCw className={cn('h-3.5 w-3.5', rescoreMut.isPending && 'animate-spin')} />
+            <CheckCircle2 size={15} aria-hidden="true" />
+            Shortlist
+          </Pill>
+          <Pill
+            variant="danger"
+            onClick={() => onReject(a.id)}
+            disabled={statusPending || a.status === 'rejected'}
+            aria-label="Reject"
+            className="flex-1 gap-1.5"
+          >
+            <XCircle size={15} aria-hidden="true" />
+            Reject
+          </Pill>
+          <Pill
+            variant="outline"
+            onClick={() => onRescore(a.id)}
+            disabled={rescorePending}
+            aria-label="Re-score"
+            className="w-full gap-1.5"
+          >
+            <RefreshCw
+              size={14}
+              className={cn(rescorePending && 'animate-spin')}
+              aria-hidden="true"
+            />
             Re-score
-          </Button>
+          </Pill>
         </div>
-      )}
+      </div>
     </div>
   );
 }
 
+// ── Table row ─────────────────────────────────────────────────────────────────
+
+function ApplicantRow({
+  a,
+  onSelect,
+}: {
+  a: Applicant;
+  onSelect: (applicant: Applicant) => void;
+}) {
+  const seed = seedFrom(a.full_name);
+  const atsDisplay = a.ats_overall;
+  const rec = recInfo(a.ats_recommendation);
+
+  return (
+    <button
+      onClick={() => onSelect(a)}
+      className="grid w-full grid-cols-[2fr_1.3fr_1fr_0.8fr_0.8fr_0.5fr] items-center gap-3 border-b border-white/[0.04] px-6 py-3.5 text-left transition-colors last:border-0 hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-inset"
+      aria-label={`Open details for ${a.full_name}`}
+    >
+      {/* Candidate */}
+      <div className="flex min-w-0 items-center gap-3">
+        <Avatar initials={initialsOf(a.full_name)} gradient={gradientFor(seed)} size={36} />
+        <div className="min-w-0">
+          <div className="truncate text-[14px] font-medium text-white">{a.full_name}</div>
+          <div className="truncate text-[12px] text-[#70757c]">{a.email ?? 'No email'}</div>
+        </div>
+      </div>
+
+      {/* Role */}
+      <div className="min-w-0">
+        <div className="truncate text-[13.5px] text-[#b8babf]">{a.target_job_title}</div>
+        <div className="text-[11.5px] text-[#70757c]">{a.target_level}</div>
+      </div>
+
+      {/* Status */}
+      <div className="flex flex-col gap-1">
+        <StatusTag tone={STATUS_TONE[a.status]} dot>
+          {STATUS_LABEL[a.status]}
+        </StatusTag>
+        {a.ats_recommendation && (
+          <StatusTag tone={rec.tone} className="text-[10.5px]">
+            {rec.label}
+          </StatusTag>
+        )}
+      </div>
+
+      {/* ATS score */}
+      <div
+        className="text-[15px] font-semibold"
+        style={{ color: atsDisplay !== null ? scoreColor(atsDisplay) : '#70757c' }}
+      >
+        {atsDisplay ?? '—'}
+      </div>
+
+      {/* Shortlisted badge */}
+      <div>
+        {a.status === 'shortlisted' && (
+          <span className="inline-flex items-center gap-1 text-[11.5px] font-semibold text-[#27c93f]">
+            <Star size={12} aria-hidden="true" />
+            Shortlisted
+          </span>
+        )}
+      </div>
+
+      {/* Arrow */}
+      <div className="flex justify-end">
+        <ArrowRight size={14} className="text-[#70757c]" aria-hidden="true" />
+      </div>
+    </button>
+  );
+}
+
+// ── Upload section ────────────────────────────────────────────────────────────
+
+interface UploadSectionProps {
+  files: File[];
+  jobTitle: string;
+  level: string;
+  jd: string;
+  progress: number;
+  pending: boolean;
+  lastResult: BulkUploadResult | null;
+  onFilesAdd: (fl: FileList | null) => void;
+  onFileRemove: (idx: number) => void;
+  onFilesClear: () => void;
+  onJobTitle: (v: string) => void;
+  onLevel: (v: string) => void;
+  onJd: (v: string) => void;
+  onSubmit: (e: React.FormEvent) => void;
+}
+
+function UploadSection({
+  files, jobTitle, level, jd, progress, pending, lastResult,
+  onFilesAdd, onFileRemove, onFilesClear, onJobTitle, onLevel, onJd, onSubmit,
+}: UploadSectionProps) {
+  return (
+    <GlassCard className="p-6">
+      {/* Card header */}
+      <div className="mb-5 flex items-center gap-2.5">
+        <div className="flex h-8 w-8 items-center justify-center rounded-[10px] bg-[rgba(var(--accent-rgb),0.14)] text-[#60a5fa]">
+          <Upload size={16} aria-hidden="true" />
+        </div>
+        <div>
+          <p className="text-[15px] font-semibold text-white">Bulk upload resumes</p>
+          <p className="text-[12.5px] text-[#888b91]">
+            Pick the role once, then select up to {MAX_BULK_FILES} PDF resumes — names extracted automatically.
+          </p>
+        </div>
+      </div>
+
+      <form onSubmit={onSubmit} className="space-y-4">
+        {/* Role + level */}
+        <div className="grid gap-3 sm:grid-cols-2">
+          <input
+            className={inputCls}
+            placeholder="Role (e.g. Blockchain Engineer)"
+            value={jobTitle}
+            onChange={(e) => onJobTitle(e.target.value)}
+            aria-label="Target role"
+          />
+          <select
+            className={inputCls}
+            value={level}
+            onChange={(e) => onLevel(e.target.value)}
+            aria-label="Experience level"
+          >
+            <option value="entry">Entry level</option>
+            <option value="mid">Mid level</option>
+            <option value="senior">Senior level</option>
+          </select>
+        </div>
+
+        {/* File drop zone */}
+        <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-[16px] border-2 border-dashed border-white/[0.12] bg-white/[0.02] px-4 py-8 text-center transition-colors hover:border-[rgba(var(--accent-rgb),0.5)] hover:bg-[rgba(var(--accent-rgb),0.04)]">
+          <FileText size={28} className="text-[#60a5fa]" aria-hidden="true" />
+          <span className="text-[14px] font-medium text-white">
+            Click to choose PDF resumes
+          </span>
+          <span className="text-[12px] text-[#70757c]">
+            Select multiple files &middot; up to {MAX_BULK_FILES} per batch
+          </span>
+          <input
+            type="file"
+            accept="application/pdf"
+            multiple
+            className="sr-only"
+            onChange={(e) => {
+              onFilesAdd(e.target.files);
+              e.target.value = '';
+            }}
+            aria-label="Resume PDFs"
+          />
+        </label>
+
+        {/* Selected file list */}
+        {files.length > 0 && (
+          <div className="rounded-[14px] border border-white/[0.08] bg-white/[0.03] p-3">
+            <div className="mb-2 flex items-center justify-between px-1">
+              <span className="text-[12px] font-medium text-[#888b91]">
+                {files.length} resume{files.length === 1 ? '' : 's'} selected
+              </span>
+              <button
+                type="button"
+                className="text-[12px] text-[#888b91] hover:text-white transition-colors"
+                onClick={onFilesClear}
+              >
+                Clear all
+              </button>
+            </div>
+            <ul className="max-h-36 space-y-0.5 overflow-y-auto">
+              {files.map((f, i) => (
+                <li
+                  key={`${f.name}:${f.size}:${i}`}
+                  className="flex items-center gap-2 rounded-[8px] px-2 py-1 text-[12px] text-[#70757c] hover:bg-white/[0.04]"
+                >
+                  <FileText size={13} className="shrink-0 text-[#5a5f66]" aria-hidden="true" />
+                  <span className="min-w-0 flex-1 truncate">{f.name}</span>
+                  <span className="shrink-0 text-[#5a5f66]">
+                    {(f.size / 1024).toFixed(0)} KB
+                  </span>
+                  <button
+                    type="button"
+                    aria-label={`Remove ${f.name}`}
+                    className="shrink-0 text-[#5a5f66] hover:text-[#e6714f] transition-colors"
+                    onClick={() => onFileRemove(i)}
+                  >
+                    <X size={13} aria-hidden="true" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* JD textarea */}
+        <textarea
+          className={cn(inputCls, 'min-h-[72px] resize-y')}
+          placeholder="Job description (optional — applied to the whole batch, improves scoring accuracy)"
+          value={jd}
+          onChange={(e) => onJd(e.target.value)}
+          aria-label="Job description"
+        />
+
+        {/* Upload progress */}
+        {pending && (
+          <div className="space-y-1.5">
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/[0.08]">
+              <div
+                className="h-1.5 rounded-full bg-[linear-gradient(90deg,var(--accent),#a887dc)] transition-all"
+                style={{ width: `${Math.min(progress, 100)}%` }}
+                role="progressbar"
+                aria-valuenow={progress}
+                aria-valuemin={0}
+                aria-valuemax={100}
+              />
+            </div>
+            <p className="text-[12px] text-[#70757c]">
+              {progress < 100
+                ? `Uploading ${progress}%…`
+                : `Scoring ${files.length || 'the'} resume${files.length === 1 ? '' : 's'} — this can take a moment…`}
+            </p>
+          </div>
+        )}
+
+        {/* Submit */}
+        <Pill
+          type="submit"
+          variant="primary"
+          disabled={pending || files.length === 0}
+          aria-busy={pending}
+          className="gap-1.5"
+        >
+          <Upload size={15} aria-hidden="true" />
+          {pending
+            ? 'Processing…'
+            : `Upload & score${files.length > 0 ? ` ${files.length} resume${files.length === 1 ? '' : 's'}` : ''}`}
+        </Pill>
+      </form>
+
+      {/* Per-file failure summary */}
+      {lastResult && lastResult.failed_count > 0 && (
+        <div className="mt-4 rounded-[14px] border border-[rgba(255,183,100,0.25)] bg-[rgba(255,183,100,0.08)] p-3.5">
+          <p className="mb-2 flex items-center gap-1.5 text-[12.5px] font-semibold text-[#ffb764]">
+            <AlertTriangle size={14} aria-hidden="true" />
+            {lastResult.failed_count} file{lastResult.failed_count === 1 ? '' : 's'} skipped
+          </p>
+          <ul className="space-y-0.5 text-[12px] text-[#ffb764]">
+            {lastResult.failed.map((f, i) => (
+              <li key={i} className="truncate">
+                <span className="font-medium">{f.filename}</span> — {f.error}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </GlassCard>
+  );
+}
+
 // ── Page ─────────────────────────────────────────────────────────────────────
-const MAX_BULK_FILES = 25;
 
 export default function Applicants() {
   const qc = useQueryClient();
+
+  // Upload form state
   const [files, setFiles] = useState<File[]>([]);
   const [jobTitle, setJobTitle] = useState('');
   const [level, setLevel] = useState('mid');
@@ -226,11 +585,20 @@ export default function Applicants() {
   const [progress, setProgress] = useState(0);
   const [lastResult, setLastResult] = useState<BulkUploadResult | null>(null);
 
+  // List state
+  const [filter, setFilter] = useState('all');
+  const [query, setQuery] = useState('');
+
+  // Drawer state
+  const [selected, setSelected] = useState<Applicant | null>(null);
+
+  // ── Queries ──────────────────────────────────────────────────────────────
   const { data: applicants, isLoading } = useQuery({
     queryKey: ['hr', 'applicants'],
     queryFn: () => listApplicants(),
   });
 
+  // ── Mutations ─────────────────────────────────────────────────────────────
   const uploadMut = useMutation({
     mutationFn: () => {
       const fd = new FormData();
@@ -258,11 +626,31 @@ export default function Applicants() {
     onError: (e: unknown) => toast.error(e instanceof Error ? e.message : 'Upload failed'),
   });
 
-  function addFiles(selected: FileList | null) {
-    if (!selected) return;
-    const incoming = Array.from(selected).filter((f) => f.type === 'application/pdf');
+  const statusMut = useMutation({
+    mutationFn: ({ id, status }: { id: string; status: ApplicantStatus }) =>
+      updateApplicantStatus(id, status),
+    onSuccess: (updated) => {
+      setSelected((prev) => (prev?.id === updated.id ? updated : prev));
+      void qc.invalidateQueries({ queryKey: ['hr', 'applicants'] });
+    },
+    onError: (e: unknown) => toast.error(e instanceof Error ? e.message : 'Update failed'),
+  });
+
+  const rescoreMut = useMutation({
+    mutationFn: (id: string) => rescoreApplicant(id),
+    onSuccess: (updated) => {
+      toast.success('Rescored');
+      setSelected((prev) => (prev?.id === updated.id ? updated : prev));
+      void qc.invalidateQueries({ queryKey: ['hr', 'applicants'] });
+    },
+    onError: (e: unknown) => toast.error(e instanceof Error ? e.message : 'Rescore failed'),
+  });
+
+  // ── File helpers ─────────────────────────────────────────────────────────
+  function addFiles(fileList: FileList | null) {
+    if (!fileList) return;
+    const incoming = Array.from(fileList).filter((f) => f.type === 'application/pdf');
     setFiles((prev) => {
-      // de-dupe by name+size, cap at MAX_BULK_FILES
       const seen = new Set(prev.map((f) => `${f.name}:${f.size}`));
       const merged = [...prev];
       for (const f of incoming) {
@@ -286,200 +674,145 @@ export default function Applicants() {
     uploadMut.mutate();
   }
 
-  const list = applicants ?? [];
+  // ── Derived list ─────────────────────────────────────────────────────────
+  const list = useMemo(() => {
+    const base = applicants ?? [];
+    return base.filter((a) => {
+      const matchFilter = filter === 'all' || a.status === filter;
+      const matchQuery =
+        query === '' ||
+        a.full_name.toLowerCase().includes(query.toLowerCase()) ||
+        (a.email ?? '').toLowerCase().includes(query.toLowerCase()) ||
+        a.target_job_title.toLowerCase().includes(query.toLowerCase());
+      return matchFilter && matchQuery;
+    });
+  }, [applicants, filter, query]);
+
   const pending = uploadMut.isPending;
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-heading font-semibold text-foreground">Resume screening</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Drop in many resumes at once — each candidate&apos;s name &amp; email are read
-          straight from the resume, AI-scored against the role, then ranked.
+    <div className="mx-auto max-w-[1280px] px-6 py-8 lg:px-8 space-y-8">
+      {/* Page header */}
+      <Reveal>
+        <h1 className="text-[28px] font-semibold tracking-[-1px] text-white">Resume screening</h1>
+        <p className="mt-1 text-[14px] text-[#888b91]">
+          Drop in many resumes at once — each candidate&apos;s name &amp; email are read straight
+          from the resume, AI-scored against the role, then ranked.
         </p>
-      </div>
+      </Reveal>
 
-      {/* Upload */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2 text-foreground">
-            <Upload className="h-4 w-4 text-primary" aria-hidden="true" />
-            Bulk upload resumes
-          </CardTitle>
-          <CardDescription>
-            Pick the role once, then select up to {MAX_BULK_FILES} PDF resumes — names are
-            extracted automatically.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={onSubmit} className="space-y-3">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Input
-                placeholder="Role (e.g. Blockchain Engineer)"
-                value={jobTitle}
-                onChange={(e) => setJobTitle(e.target.value)}
-                aria-label="Target role"
-              />
-              <select
-                className={inputCls}
-                value={level}
-                onChange={(e) => setLevel(e.target.value)}
-                aria-label="Experience level"
-              >
-                <option value="entry">Entry level</option>
-                <option value="mid">Mid level</option>
-                <option value="senior">Senior level</option>
-              </select>
-            </div>
+      {/* Upload panel */}
+      <UploadSection
+        files={files}
+        jobTitle={jobTitle}
+        level={level}
+        jd={jd}
+        progress={progress}
+        pending={pending}
+        lastResult={lastResult}
+        onFilesAdd={addFiles}
+        onFileRemove={(idx) => setFiles((prev) => prev.filter((_, j) => j !== idx))}
+        onFilesClear={() => setFiles([])}
+        onJobTitle={setJobTitle}
+        onLevel={setLevel}
+        onJd={setJd}
+        onSubmit={onSubmit}
+      />
 
-            {/* File picker */}
-            <label
-              className={cn(
-                'flex cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border-2 border-dashed',
-                'border-border bg-muted/40 px-4 py-6 text-center transition-colors hover:border-primary/50 hover:bg-accent',
-              )}
-            >
-              <FileText className="h-6 w-6 text-primary" aria-hidden="true" />
-              <span className="text-sm font-medium text-foreground">
-                Click to choose PDF resumes
-              </span>
-              <span className="text-xs text-muted-foreground">
-                Select multiple files · up to {MAX_BULK_FILES} per batch
-              </span>
-              <input
-                type="file"
-                accept="application/pdf"
-                multiple
-                className="sr-only"
-                onChange={(e) => {
-                  addFiles(e.target.files);
-                  e.target.value = ''; // allow re-picking the same file
-                }}
-                aria-label="Resume PDFs"
-              />
-            </label>
-
-            {/* Selected files */}
-            {files.length > 0 && (
-              <div className="rounded-xl border border-border bg-muted/40 p-2">
-                <div className="mb-1 flex items-center justify-between px-1">
-                  <span className="text-xs font-medium text-muted-foreground">
-                    {files.length} resume{files.length === 1 ? '' : 's'} selected
-                  </span>
-                  <button
-                    type="button"
-                    className="text-xs text-muted-foreground hover:text-foreground"
-                    onClick={() => setFiles([])}
-                  >
-                    Clear all
-                  </button>
-                </div>
-                <ul className="max-h-32 space-y-0.5 overflow-y-auto">
-                  {files.map((f, i) => (
-                    <li
-                      key={`${f.name}:${f.size}:${i}`}
-                      className="flex items-center gap-2 rounded px-1 py-0.5 text-xs text-muted-foreground"
-                    >
-                      <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" aria-hidden="true" />
-                      <span className="min-w-0 flex-1 truncate">{f.name}</span>
-                      <span className="shrink-0 text-muted-foreground/60">
-                        {(f.size / 1024).toFixed(0)} KB
-                      </span>
-                      <button
-                        type="button"
-                        aria-label={`Remove ${f.name}`}
-                        className="shrink-0 text-muted-foreground/60 hover:text-rose-600"
-                        onClick={() => setFiles((prev) => prev.filter((_, j) => j !== i))}
-                      >
-                        <X className="h-3.5 w-3.5" aria-hidden="true" />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            <textarea
-              className={cn(inputCls, 'min-h-[64px] resize-y')}
-              placeholder="Job description (optional — applied to the whole batch, improves scoring accuracy)"
-              value={jd}
-              onChange={(e) => setJd(e.target.value)}
-              aria-label="Job description"
+      {/* List section */}
+      <div className="space-y-4">
+        {/* Controls bar */}
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex w-[260px] items-center gap-2 rounded-[9999px] border border-white/[0.08] bg-[rgba(28,29,31,0.7)] px-3.5 py-2.5">
+            <Search size={15} className="shrink-0 text-[#70757c]" aria-hidden="true" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search applicants…"
+              aria-label="Search applicants"
+              className="min-w-0 flex-1 bg-transparent text-[13px] text-white placeholder:text-[#5a5f66] focus:outline-none"
             />
-
-            {pending && (
-              <div className="space-y-1">
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-border">
-                  <div
-                    className="h-1.5 rounded-full bg-primary transition-all"
-                    style={{ width: `${progress < 100 ? progress : 100}%` }}
-                  />
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  {progress < 100
-                    ? `Uploading ${progress}%…`
-                    : `Scoring ${files.length || 'the'} resume${files.length === 1 ? '' : 's'} — this can take a moment…`}
-                </p>
-              </div>
-            )}
-
-            <Button type="submit" disabled={pending || files.length === 0} className="gap-1.5">
-              <Upload className="h-4 w-4" aria-hidden="true" />
-              {pending
-                ? 'Processing…'
-                : `Upload & score${files.length > 0 ? ` ${files.length} resume${files.length === 1 ? '' : 's'}` : ''}`}
-            </Button>
-          </form>
-
-          {/* Per-file failure summary from the last batch */}
-          {lastResult && lastResult.failed_count > 0 && (
-            <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-2.5 text-xs">
-              <p className="mb-1 flex items-center gap-1.5 font-medium text-amber-700">
-                <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
-                {lastResult.failed_count} file{lastResult.failed_count === 1 ? '' : 's'} skipped
-              </p>
-              <ul className="space-y-0.5 text-amber-600">
-                {lastResult.failed.map((f, i) => (
-                  <li key={i} className="truncate">
-                    <span className="font-medium">{f.filename}</span> — {f.error}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* List */}
-      <div className="space-y-2">
-        <h2 className="text-sm font-semibold text-foreground flex items-center gap-2">
-          <FileSearch className="h-4 w-4 text-primary" aria-hidden="true" />
-          Applicants ({list.length})
-        </h2>
-        {isLoading ? (
-          <Skeleton className="h-24 w-full rounded-xl" />
-        ) : list.length === 0 ? (
-          <p className="text-sm text-muted-foreground py-6 text-center">
-            No applicants yet — upload a resume above to get started.
-          </p>
-        ) : (
-          <motion.div
-            initial="hidden"
-            animate="visible"
-            variants={{ hidden: {}, visible: { transition: { staggerChildren: 0.04 } } }}
-            className="space-y-2"
-          >
-            {list.map((a) => (
-              <motion.div
-                key={a.id}
-                variants={{ hidden: { opacity: 0, y: 8 }, visible: { opacity: 1, y: 0 } }}
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery('')}
+                aria-label="Clear search"
+                className="shrink-0 text-[#5a5f66] hover:text-white transition-colors"
               >
-                <ApplicantRow a={a} />
-              </motion.div>
+                <X size={13} aria-hidden="true" />
+              </button>
+            )}
+          </div>
+
+          <SegTabs tabs={STATUS_FILTERS} active={filter} onChange={setFilter} />
+
+          <span className="ml-auto text-[12.5px] text-[#70757c]">
+            {isLoading ? '…' : `${list.length} applicant${list.length === 1 ? '' : 's'}`}
+          </span>
+        </div>
+
+        {/* Table */}
+        {isLoading ? (
+          <div className="space-y-2" role="status" aria-label="Loading applicants" aria-busy="true">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="h-16 w-full rounded-[16px] bg-white/[0.05] animate-pulse" />
             ))}
-          </motion.div>
+          </div>
+        ) : list.length === 0 ? (
+          <GlassCard className="py-16 text-center">
+            <p className="text-[15px] font-medium text-white">
+              {(applicants ?? []).length === 0
+                ? 'No applicants yet'
+                : 'No applicants match your filters'}
+            </p>
+            <p className="mt-1 text-[13px] text-[#70757c]">
+              {(applicants ?? []).length === 0
+                ? 'Upload resumes above to get started.'
+                : 'Try adjusting the search or filter.'}
+            </p>
+          </GlassCard>
+        ) : (
+          <GlassCard className="overflow-hidden p-0">
+            {/* Table header */}
+            <div className="grid grid-cols-[2fr_1.3fr_1fr_0.8fr_0.8fr_0.5fr] gap-3 border-b border-white/[0.06] px-6 py-3.5 text-[11.5px] uppercase tracking-[0.5px] text-[#70757c]">
+              <div>Candidate</div>
+              <div>Role</div>
+              <div>Status</div>
+              <div>ATS</div>
+              <div>Badge</div>
+              <div />
+            </div>
+
+            {/* Staggered rows */}
+            <motion.div
+              variants={staggerParent}
+              initial="hidden"
+              animate="show"
+            >
+              {list.map((a) => (
+                <motion.div key={a.id} variants={staggerChild}>
+                  <ApplicantRow a={a} onSelect={setSelected} />
+                </motion.div>
+              ))}
+            </motion.div>
+          </GlassCard>
         )}
       </div>
+
+      {/* Slide-in drawer */}
+      <AnimatePresence>
+        {selected && (
+          <ApplicantDrawer
+            applicant={selected}
+            onClose={() => setSelected(null)}
+            onShortlist={(id) => statusMut.mutate({ id, status: 'shortlisted' })}
+            onReject={(id) => statusMut.mutate({ id, status: 'rejected' })}
+            onRescore={(id) => rescoreMut.mutate(id)}
+            statusPending={statusMut.isPending}
+            rescorePending={rescoreMut.isPending}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }

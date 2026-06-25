@@ -124,7 +124,7 @@ export default function FileUploadZone({
     <div className="w-full">
       {/* Existing file notice */}
       {existingFileLabel && uploadState.status !== 'success' && (
-        <p className="mb-3 text-body-sm text-emerald-600 flex items-center gap-1.5">
+        <p className="mb-3 text-body-sm text-emerald-400 flex items-center gap-1.5">
           <svg
             aria-hidden="true"
             xmlns="http://www.w3.org/2000/svg"
@@ -144,13 +144,13 @@ export default function FileUploadZone({
 
       {/* Success state */}
       {uploadState.status === 'success' && (
-        <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 flex items-start gap-3">
+        <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/15 p-4 flex items-start gap-3">
           <svg
             aria-hidden="true"
             xmlns="http://www.w3.org/2000/svg"
             viewBox="0 0 20 20"
             fill="currentColor"
-            className="h-5 w-5 text-emerald-600 shrink-0 mt-0.5"
+            className="h-5 w-5 text-emerald-400 shrink-0 mt-0.5"
           >
             <path
               fillRule="evenodd"
@@ -168,7 +168,7 @@ export default function FileUploadZone({
             <button
               type="button"
               onClick={handleRetry}
-              className="mt-1 text-caption text-emerald-600 underline underline-offset-2 hover:text-emerald-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
+              className="mt-1 text-caption text-emerald-400 underline underline-offset-2 hover:text-emerald-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
             >
               {t('fileUpload.uploadDifferent')}
             </button>

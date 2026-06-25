@@ -209,6 +209,15 @@ export function apiPut<T>(path: string, body: unknown, opts?: ClientOptions): Pr
   });
 }
 
+/** PATCH request against data_gateway. */
+export function apiPatch<T>(path: string, body: unknown, opts?: ClientOptions): Promise<T> {
+  return clientFetch<T>(buildUrl(DATA_GATEWAY_BASE, path), {
+    ...opts,
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  });
+}
+
 /** DELETE request against data_gateway. */
 export function apiDelete<T>(path: string, opts?: ClientOptions): Promise<T> {
   return clientFetch<T>(buildUrl(DATA_GATEWAY_BASE, path), {

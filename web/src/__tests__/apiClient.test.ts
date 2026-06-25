@@ -393,7 +393,7 @@ describe('resume — URL and method via fetch stub', () => {
     const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
     // Must end exactly at /resume (singular), not /resumes
     expect(url).toMatch(/\/users\/me\/resume$/);
-    expect(result.resume_id).toBe('r1');
+    expect(result?.resume_id).toBe('r1');
   });
 
   it('setCurrentResume calls POST /users/me/resumes/{id}/set-current', async () => {

@@ -1,16 +1,17 @@
 // AppShell — authenticated layout shell used by all in-app pages.
-// Provides: top bar (brand + primary nav + user menu),
-// responsive mobile sheet nav, and a <main> content area.
-// All in-app authenticated routes render as children of this shell.
+// Layout: fixed LEFT SIDEBAR (role-aware nav + brand + user menu) on lg+,
+// a slim top bar (mobile menu + language + live notifications), and a
+// <main> content area. Collapses to a drawer on mobile.
 //
-// Premium LIGHT theme: faint gray canvas, white cards, frosted white top bar,
-// hairline bone borders, Signal-Blue accent.
+// Visual language: obsidian sidebar, Signal-Blue (var(--accent)) active treatment,
+// glass surfaces. All in-app authenticated routes render as children.
 
 import { useState } from 'react';
-import { Link, NavLink, useNavigate } from 'react-router-dom';
+import { Link, NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { motion } from 'framer-motion';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { motion, AnimatePresence } from 'framer-motion';
+import { AuroraBackground } from '@/components/fx';
 import {
   LayoutDashboard,
   Briefcase,
@@ -26,55 +27,61 @@ import {
   Users,
   FileSearch,
   Video,
+  Bell,
+  ChevronDown,
+  Search,
+  Plus,
+  User,
 } from 'lucide-react';
 import { logout } from '@/api/auth';
+import {
+  listNotifications,
+  markAllNotificationsRead,
+  markNotificationRead,
+  type NotificationItem,
+} from '@/api/notifications';
 import { useAuth } from '@/context/AuthContext';
 import { toast } from '@/lib/toast';
 import { Button } from '@/components/ui/button';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { Separator } from '@/components/ui/separator';
+import { Sheet, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
 import { cn } from '@/lib/utils';
 import LanguageSwitcher from '@/components/LanguageSwitcher';
 import ThemeToggle from '@/components/ThemeToggle';
 
 // The interview-language localStorage key (separate concern from UI language)
 const INTERVIEW_LANGUAGE_KEY = 'intants:interview-language';
+const SIDEBAR_W = 256;
 
-// Shared nav-link styling (premium light).
-const NAV_LINK_BASE =
-  'flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
-const NAV_LINK_ACTIVE = 'bg-secondary text-foreground';
-const NAV_LINK_IDLE = 'text-muted-foreground hover:bg-accent hover:text-foreground';
-const MOBILE_LINK =
-  'flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
+// ── Role label helper ─────────────────────────────────────────────────────────
 
-interface NavItem {
-  to: string;
-  labelKey: string;
-  icon: React.ReactNode;
+const ROLE_PRIORITY = ['super_admin', 'admin', 'hr_manager'] as const;
+
+/** Returns the most-privileged display label for the user's role set. */
+function getRoleLabel(roles: string[]): string {
+  for (const r of ROLE_PRIORITY) {
+    if (roles.includes(r)) {
+      switch (r) {
+        case 'super_admin': return 'Super Admin';
+        case 'admin': return 'Platform Admin';
+        case 'hr_manager': return 'HR Manager';
+      }
+    }
+  }
+  return 'Candidate';
 }
 
-const NAV_ITEMS: NavItem[] = [
-  { to: '/dashboard', labelKey: 'nav.dashboard', icon: <LayoutDashboard className="h-4 w-4" /> },
-  { to: '/jobs', labelKey: 'nav.jobs', icon: <Briefcase className="h-4 w-4" /> },
-  { to: '/history', labelKey: 'nav.history', icon: <History className="h-4 w-4" /> },
-];
+/** Accent color for the role label, matching the design. */
+function getRoleAccent(roles: string[]): string {
+  if (roles.includes('super_admin')) return '#c89ce8';
+  if (roles.includes('admin')) return '#60a5fa';
+  if (roles.includes('hr_manager')) return '#27c93f';
+  return '#70757c';
+}
 
-const ADMIN_NAV_ITEMS: NavItem[] = [
-  { to: '/admin/overview', labelKey: 'nav.adminOverview', icon: <BarChart2 className="h-4 w-4" /> },
-  { to: '/admin/interviews', labelKey: 'nav.adminInterviews', icon: <ClipboardList className="h-4 w-4" /> },
-  { to: '/admin/analytics', labelKey: 'nav.adminAnalytics', icon: <TrendingUp className="h-4 w-4" /> },
-  { to: '/admin/jd', labelKey: 'nav.adminJd', icon: <Upload className="h-4 w-4" /> },
-];
+/** True when the user holds no privileged role (plain candidate). */
+function isCandidateOnly(roles: string[]): boolean {
+  return !roles.some((r) => r === 'super_admin' || r === 'admin' || r === 'hr_manager');
+}
 
 /** Derive initials from a display name for the avatar fallback */
 function getInitials(name: string): string {
@@ -84,108 +91,83 @@ function getInitials(name: string): string {
   return ((parts[0]?.[0] ?? '') + (parts[parts.length - 1]?.[0] ?? '')).toUpperCase();
 }
 
-// ── DesktopNav ───────────────────────────────────────────────────────────────
+// ── Nav item definitions ──────────────────────────────────────────────────────
 
-function DesktopNavLink({ item }: { item: NavItem }) {
+interface NavItem {
+  to: string;
+  /** i18n key (resolved via t) OR a literal label when labelKey is absent */
+  labelKey?: string;
+  label?: string;
+  icon: React.ReactNode;
+}
+
+const ICON = 'h-[18px] w-[18px]';
+
+const CANDIDATE_NAV: NavItem[] = [
+  { to: '/dashboard', labelKey: 'nav.dashboard', icon: <LayoutDashboard className={ICON} aria-hidden="true" /> },
+  { to: '/jobs', labelKey: 'nav.jobs', icon: <Briefcase className={ICON} aria-hidden="true" /> },
+  { to: '/history', labelKey: 'nav.history', icon: <History className={ICON} aria-hidden="true" /> },
+  { to: '/resume', labelKey: 'nav.resume', icon: <FileText className={ICON} aria-hidden="true" /> },
+];
+
+const HR_NAV: NavItem[] = [
+  { to: '/hr', label: 'Hiring', icon: <Users className={ICON} aria-hidden="true" /> },
+  { to: '/hr/applicants', label: 'Applicants', icon: <FileSearch className={ICON} aria-hidden="true" /> },
+  { to: '/hr/exams', label: 'Exams', icon: <ClipboardList className={ICON} aria-hidden="true" /> },
+  { to: '/hr/interviews', label: 'Interviews', icon: <Video className={ICON} aria-hidden="true" /> },
+  { to: '/hr/pipeline', label: 'Pipeline', icon: <TrendingUp className={ICON} aria-hidden="true" /> },
+  { to: '/hr/analytics', label: 'Analytics', icon: <BarChart2 className={ICON} aria-hidden="true" /> },
+];
+
+const ADMIN_NAV: NavItem[] = [
+  { to: '/admin/overview', labelKey: 'nav.adminOverview', icon: <BarChart2 className={ICON} aria-hidden="true" /> },
+  { to: '/admin/interviews', labelKey: 'nav.adminInterviews', icon: <ClipboardList className={ICON} aria-hidden="true" /> },
+  { to: '/admin/analytics', labelKey: 'nav.adminAnalytics', icon: <TrendingUp className={ICON} aria-hidden="true" /> },
+  { to: '/admin/jd', labelKey: 'nav.adminJd', icon: <Upload className={ICON} aria-hidden="true" /> },
+];
+
+const SUPER_NAV: NavItem[] = [
+  { to: '/superadmin', label: 'Companies', icon: <Building2 className={ICON} aria-hidden="true" /> },
+];
+
+// ── Sidebar nav link (vertical) ───────────────────────────────────────────────
+
+function SideNavLink({ item, onNavigate }: { item: NavItem; onNavigate?: () => void }) {
   const { t } = useTranslation();
+  const label = item.labelKey ? t(item.labelKey) : item.label;
   return (
     <NavLink
       to={item.to}
-      className={({ isActive }) => cn(NAV_LINK_BASE, isActive ? NAV_LINK_ACTIVE : NAV_LINK_IDLE)}
+      end={item.to === '/hr'}
+      onClick={onNavigate}
+      className={({ isActive }) =>
+        cn(
+          'flex items-center gap-3 rounded-[10px] px-3 py-2 text-[13.5px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]',
+          isActive
+            ? 'bg-[rgba(var(--accent-rgb),0.14)] text-white'
+            : 'text-[#888b91] hover:bg-white/[0.04] hover:text-white',
+        )
+      }
     >
       {item.icon}
-      {t(item.labelKey)}
+      <span className="truncate">{label}</span>
     </NavLink>
   );
 }
 
-/** Like DesktopNavLink but with a literal label (HR-workflow links, not yet i18n'd). */
-function PlainNavLink({ to, label, icon }: { to: string; label: string; icon: React.ReactNode }) {
+function NavSectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <NavLink
-      to={to}
-      className={({ isActive }) => cn(NAV_LINK_BASE, isActive ? NAV_LINK_ACTIVE : NAV_LINK_IDLE)}
-    >
-      {icon}
-      {label}
-    </NavLink>
+    <p className="px-3 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-[1.2px] text-[#5a5f66]">
+      {children}
+    </p>
   );
 }
 
-// ── User menu ────────────────────────────────────────────────────────────────
+// ── Sidebar footer user menu (opens upward) ───────────────────────────────────
 
-function UserMenu() {
+function SidebarUser({ onNavigate }: { onNavigate?: () => void }) {
   const { t } = useTranslation();
   const { user, clearAuth } = useAuth();
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
-
-  const logoutMutation = useMutation({
-    mutationFn: () => logout(),
-    onSettled: () => {
-      queryClient.clear();
-      clearAuth();
-      void navigate('/login', { replace: true });
-    },
-    onError: () => {
-      toast.error(t('error.generic'));
-    },
-  });
-
-  const displayName = user?.full_name ?? 'User';
-  const email = user?.email ?? '';
-
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" className="rounded-full" aria-label={t('nav.userMenu')}>
-          <Avatar className="h-8 w-8 ring-1 ring-border">
-            <AvatarFallback className="bg-secondary text-foreground text-xs font-semibold">
-              {getInitials(displayName)}
-            </AvatarFallback>
-          </Avatar>
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-56 rounded-xl">
-        <DropdownMenuLabel>
-          <p className="text-sm font-semibold leading-none text-foreground">{displayName}</p>
-          {email && <p className="mt-1 text-xs text-muted-foreground truncate">{email}</p>}
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem asChild>
-          <Link to="/resume" className="flex items-center gap-2 cursor-pointer">
-            <FileText className="h-4 w-4" />
-            {t('nav.resume')}
-          </Link>
-        </DropdownMenuItem>
-        <DropdownMenuItem asChild>
-          <Link to="/history" className="flex items-center gap-2 cursor-pointer">
-            <History className="h-4 w-4" />
-            {t('nav.history')}
-          </Link>
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem
-          onSelect={() => logoutMutation.mutate()}
-          disabled={logoutMutation.isPending}
-          className="text-destructive focus:text-destructive"
-        >
-          <LogOut className="h-4 w-4" />
-          {logoutMutation.isPending ? '…' : t('nav.logout')}
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
-// ── Mobile sheet nav ─────────────────────────────────────────────────────────
-
-function MobileNav() {
-  const { t } = useTranslation();
-  const { user, clearAuth } = useAuth();
-  const isAdmin = user?.roles.includes('admin') ?? false;
-  const isSuperAdmin = user?.roles.includes('super_admin') ?? false;
-  const isHr = user?.roles.includes('hr_manager') ?? false;
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -197,197 +179,372 @@ function MobileNav() {
       clearAuth();
       void navigate('/login', { replace: true });
     },
-    onError: () => {
-      toast.error(t('error.generic'));
-    },
+    onError: () => toast.error(t('error.generic')),
   });
 
-  function closeAndNavigate(to: string) {
-    setOpen(false);
-    void navigate(to);
-  }
-
   const displayName = user?.full_name ?? 'User';
-  const email = user?.email ?? '';
+  const roleLabel = getRoleLabel(user?.roles ?? []);
 
+  return (
+    <div className="relative border-t border-white/[0.06] p-3">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={t('nav.userMenu')}
+        className="flex w-full items-center gap-2.5 rounded-[12px] px-2 py-2 text-left hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+      >
+        <span className="flex h-9 w-9 flex-none items-center justify-center rounded-full bg-[linear-gradient(135deg,var(--accent),#a887dc)] text-[13px] font-semibold text-white">
+          {getInitials(displayName)}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[13px] font-semibold text-white">{displayName}</span>
+          <span className="block truncate text-[11px] text-[#70757c]">{roleLabel}</span>
+        </span>
+        <ChevronDown size={14} aria-hidden="true" className="flex-none text-[#70757c]" />
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-30" aria-hidden="true" onClick={() => setOpen(false)} />
+          <div
+            role="menu"
+            className="absolute bottom-[calc(100%-4px)] left-3 right-3 z-40 overflow-hidden rounded-[12px] border border-white/[0.1] bg-[#0f0f10] p-1 shadow-2xl"
+          >
+            <Link
+              to="/profile"
+              role="menuitem"
+              onClick={() => { setOpen(false); onNavigate?.(); }}
+              className="flex items-center gap-2.5 rounded-[8px] px-3 py-2 text-[13px] text-[#b8babf] hover:bg-white/[0.06] hover:text-white"
+            >
+              <User size={15} aria-hidden="true" /> Profile
+            </Link>
+            <Link
+              to="/resume"
+              role="menuitem"
+              onClick={() => { setOpen(false); onNavigate?.(); }}
+              className="flex items-center gap-2.5 rounded-[8px] px-3 py-2 text-[13px] text-[#b8babf] hover:bg-white/[0.06] hover:text-white"
+            >
+              <FileText size={15} aria-hidden="true" /> {t('nav.resume')}
+            </Link>
+            <Link
+              to="/history"
+              role="menuitem"
+              onClick={() => { setOpen(false); onNavigate?.(); }}
+              className="flex items-center gap-2.5 rounded-[8px] px-3 py-2 text-[13px] text-[#b8babf] hover:bg-white/[0.06] hover:text-white"
+            >
+              <History size={15} aria-hidden="true" /> {t('nav.history')}
+            </Link>
+            <div className="my-1 h-px bg-white/[0.06]" role="separator" />
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => { setOpen(false); logoutMutation.mutate(); }}
+              disabled={logoutMutation.isPending}
+              className="flex w-full items-center gap-2.5 rounded-[8px] px-3 py-2 text-[13px] text-[#e6714f] hover:bg-white/[0.04] disabled:opacity-50"
+            >
+              <LogOut size={15} aria-hidden="true" /> {logoutMutation.isPending ? '…' : t('nav.logout')}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Sidebar content (brand + nav + user) ──────────────────────────────────────
+
+function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+  const { user } = useAuth();
+  const roles = user?.roles ?? [];
+  const roleLabel = getRoleLabel(roles);
+  const accent = getRoleAccent(roles);
+  const candidateOnly = isCandidateOnly(roles);
+
+  return (
+    <div className="flex h-full flex-col">
+      {/* Brand */}
+      <Link
+        to="/dashboard"
+        onClick={onNavigate}
+        className="flex items-center gap-2.5 px-5 py-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+        aria-label="Anterview"
+      >
+        <span className="flex h-9 w-9 flex-none items-center justify-center rounded-[10px] bg-[linear-gradient(135deg,#112d72,#a887dc)] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.2)]">
+          <span className="h-2.5 w-2.5 rounded-full bg-white" aria-hidden="true" />
+        </span>
+        <span className="flex flex-col leading-tight">
+          <span className="text-[15px] font-semibold tracking-[-0.4px] text-white">Anterview</span>
+          {!candidateOnly && (
+            <span
+              className="text-[10px] font-semibold uppercase tracking-[1.2px]"
+              style={{ color: accent }}
+            >
+              {roleLabel}
+            </span>
+          )}
+        </span>
+      </Link>
+
+      {/* Nav */}
+      <nav aria-label="Primary" className="flex-1 space-y-5 overflow-y-auto px-3 py-2">
+        <div className="space-y-1">
+          {CANDIDATE_NAV.map((item) => (
+            <SideNavLink key={item.to} item={item} onNavigate={onNavigate} />
+          ))}
+        </div>
+
+        {roles.includes('hr_manager') && (
+          <div className="space-y-1">
+            <NavSectionLabel>Hiring</NavSectionLabel>
+            {HR_NAV.map((item) => (
+              <SideNavLink key={item.to} item={item} onNavigate={onNavigate} />
+            ))}
+          </div>
+        )}
+
+        {roles.includes('admin') && (
+          <div className="space-y-1">
+            <NavSectionLabel>Admin</NavSectionLabel>
+            {ADMIN_NAV.map((item) => (
+              <SideNavLink key={item.to} item={item} onNavigate={onNavigate} />
+            ))}
+          </div>
+        )}
+
+        {roles.includes('super_admin') && (
+          <div className="space-y-1">
+            <NavSectionLabel>Platform</NavSectionLabel>
+            {SUPER_NAV.map((item) => (
+              <SideNavLink key={item.to} item={item} onNavigate={onNavigate} />
+            ))}
+          </div>
+        )}
+      </nav>
+
+      {/* Candidate "ready to practice" promo (design) */}
+      {candidateOnly && (
+        <div className="px-3 pb-2">
+          <div className="rounded-[16px] border border-[rgba(var(--accent-rgb),0.25)] bg-[linear-gradient(160deg,#001b33,#030719)] p-4">
+            <p className="text-[13px] font-semibold text-white">Ready to practice?</p>
+            <p className="mt-1 text-[12px] leading-snug text-[#888b91]">
+              Your next mock interview is one tap away.
+            </p>
+            <Link
+              to="/start"
+              onClick={onNavigate}
+              className="mt-3 flex w-full items-center justify-center rounded-[10px] bg-white px-3 py-2 text-[13px] font-semibold text-black transition-colors hover:bg-[#eaeaea] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+            >
+              Start interview
+            </Link>
+          </div>
+        </div>
+      )}
+
+      <SidebarUser onNavigate={onNavigate} />
+    </div>
+  );
+}
+
+// ── Mobile sidebar (drawer) ───────────────────────────────────────────────────
+
+function MobileSidebar() {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
   return (
     <Sheet open={open} onOpenChange={setOpen}>
       <SheetTrigger asChild>
-        <Button variant="ghost" size="icon" className="md:hidden" aria-label={t('nav.openMenu')}>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="lg:hidden text-[#888b91] hover:text-white"
+          aria-label={t('nav.openMenu')}
+        >
           <Menu className="h-5 w-5" />
         </Button>
       </SheetTrigger>
-      <SheetContent side="left" className="w-72 p-0 bg-background border-border">
-        <SheetHeader className="px-6 pt-6 pb-4 border-b border-border">
-          <SheetTitle asChild>
-            <Link
-              to="/dashboard"
-              onClick={() => setOpen(false)}
-              className="flex items-center gap-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
-            >
-              <span className="inline-flex h-7 w-7 items-center justify-center rounded-[8px] bg-foreground text-background text-sm font-bold select-none">
-                A
-              </span>
-              <span className="text-sm font-semibold text-foreground">Anterview</span>
-            </Link>
-          </SheetTitle>
-        </SheetHeader>
-
-        {/* User info */}
-        <div className="px-6 py-4 flex items-center gap-3 border-b border-border">
-          <Avatar className="h-9 w-9 shrink-0 ring-1 ring-border">
-            <AvatarFallback className="bg-secondary text-foreground text-xs font-semibold">
-              {getInitials(displayName)}
-            </AvatarFallback>
-          </Avatar>
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-foreground truncate">{displayName}</p>
-            {email && <p className="text-xs text-muted-foreground truncate">{email}</p>}
-          </div>
-        </div>
-
-        {/* Nav links */}
-        <nav aria-label="Main navigation" className="px-3 py-4 space-y-1">
-          {NAV_ITEMS.map((item) => (
-            <button key={item.to} type="button" onClick={() => closeAndNavigate(item.to)} className={MOBILE_LINK}>
-              {item.icon}
-              {t(item.labelKey)}
-            </button>
-          ))}
-          {isAdmin && (
-            <>
-              <p className="px-3 pt-3 pb-1 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                Admin
-              </p>
-              {ADMIN_NAV_ITEMS.map((item) => (
-                <button key={item.to} type="button" onClick={() => closeAndNavigate(item.to)} className={MOBILE_LINK}>
-                  {item.icon}
-                  {t(item.labelKey)}
-                </button>
-              ))}
-            </>
-          )}
-          {isSuperAdmin && (
-            <button type="button" onClick={() => closeAndNavigate('/superadmin')} className={MOBILE_LINK}>
-              <Building2 className="h-4 w-4" />
-              Super Admin
-            </button>
-          )}
-          {isHr && (
-            <>
-              <p className="px-3 pt-3 pb-1 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                Hiring
-              </p>
-              <button type="button" onClick={() => closeAndNavigate('/hr')} className={MOBILE_LINK}>
-                <Users className="h-4 w-4" />
-                Hiring
-              </button>
-              <button type="button" onClick={() => closeAndNavigate('/hr/applicants')} className={MOBILE_LINK}>
-                <FileSearch className="h-4 w-4" />
-                Applicants
-              </button>
-              <button type="button" onClick={() => closeAndNavigate('/hr/exams')} className={MOBILE_LINK}>
-                <ClipboardList className="h-4 w-4" />
-                Exams
-              </button>
-              <button type="button" onClick={() => closeAndNavigate('/hr/interviews')} className={MOBILE_LINK}>
-                <Video className="h-4 w-4" />
-                Interviews
-              </button>
-              <button type="button" onClick={() => closeAndNavigate('/hr/pipeline')} className={MOBILE_LINK}>
-                <TrendingUp className="h-4 w-4" />
-                Pipeline
-              </button>
-            </>
-          )}
-        </nav>
-
-        <Separator />
-
-        <div className="px-3 py-4 space-y-1">
-          <button type="button" onClick={() => closeAndNavigate('/resume')} className={MOBILE_LINK}>
-            <FileText className="h-4 w-4" />
-            {t('nav.resume')}
-          </button>
-          <button
-            type="button"
-            onClick={() => logoutMutation.mutate()}
-            disabled={logoutMutation.isPending}
-            className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-destructive hover:bg-destructive/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-          >
-            <LogOut className="h-4 w-4" />
-            {logoutMutation.isPending ? '…' : t('nav.logout')}
-          </button>
-        </div>
+      <SheetContent side="left" className="w-[256px] border-white/[0.06] bg-[#0b0b0c] p-0 text-white">
+        <SheetTitle className="sr-only">{t('app.name')}</SheetTitle>
+        <SidebarContent onNavigate={() => setOpen(false)} />
       </SheetContent>
     </Sheet>
   );
 }
 
-// ── Top bar ──────────────────────────────────────────────────────────────────
+// ── Notifications bell (live — backed by data_gateway /notifications) ──────────
+
+/** Compact relative-time label, e.g. "5m", "3h", "2d". */
+function relTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  const diff = Math.max(0, Date.now() - then);
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h`;
+  const days = Math.floor(hrs / 24);
+  return days < 7 ? `${days}d` : new Date(iso).toLocaleDateString();
+}
+
+function NotificationsBell() {
+  const [open, setOpen] = useState(false);
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+
+  // retry:false + graceful defaults so a missing endpoint/table never breaks the shell.
+  const { data } = useQuery({
+    queryKey: ['notifications'],
+    queryFn: () => listNotifications(30),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+    retry: false,
+  });
+
+  const items = data?.items ?? [];
+  const unread = data?.unread_count ?? 0;
+
+  const readMutation = useMutation({
+    mutationFn: (id: string) => markNotificationRead(id),
+    onSettled: () => void queryClient.invalidateQueries({ queryKey: ['notifications'] }),
+  });
+  const readAllMutation = useMutation({
+    mutationFn: () => markAllNotificationsRead(),
+    onSettled: () => void queryClient.invalidateQueries({ queryKey: ['notifications'] }),
+  });
+
+  function openItem(n: NotificationItem) {
+    if (!n.read) readMutation.mutate(n.id);
+    setOpen(false);
+    if (n.link) void navigate(n.link);
+  }
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="Notifications"
+        className="relative rounded-[10px] border border-white/[0.1] bg-white/[0.04] p-2 text-[#b8babf] transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+      >
+        <Bell size={16} aria-hidden="true" />
+        {unread > 0 && (
+          <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[10px] font-semibold leading-none text-white">
+            {unread > 9 ? '9+' : unread}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-30" aria-hidden="true" onClick={() => setOpen(false)} />
+          <div
+            role="menu"
+            className="absolute right-0 top-[calc(100%+8px)] z-40 w-80 overflow-hidden rounded-[12px] border border-white/[0.1] bg-[#0f0f10] shadow-2xl"
+          >
+            <div className="flex items-center justify-between border-b border-white/[0.06] px-4 py-3">
+              <span className="text-[13px] font-semibold text-white">Notifications</span>
+              {unread > 0 && (
+                <button
+                  type="button"
+                  onClick={() => readAllMutation.mutate()}
+                  className="rounded text-[11.5px] text-[#60a5fa] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                >
+                  Mark all read
+                </button>
+              )}
+            </div>
+            <div className="max-h-80 overflow-y-auto">
+              {items.length === 0 ? (
+                <p className="px-4 py-8 text-center text-[12.5px] text-[#70757c]">
+                  You&apos;re all caught up.
+                </p>
+              ) : (
+                items.map((n) => (
+                  <button
+                    key={n.id}
+                    type="button"
+                    role="menuitem"
+                    onClick={() => openItem(n)}
+                    className={cn(
+                      'flex w-full items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-white/[0.04] focus-visible:bg-white/[0.04] focus-visible:outline-none',
+                      !n.read && 'bg-[rgba(var(--accent-rgb),0.05)]',
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        'mt-1.5 h-1.5 w-1.5 flex-none rounded-full',
+                        n.read ? 'bg-transparent' : 'bg-[var(--accent)]',
+                      )}
+                      aria-hidden="true"
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-[13px] font-medium text-white">{n.title}</span>
+                      {n.body && (
+                        <span className="mt-0.5 block text-[12px] leading-snug text-[#888b91]">
+                          {n.body}
+                        </span>
+                      )}
+                      <span className="mt-1 block text-[10.5px] text-[#5a5f66]">
+                        {relTime(n.created_at)}
+                      </span>
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Top bar (slim) ────────────────────────────────────────────────────────────
 
 function TopBar() {
-  const { t } = useTranslation();
   const { user } = useAuth();
+  const navigate = useNavigate();
+  const candidateOnly = isCandidateOnly(user?.roles ?? []);
+  const [q, setQ] = useState('');
+
   return (
-    <header className="sticky top-0 z-40 w-full border-b border-border bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/70">
-      <div className="flex h-14 items-center gap-4 px-4 sm:px-6 lg:px-8">
-        {/* Mobile hamburger */}
-        <MobileNav />
+    <header className="sticky top-0 z-30 flex h-14 items-center gap-3 border-b border-white/[0.06] bg-black/50 px-4 backdrop-blur-xl sm:px-6 lg:px-8">
+      <MobileSidebar />
 
-        {/* Brand */}
-        <Link
-          to="/dashboard"
-          className="flex items-center gap-2.5 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
-          aria-label={t('app.name')}
-        >
-          <motion.span
-            whileHover={{ scale: 1.05 }}
-            transition={{ type: 'spring', stiffness: 400, damping: 20 }}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-[8px] bg-foreground text-background text-sm font-bold select-none shadow-sm"
+      {/* Search — navigates to Jobs on submit (closest live target) */}
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void navigate('/jobs');
+        }}
+        className="hidden w-[300px] items-center gap-2 rounded-[10px] border border-white/[0.1] bg-white/[0.04] px-3 py-2 text-[#70757c] focus-within:border-[var(--accent)] md:flex"
+      >
+        <Search size={15} aria-hidden="true" />
+        <input
+          type="search"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search roles, history…"
+          aria-label="Search"
+          className="w-full bg-transparent text-[13px] text-white placeholder:text-[#5a5f66] focus:outline-none"
+        />
+      </form>
+
+      <div className="ml-auto flex items-center gap-2">
+        <ThemeToggle />
+        <LanguageSwitcher />
+        <NotificationsBell />
+        {candidateOnly && (
+          <Link
+            to="/start"
+            className="inline-flex items-center gap-1.5 rounded-[10px] bg-white px-3.5 py-2 text-[13px] font-semibold text-black transition-colors hover:bg-[#eaeaea] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
           >
-            A
-          </motion.span>
-          <span className="hidden sm:block text-sm font-semibold text-foreground">Anterview</span>
-        </Link>
-
-        {/* Desktop nav */}
-        <nav aria-label="Main navigation" className="hidden md:flex items-center gap-1 ml-4">
-          {NAV_ITEMS.map((item) => (
-            <DesktopNavLink key={item.to} item={item} />
-          ))}
-          {user?.roles.includes('admin') && (
-            <>
-              <span className="mx-1 h-4 w-px bg-border" aria-hidden="true" />
-              {ADMIN_NAV_ITEMS.map((item) => (
-                <DesktopNavLink key={item.to} item={item} />
-              ))}
-            </>
-          )}
-          {user?.roles.includes('super_admin') && (
-            <>
-              <span className="mx-1 h-4 w-px bg-border" aria-hidden="true" />
-              <PlainNavLink to="/superadmin" label="Super Admin" icon={<Building2 className="h-4 w-4" />} />
-            </>
-          )}
-          {user?.roles.includes('hr_manager') && (
-            <>
-              <span className="mx-1 h-4 w-px bg-border" aria-hidden="true" />
-              <PlainNavLink to="/hr" label="Hiring" icon={<Users className="h-4 w-4" />} />
-              <PlainNavLink to="/hr/applicants" label="Applicants" icon={<FileSearch className="h-4 w-4" />} />
-              <PlainNavLink to="/hr/exams" label="Exams" icon={<ClipboardList className="h-4 w-4" />} />
-              <PlainNavLink to="/hr/interviews" label="Interviews" icon={<Video className="h-4 w-4" />} />
-              <PlainNavLink to="/hr/pipeline" label="Pipeline" icon={<TrendingUp className="h-4 w-4" />} />
-            </>
-          )}
-        </nav>
-
-        {/* Right side controls */}
-        <div className="ml-auto flex items-center gap-2">
-          <ThemeToggle />
-          <LanguageSwitcher />
-          <UserMenu />
-        </div>
+            <Plus size={15} aria-hidden="true" /> New interview
+          </Link>
+        )}
       </div>
     </header>
   );
@@ -405,10 +562,38 @@ export default function AppShell({ children }: AppShellProps) {
     localStorage.setItem(INTERVIEW_LANGUAGE_KEY, 'en');
   }
 
+  const location = useLocation();
+
   return (
-    <div className="min-h-screen bg-background flex flex-col">
-      <TopBar />
-      <main className="flex-1 w-full px-4 sm:px-6 lg:px-8 py-8">{children}</main>
+    <div className="relative min-h-screen bg-black text-white">
+      <AuroraBackground />
+
+      {/* Desktop fixed sidebar */}
+      <aside
+        className="fixed inset-y-0 left-0 z-40 hidden border-r border-white/[0.06] bg-black/40 backdrop-blur-xl lg:block"
+        style={{ width: SIDEBAR_W }}
+        aria-label="Sidebar"
+      >
+        <SidebarContent />
+      </aside>
+
+      {/* Content column (offset by the sidebar on lg+) */}
+      <div className="relative z-10 lg:pl-[256px]">
+        <TopBar />
+        <main className="w-full px-4 py-8 sm:px-6 lg:px-8">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={location.pathname}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+            >
+              {children}
+            </motion.div>
+          </AnimatePresence>
+        </main>
+      </div>
     </div>
   );
 }

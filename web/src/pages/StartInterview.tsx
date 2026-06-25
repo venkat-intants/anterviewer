@@ -1,23 +1,29 @@
 // StartInterview — multi-step wizard for launching a self-serve interview.
 //
-// Step layout (rendered as a single scrollable form, visually segmented):
-//   Step 1 — Role details   : job title (required), company (opt), JD (opt)
-//   Step 2 — Avatar         : pick your interviewer (lucas / anna / gloria)
-//   Step 3 — Preferences    : experience level + interview language
-//   Step 4 — Review + Start : summary card, consent gate, submit
+// Layout: 2-column (lg:grid-cols-[1fr_340px]).
+//   LEFT  — steps 1–3 stacked: Role details, Choose interviewer, Interview language
+//   RIGHT — sticky device-check GlassCard with WaveBars + consent gate + submit CTA
 //
-// The wizard is NOT multi-page — all fields are on one form so validation
-// on submit catches everything at once and the user can freely scroll.
-// Each "Step" section is visually distinct with a numbered badge + divider.
-//
-// AppShell already provides the top bar; no second PageHeader is rendered here.
+// Resume banner spans full width above the columns.
+// AppShell already provides the top bar — no second shell here.
 
 import { useState, useCallback, useEffect } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useNavigate, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CheckCircle2, AlertCircle, ChevronRight } from 'lucide-react';
+import {
+  CheckCircle2,
+  AlertCircle,
+  Mic,
+  Camera,
+  Wifi,
+  Globe,
+  ShieldCheck,
+  ArrowRight,
+  Sparkles,
+  Check,
+} from '@/design/components/icons';
 import { useAuth } from '@/context/AuthContext';
 import { useConsent } from '@/context/ConsentContext';
 import { getMe } from '@/api/auth';
@@ -27,10 +33,16 @@ import { getAvatars } from '@/api/avatars';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 import ConsentModal from '@/components/ConsentModal';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import type { Language, Avatar } from '@/types/interview';
+import {
+  GlassCard,
+  Pill,
+  SegTabs,
+  StatusTag,
+  WaveBars,
+} from '@/design/components/primitives';
+import { gradientFor, initialsOf } from '@/design/data/shared';
+import { staggerParent, staggerChild } from '@/design/lib/motion';
+import type { Language, Avatar as AvatarType } from '@/types/interview';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -39,8 +51,6 @@ import type { Language, Avatar } from '@/types/interview';
 const LANGUAGE_STORAGE_KEY = 'intants:interview-language';
 const AVATAR_STORAGE_KEY = 'intants:interview-avatar';
 const DEFAULT_AVATAR_ID = 'anna';
-
-// Language + level options are built inside the component so they can use t().
 
 // ---------------------------------------------------------------------------
 // Types
@@ -54,7 +64,19 @@ interface FormValues {
 }
 
 // ---------------------------------------------------------------------------
-// Section header component
+// Shared input / select / textarea class (design dark surface)
+// ---------------------------------------------------------------------------
+
+const inputCls =
+  'w-full rounded-[12px] border border-white/[0.1] bg-[rgba(28,29,31,0.6)] px-3.5 py-3 ' +
+  'text-[14px] text-white placeholder:text-[#5a5f66] ' +
+  'focus:outline-none focus:border-[var(--accent)] focus:ring-0 ' +
+  'transition-colors resize-none';
+
+const inputErrCls = 'border-[rgba(230,113,79,0.5)] bg-[rgba(230,113,79,0.06)]';
+
+// ---------------------------------------------------------------------------
+// Section header
 // ---------------------------------------------------------------------------
 
 interface SectionHeaderProps {
@@ -66,13 +88,17 @@ interface SectionHeaderProps {
 function SectionHeader({ step, title, description }: SectionHeaderProps) {
   return (
     <div className="flex items-start gap-3 mb-4">
-      <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 border border-primary/30 text-primary text-xs font-semibold mt-0.5">
+      <span
+        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full
+          bg-[rgba(var(--accent-rgb),0.15)] border border-[rgba(var(--accent-rgb),0.35)]
+          text-[#60a5fa] text-[11px] font-semibold mt-0.5"
+      >
         {step}
       </span>
       <div>
-        <p className="text-body-sm font-semibold text-foreground">{title}</p>
+        <p className="text-[14px] font-semibold text-white">{title}</p>
         {description && (
-          <p className="text-caption text-muted-foreground mt-0.5">{description}</p>
+          <p className="text-[12px] text-[#888b91] mt-0.5">{description}</p>
         )}
       </div>
     </div>
@@ -80,25 +106,25 @@ function SectionHeader({ step, title, description }: SectionHeaderProps) {
 }
 
 // ---------------------------------------------------------------------------
-// Labelled field wrapper
+// Labeled field wrapper
 // ---------------------------------------------------------------------------
 
-interface FieldProps {
+interface FieldWrapProps {
   id: string;
   label: React.ReactNode;
   error?: string | null;
   children: React.ReactNode;
 }
 
-function Field({ id, label, error, children }: FieldProps) {
+function FieldWrap({ id, label, error, children }: FieldWrapProps) {
   return (
-    <div className="space-y-1.5">
-      <label htmlFor={id} className="block text-body-sm font-medium text-foreground">
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={id} className="text-[12.5px] font-medium text-[#b8babf]">
         {label}
       </label>
       {children}
       {error && (
-        <p id={`${id}-error`} role="alert" className="text-caption text-destructive">
+        <p id={`${id}-error`} role="alert" className="text-[11.5px] text-[#e6714f]">
           {error}
         </p>
       )}
@@ -107,29 +133,20 @@ function Field({ id, label, error, children }: FieldProps) {
 }
 
 // ---------------------------------------------------------------------------
-// Shared input / select class
-// ---------------------------------------------------------------------------
-
-const inputCls =
-  'w-full rounded-[9px] border border-border bg-secondary px-3 py-2 text-sm text-foreground ' +
-  'placeholder:text-muted-foreground ' +
-  'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-0 focus:border-primary/50 ' +
-  'transition-colors';
-
-const inputErrCls =
-  'border-destructive bg-destructive/10 focus:ring-destructive';
-
-// ---------------------------------------------------------------------------
 // Avatar card
 // ---------------------------------------------------------------------------
 
 interface AvatarCardProps {
-  avatar: Avatar;
+  avatar: AvatarType;
   selected: boolean;
   onSelect: (id: string) => void;
 }
 
 function AvatarCard({ avatar, selected, onSelect }: AvatarCardProps) {
+  const seed = avatar.id.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
+  const gradient = gradientFor(seed);
+  const initials = initialsOf(avatar.name);
+
   return (
     <button
       type="button"
@@ -138,43 +155,69 @@ function AvatarCard({ avatar, selected, onSelect }: AvatarCardProps) {
       aria-label={`Select ${avatar.name}`}
       onClick={() => onSelect(avatar.id)}
       className={cn(
-        'relative flex flex-col items-center rounded-xl border-2 overflow-hidden transition-all',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+        'relative flex flex-col items-center gap-2 rounded-[16px] border p-4 transition-colors',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]',
         'w-28 cursor-pointer',
         selected
-          ? 'border-primary bg-muted shadow-card'
-          : 'border-border bg-white hover:border-primary/40 hover:shadow-card',
+          ? 'border-[rgba(var(--accent-rgb),0.5)] bg-[rgba(var(--accent-rgb),0.08)]'
+          : 'border-white/[0.08] hover:border-white/20',
       )}
     >
-      {/* Thumbnail — looping muted video; falls back to img if src isn't a video URL */}
-      <video
-        src={avatar.thumbnail_url}
-        autoPlay
-        muted
-        loop
-        playsInline
-        aria-hidden="true"
-        className="w-full aspect-[7/9] object-cover"
-        onError={(e) => {
-          // If the URL is not a valid video (e.g. placeholder image URL in mock/dev),
-          // hide the video element — the name label below still identifies the avatar.
-          (e.currentTarget as HTMLVideoElement).style.display = 'none';
-        }}
-      />
-      <span
-        className={cn(
-          'w-full py-1.5 text-center text-caption font-medium',
-          selected ? 'text-primary' : 'text-muted-foreground',
-        )}
-      >
-        {avatar.name}
-      </span>
-      {selected && (
-        <span className="absolute top-1.5 right-1.5 h-4 w-4 rounded-full bg-primary flex items-center justify-center">
-          <CheckCircle2 className="h-3 w-3 text-primary-foreground" aria-hidden="true" />
+      <span className="relative">
+        <span className="relative h-16 w-16 block overflow-hidden rounded-full">
+          <span
+            className="absolute inset-0 rounded-full"
+            style={{ background: gradient }}
+            aria-hidden="true"
+          />
+          <video
+            src={avatar.thumbnail_url}
+            autoPlay
+            muted
+            loop
+            playsInline
+            aria-hidden="true"
+            className="absolute inset-0 h-full w-full object-cover rounded-full"
+            onError={(e) => {
+              (e.currentTarget as HTMLVideoElement).style.display = 'none';
+            }}
+          />
+          <span className="absolute inset-0 flex items-center justify-center text-[15px] font-semibold text-white">
+            {initials}
+          </span>
         </span>
-      )}
+
+        {selected && (
+          <span className="absolute -bottom-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--accent)]">
+            <Check size={12} aria-hidden="true" />
+          </span>
+        )}
+      </span>
+
+      <div className="text-[13px] font-medium text-white">{avatar.name}</div>
+      <div className="text-[10.5px] text-[#888b91] capitalize">{avatar.gender}</div>
     </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Device check row — presentation only
+// ---------------------------------------------------------------------------
+
+interface DeviceCheckRowProps {
+  icon: React.ReactNode;
+  label: string;
+}
+
+function DeviceCheckRow({ icon, label }: DeviceCheckRowProps) {
+  return (
+    <div className="flex items-center gap-3 py-2 border-b border-white/[0.06] last:border-0">
+      <span className="flex h-7 w-7 flex-none items-center justify-center rounded-[8px] bg-white/[0.05] text-[#888b91]">
+        {icon}
+      </span>
+      <span className="flex-1 text-[13px] text-[#b8babf]">{label}</span>
+      <span className="text-[11.5px] text-[#70757c]">pending</span>
+    </div>
   );
 }
 
@@ -188,19 +231,22 @@ export default function StartInterview() {
   const navigate = useNavigate();
   const { consented, loading: consentLoading, recordConsent } = useConsent();
 
-  // Translated option arrays — rebuilt whenever language changes
-  const LANGUAGE_OPTIONS: { value: Language; label: string }[] = [
-    { value: 'en', label: 'English' },
-    { value: 'hi', label: 'हिंदी (Hindi)' },
-    { value: 'te', label: 'తెలుగు (Telugu)' },
+  // ── Language options ────────────────────────────────────────────────────────
+  const LANG_TABS: { key: Language; label: string }[] = [
+    { key: 'en', label: 'English' },
+    { key: 'hi', label: 'हिन्दी' },
+    { key: 'te', label: 'తెలుగు' },
   ];
 
-  const LEVEL_OPTIONS: { value: 'entry' | 'mid' | 'senior'; label: string; description: string }[] =
-    [
-      { value: 'entry', label: t('startInterview.entryLevel'), description: t('startInterview.years03') },
-      { value: 'mid', label: t('startInterview.midLevel'), description: t('startInterview.years36') },
-      { value: 'senior', label: t('startInterview.seniorLevel'), description: t('startInterview.years6plus') },
-    ];
+  const LEVEL_TABS: {
+    key: 'entry' | 'mid' | 'senior';
+    label: string;
+    description: string;
+  }[] = [
+    { key: 'entry', label: t('startInterview.entryLevel'), description: t('startInterview.years03') },
+    { key: 'mid', label: t('startInterview.midLevel'), description: t('startInterview.years36') },
+    { key: 'senior', label: t('startInterview.seniorLevel'), description: t('startInterview.years6plus') },
+  ];
 
   // ── Language (persisted) ────────────────────────────────────────────────────
   const [selectedLanguage, setSelectedLanguage] = useState<Language>(() => {
@@ -237,7 +283,7 @@ export default function StartInterview() {
   const [isSubmittingConsent, setIsSubmittingConsent] = useState(false);
   const [consentError, setConsentError] = useState<string | null>(null);
 
-  // ── Resume status ───────────────────────────────────────────────────────────
+  // ── Resume status (getMe) ───────────────────────────────────────────────────
   const { data: me } = useQuery({
     queryKey: ['auth', 'me'],
     queryFn: () => {
@@ -250,13 +296,11 @@ export default function StartInterview() {
   });
 
   // ── Avatars list ─────────────────────────────────────────────────────────────
-  // On fetch error we fall back gracefully — user can still proceed with the
-  // default avatar so the interview is never blocked.
   const {
     data: avatars,
     isLoading: avatarsLoading,
     isError: avatarsError,
-  } = useQuery<Avatar[]>({
+  } = useQuery<AvatarType[]>({
     queryKey: ['avatars'],
     queryFn: getAvatars,
     staleTime: 10 * 60 * 1000,
@@ -298,7 +342,6 @@ export default function StartInterview() {
     },
   });
 
-  /** After consent is confirmed, run both mutations in sequence */
   const proceedToSession = useCallback(
     async (formVals: FormValues) => {
       const created = await createJobMutation.mutateAsync(formVals);
@@ -307,9 +350,6 @@ export default function StartInterview() {
     [createJobMutation, createSessionMutation],
   );
 
-  // Surface API errors via both toast and an inline role="alert" element.
-  // The toast provides ambient notification; the inline alert provides a
-  // persistent visible message and allows test assertions via getByRole('alert').
   const apiError =
     createJobMutation.error instanceof Error
       ? createJobMutation.error.message
@@ -323,7 +363,6 @@ export default function StartInterview() {
     }
   }, [apiError]);
 
-  /** Called when "Start Interview" is clicked */
   const handleSubmit = useCallback(
     (e: React.FormEvent) => {
       e.preventDefault();
@@ -338,7 +377,7 @@ export default function StartInterview() {
 
       if (consented === true) {
         proceedToSession(values).catch(() => {
-          // Error is surfaced via the mutation state and toast above
+          // Error surfaced via mutation state and toast
         });
       } else {
         setConsentError(null);
@@ -348,7 +387,6 @@ export default function StartInterview() {
     [values, consented, proceedToSession, createJobMutation, createSessionMutation, t],
   );
 
-  /** User clicked "I Agree" in the consent modal */
   const handleAgree = useCallback(async () => {
     setIsSubmittingConsent(true);
     setConsentError(null);
@@ -365,7 +403,6 @@ export default function StartInterview() {
     }
   }, [recordConsent, proceedToSession, values]);
 
-  /** User declined consent */
   const handleDecline = useCallback(() => {
     setShowConsent(false);
     setConsentError(null);
@@ -374,34 +411,44 @@ export default function StartInterview() {
 
   const isSubmitting = createJobMutation.isPending || createSessionMutation.isPending;
 
-  // ── Derived summary for review section ──────────────────────────────────────
+  // ── Derived summary values ──────────────────────────────────────────────────
   const levelLabel =
-    LEVEL_OPTIONS.find((o) => o.value === values.level)?.label ?? values.level;
+    LEVEL_TABS.find((o) => o.key === values.level)?.label ?? values.level;
   const languageLabel =
-    LANGUAGE_OPTIONS.find((o) => o.value === selectedLanguage)?.label ?? selectedLanguage;
+    LANG_TABS.find((o) => o.key === selectedLanguage)?.label ?? selectedLanguage;
   const avatarLabel =
     avatars?.find((a) => a.id === selectedAvatarId)?.name ?? selectedAvatarId;
 
-  // ── Avatar groups for the picker ─────────────────────────────────────────────
+  // ── Avatar groups ─────────────────────────────────────────────────────────
   const maleAvatars = avatars?.filter((a) => a.gender === 'male') ?? [];
   const femaleAvatars = avatars?.filter((a) => a.gender === 'female') ?? [];
 
+  // ── SegTabs adapters
+  const langTabItems = LANG_TABS.map((l) => ({ key: l.key as string, label: l.label }));
+  const levelTabItems = LEVEL_TABS.map((l) => ({ key: l.key as string, label: l.label }));
+
   return (
     <div className="pb-12">
-      {/* Page heading */}
+      {/* ── Page heading ─────────────────────────────────────────────────── */}
       <motion.div
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
         className="mb-6"
       >
-        <h1 className="text-heading font-semibold text-foreground">{t('startInterview.pageTitle')}</h1>
-        <p className="mt-1 text-body-sm text-muted-foreground">
+        <div className="flex items-center gap-2 text-[13px] text-[#888b91] mb-1">
+          <Sparkles size={15} className="text-[#a887dc]" aria-hidden="true" />
+          <span>Pre-flight</span>
+        </div>
+        <h1 className="text-[28px] font-semibold tracking-[-1px] text-white">
+          {t('startInterview.pageTitle')}
+        </h1>
+        <p className="mt-1 text-[14px] text-[#888b91]">
           {t('startInterview.pageDesc')}
         </p>
       </motion.div>
 
-      {/* Resume status banner */}
+      {/* ── Resume status banner — full width ────────────────────────────── */}
       <AnimatePresence mode="wait">
         {!consentLoading && me !== undefined && (
           <motion.div
@@ -415,23 +462,26 @@ export default function StartInterview() {
             {me.has_resume ? (
               <div
                 aria-live="polite"
-                className="flex items-center gap-2 rounded-xl border border-border bg-emerald-50 px-4 py-2.5 text-body-sm text-muted-foreground"
+                className="flex items-center gap-2 rounded-[16px] border border-[rgba(39,201,63,0.25)]
+                  bg-[rgba(39,201,63,0.06)] px-4 py-2.5 text-[13px]"
               >
-                <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" aria-hidden="true" />
-                <span className="font-medium text-foreground">{t('startInterview.resumeOnFile')}</span>
-                <span className="text-muted-foreground">{t('startInterview.resumeOnFileDesc')}</span>
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-[#27c93f]" aria-hidden="true" />
+                <span className="font-medium text-white">{t('startInterview.resumeOnFile')}</span>
+                <span className="text-[#888b91]">{t('startInterview.resumeOnFileDesc')}</span>
               </div>
             ) : (
               <div
                 aria-live="polite"
-                className="flex items-start gap-2 rounded-xl border border-border bg-muted/40 px-4 py-2.5 text-body-sm text-muted-foreground"
+                className="flex items-start gap-2 rounded-[16px] border border-white/[0.08]
+                  bg-[rgba(255,183,100,0.06)] px-4 py-2.5 text-[13px]"
               >
-                <AlertCircle className="h-4 w-4 shrink-0 text-muted-foreground mt-0.5" aria-hidden="true" />
-                <span>
+                <AlertCircle className="h-4 w-4 shrink-0 text-[#ffb764] mt-0.5" aria-hidden="true" />
+                <span className="text-[#b8babf]">
                   {t('startInterview.noResume')}{' '}
                   <Link
                     to="/dashboard"
-                    className="font-medium text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
+                    className="font-medium text-[#60a5fa] underline-offset-2 hover:underline
+                      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] rounded"
                   >
                     {t('startInterview.noResumeLink')}
                   </Link>{' '}
@@ -443,296 +493,422 @@ export default function StartInterview() {
         )}
       </AnimatePresence>
 
-      {/* Form */}
+      {/* ── 2-column form layout ──────────────────────────────────────────── */}
       <form onSubmit={handleSubmit} noValidate aria-label="Start interview form">
-        <div className="space-y-5">
-          {/* ── Step 1: Role details ─────────────────────────────────────────── */}
-          <Card>
-            <CardContent className="pt-5 pb-5 space-y-4">
-              <SectionHeader
-                step={1}
-                title={t('startInterview.step1Title')}
-                description={t('startInterview.step1Desc')}
-              />
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1fr_340px] lg:items-start">
 
-              <Field
-                id="si-title"
-                label={
-                  <>
-                    {t('startInterview.jobTitleLabel')}{' '}
-                    <span aria-hidden="true" className="text-destructive">
-                      *
-                    </span>
-                  </>
-                }
-                error={titleError}
-              >
-                <input
+          {/* ── LEFT COLUMN: Steps 1–3 ─────────────────────────────────── */}
+          <motion.div
+            variants={staggerParent}
+            initial="hidden"
+            animate="show"
+            className="space-y-5"
+          >
+            {/* Step 1: Role details */}
+            <motion.div variants={staggerChild}>
+              <GlassCard className="p-5 space-y-4">
+                <SectionHeader
+                  step={1}
+                  title={t('startInterview.step1Title')}
+                  description={t('startInterview.step1Desc')}
+                />
+
+                <FieldWrap
                   id="si-title"
-                  type="text"
-                  required
-                  aria-required="true"
-                  aria-describedby={titleError ? 'si-title-error' : undefined}
-                  aria-invalid={titleError !== null}
-                  value={values.title}
-                  onChange={(e) => {
-                    setValues((v) => ({ ...v, title: e.target.value }));
-                    if (titleError) setTitleError(null);
-                  }}
-                  placeholder={t('startInterview.jobTitlePlaceholder')}
-                  className={cn(inputCls, titleError && inputErrCls)}
-                />
-              </Field>
-
-              <Field
-                id="si-company"
-                label={
-                  <>
-                    {t('startInterview.companyLabel')}{' '}
-                    <span className="text-xs font-normal text-muted-foreground">({t('startInterview.optional')})</span>
-                  </>
-                }
-              >
-                <input
-                  id="si-company"
-                  type="text"
-                  value={values.company_name}
-                  onChange={(e) => setValues((v) => ({ ...v, company_name: e.target.value }))}
-                  placeholder={t('startInterview.companyPlaceholder')}
-                  className={inputCls}
-                />
-              </Field>
-
-              <Field
-                id="si-jd"
-                label={
-                  <>
-                    {t('startInterview.jdLabel')}{' '}
-                    <span className="text-xs font-normal text-muted-foreground">({t('startInterview.optional')})</span>
-                  </>
-                }
-              >
-                <textarea
-                  id="si-jd"
-                  rows={4}
-                  value={values.jd_text}
-                  onChange={(e) => setValues((v) => ({ ...v, jd_text: e.target.value }))}
-                  placeholder={t('startInterview.jdPlaceholder')}
-                  className={cn(inputCls, 'resize-y min-h-[80px]')}
-                />
-              </Field>
-            </CardContent>
-          </Card>
-
-          {/* ── Step 2: Avatar ──────────────────────────────────────────────── */}
-          <Card>
-            <CardContent className="pt-5 pb-5 space-y-4">
-              <SectionHeader
-                step={2}
-                title={t('startInterview.step2Title')}
-                description={t('startInterview.step2Desc')}
-              />
-
-              {avatarsLoading && (
-                <div
-                  aria-live="polite"
-                  aria-label={t('startInterview.loadingInterviewers')}
-                  className="flex items-center gap-2 text-body-sm text-muted-foreground"
+                  label={
+                    <>
+                      {t('startInterview.jobTitleLabel')}{' '}
+                      <span aria-hidden="true" className="text-[#e6714f]">*</span>
+                    </>
+                  }
+                  error={titleError}
                 >
-                  <span
-                    className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent"
+                  <input
+                    id="si-title"
+                    type="text"
+                    required
+                    aria-required="true"
+                    aria-describedby={titleError ? 'si-title-error' : undefined}
+                    aria-invalid={titleError !== null}
+                    value={values.title}
+                    onChange={(e) => {
+                      setValues((v) => ({ ...v, title: e.target.value }));
+                      if (titleError) setTitleError(null);
+                    }}
+                    placeholder={t('startInterview.jobTitlePlaceholder')}
+                    className={cn(inputCls, titleError && inputErrCls)}
+                  />
+                </FieldWrap>
+
+                <FieldWrap
+                  id="si-company"
+                  label={
+                    <>
+                      {t('startInterview.companyLabel')}{' '}
+                      <span className="text-[11px] font-normal text-[#70757c]">
+                        ({t('startInterview.optional')})
+                      </span>
+                    </>
+                  }
+                >
+                  <input
+                    id="si-company"
+                    type="text"
+                    value={values.company_name}
+                    onChange={(e) =>
+                      setValues((v) => ({ ...v, company_name: e.target.value }))
+                    }
+                    placeholder={t('startInterview.companyPlaceholder')}
+                    className={inputCls}
+                  />
+                </FieldWrap>
+
+                <FieldWrap
+                  id="si-jd"
+                  label={
+                    <>
+                      {t('startInterview.jdLabel')}{' '}
+                      <span className="text-[11px] font-normal text-[#70757c]">
+                        ({t('startInterview.optional')})
+                      </span>
+                    </>
+                  }
+                >
+                  <textarea
+                    id="si-jd"
+                    rows={4}
+                    value={values.jd_text}
+                    onChange={(e) =>
+                      setValues((v) => ({ ...v, jd_text: e.target.value }))
+                    }
+                    placeholder={t('startInterview.jdPlaceholder')}
+                    className={cn(inputCls, 'resize-y min-h-[80px]')}
+                  />
+                </FieldWrap>
+              </GlassCard>
+            </motion.div>
+
+            {/* Step 2: Avatar picker */}
+            <motion.div variants={staggerChild}>
+              <GlassCard className="p-5 space-y-4">
+                <SectionHeader
+                  step={2}
+                  title={t('startInterview.step2Title')}
+                  description={t('startInterview.step2Desc')}
+                />
+
+                {avatarsLoading && (
+                  <div
+                    aria-live="polite"
+                    aria-label={t('startInterview.loadingInterviewers')}
+                    className="flex flex-wrap gap-3"
+                  >
+                    {[0, 1, 2].map((i) => (
+                      <div
+                        key={i}
+                        className="h-36 w-28 rounded-[16px] bg-white/[0.06] animate-pulse"
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {!avatarsLoading && avatarsError && (
+                  <div
+                    aria-live="polite"
+                    className="rounded-[12px] border border-white/[0.08] bg-[rgba(255,183,100,0.06)]
+                      px-4 py-2.5 text-[13px] text-[#ffb764]"
+                  >
+                    {t('startInterview.avatarLoadError')}
+                  </div>
+                )}
+
+                {!avatarsLoading && !avatarsError && avatars !== undefined && (
+                  <div className="space-y-4">
+                    {maleAvatars.length > 0 && (
+                      <div>
+                        <p className="text-[11px] font-semibold text-[#70757c] uppercase tracking-[0.08em] mb-2">
+                          {t('startInterview.maleGroup')}
+                        </p>
+                        <div
+                          className="flex flex-wrap gap-3"
+                          role="radiogroup"
+                          aria-label={t('startInterview.maleGroup')}
+                        >
+                          {maleAvatars.map((avatar) => (
+                            <AvatarCard
+                              key={avatar.id}
+                              avatar={avatar}
+                              selected={selectedAvatarId === avatar.id}
+                              onSelect={setSelectedAvatarId}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {femaleAvatars.length > 0 && (
+                      <div>
+                        <p className="text-[11px] font-semibold text-[#70757c] uppercase tracking-[0.08em] mb-2">
+                          {t('startInterview.femaleGroup')}
+                        </p>
+                        <div
+                          className="flex flex-wrap gap-3"
+                          role="radiogroup"
+                          aria-label={t('startInterview.femaleGroup')}
+                        >
+                          {femaleAvatars.map((avatar) => (
+                            <AvatarCard
+                              key={avatar.id}
+                              avatar={avatar}
+                              selected={selectedAvatarId === avatar.id}
+                              onSelect={setSelectedAvatarId}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </GlassCard>
+            </motion.div>
+
+            {/* Step 3: Interview language + level */}
+            <motion.div variants={staggerChild}>
+              <GlassCard className="p-5 space-y-5">
+                <SectionHeader
+                  step={3}
+                  title={t('startInterview.step3Title')}
+                  description={t('startInterview.step3Desc')}
+                />
+
+                {/* Language */}
+                <div className="space-y-2">
+                  <p className="text-[12.5px] font-medium text-[#b8babf]">
+                    {t('startInterview.interviewLanguageLabel')}
+                  </p>
+                  <select
+                    id="si-language"
+                    value={selectedLanguage}
+                    onChange={(e) => setSelectedLanguage(e.target.value as Language)}
+                    className="sr-only"
+                    aria-label={t('startInterview.interviewLanguageLabel')}
+                  >
+                    {LANG_TABS.map((opt) => (
+                      <option key={opt.key} value={opt.key}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                  <SegTabs
+                    tabs={langTabItems}
+                    active={selectedLanguage as string}
+                    onChange={(k) => setSelectedLanguage(k as Language)}
+                    className="w-full justify-stretch"
+                  />
+                  <p className="text-[12px] text-[#70757c]">
+                    You can switch languages mid-interview if you get stuck.
+                  </p>
+                </div>
+
+                {/* Experience level */}
+                <div className="space-y-2">
+                  <p className="text-[12.5px] font-medium text-[#b8babf]">
+                    {t('startInterview.experienceLevelLabel')}
+                  </p>
+                  <select
+                    id="si-level"
+                    value={values.level}
+                    onChange={(e) =>
+                      setValues((v) => ({
+                        ...v,
+                        level: e.target.value as 'entry' | 'mid' | 'senior',
+                      }))
+                    }
+                    className="sr-only"
+                    aria-label={t('startInterview.experienceLevelLabel')}
+                  >
+                    {LEVEL_TABS.map((opt) => (
+                      <option key={opt.key} value={opt.key}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                  <SegTabs
+                    tabs={levelTabItems}
+                    active={values.level as string}
+                    onChange={(k) =>
+                      setValues((v) => ({
+                        ...v,
+                        level: k as 'entry' | 'mid' | 'senior',
+                      }))
+                    }
+                    className="w-full justify-stretch"
+                  />
+                  <p className="text-[12px] text-[#70757c]">
+                    {LEVEL_TABS.find((l) => l.key === values.level)?.description}
+                  </p>
+                </div>
+              </GlassCard>
+            </motion.div>
+          </motion.div>
+
+          {/* ── RIGHT COLUMN: Device check + consent + submit (sticky) ──── */}
+          <div className="lg:sticky lg:top-20 space-y-4">
+            <GlassCard feature className="p-5 space-y-4">
+              {/* Header */}
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[#60a5fa] mb-1">
+                  MIC &amp; DEVICE CHECK
+                </p>
+                <p className="text-[12.5px] text-[#888b91]">
+                  Make sure your setup is ready before you begin.
+                </p>
+              </div>
+
+              {/* WaveBars visual */}
+              <div className="flex items-center justify-center rounded-[12px] border border-white/[0.08] bg-[rgba(var(--accent-rgb),0.04)] py-4">
+                <WaveBars active={false} bars={20} color="var(--accent)" height={32} />
+              </div>
+
+              {/* Run device check — presentation */}
+              <Pill
+                type="button"
+                variant="ghost"
+                className="w-full"
+                aria-label="Run device check (presentation only)"
+                onClick={() => {
+                  /* presentation only */
+                }}
+              >
+                <Mic size={15} aria-hidden="true" />
+                Run device check
+              </Pill>
+
+              {/* Checklist */}
+              <div>
+                <DeviceCheckRow
+                  icon={<Mic size={14} aria-hidden="true" />}
+                  label="Microphone"
+                />
+                <DeviceCheckRow
+                  icon={<Camera size={14} aria-hidden="true" />}
+                  label="Camera (proctoring)"
+                />
+                <DeviceCheckRow
+                  icon={<Wifi size={14} aria-hidden="true" />}
+                  label="Connection"
+                />
+                <DeviceCheckRow
+                  icon={<Globe size={14} aria-hidden="true" />}
+                  label="Browser"
+                />
+              </div>
+
+              {/* DPDP consent note */}
+              <div className="rounded-[12px] border border-white/[0.07] bg-white/[0.02] px-3.5 py-3">
+                <div className="flex items-start gap-2">
+                  <ShieldCheck
+                    size={14}
+                    className="shrink-0 text-[#27c93f] mt-0.5"
                     aria-hidden="true"
                   />
-                  {t('startInterview.loadingInterviewers')}
+                  <p className="text-[12px] text-[#888b91] leading-relaxed">
+                    {t('startInterview.consentNote')}
+                  </p>
                 </div>
-              )}
+              </div>
 
-              {!avatarsLoading && avatarsError && (
-                <div
-                  aria-live="polite"
-                  className="rounded-xl border border-border bg-muted/40 px-4 py-2.5 text-body-sm text-muted-foreground"
-                >
-                  {t('startInterview.avatarLoadError')}
-                </div>
-              )}
-
-              {!avatarsLoading && !avatarsError && avatars !== undefined && (
-                <div className="space-y-4">
-                  {/* Male group */}
-                  {maleAvatars.length > 0 && (
-                    <div>
-                      <p className="text-caption font-medium text-muted-foreground mb-2 uppercase tracking-wide">
-                        {t('startInterview.maleGroup')}
-                      </p>
-                      <div className="flex flex-wrap gap-3" role="radiogroup" aria-label={t('startInterview.maleGroup')}>
-                        {maleAvatars.map((avatar) => (
-                          <AvatarCard
-                            key={avatar.id}
-                            avatar={avatar}
-                            selected={selectedAvatarId === avatar.id}
-                            onSelect={setSelectedAvatarId}
-                          />
-                        ))}
+              {/* Review summary — visible once title is entered */}
+              <AnimatePresence>
+                {values.title.trim() && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    transition={{ duration: 0.2 }}
+                    className="overflow-hidden"
+                  >
+                    <div className="rounded-[12px] border border-white/[0.08] bg-[rgba(28,29,31,0.6)] px-4 py-3 space-y-1.5 text-[13px]">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-semibold text-white">
+                          {values.title.trim()}
+                        </span>
+                        {values.company_name.trim() && (
+                          <>
+                            <span className="text-[#888b91]">{t('startInterview.at')}</span>
+                            <span className="text-[#b8babf]">
+                              {values.company_name.trim()}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <StatusTag tone="electric">{levelLabel}</StatusTag>
+                        <StatusTag tone="lavender">{languageLabel}</StatusTag>
+                        <StatusTag tone="neutral">{avatarLabel}</StatusTag>
+                        {values.jd_text.trim() && (
+                          <StatusTag tone="forest">
+                            {t('startInterview.jdProvided')}
+                          </StatusTag>
+                        )}
                       </div>
                     </div>
-                  )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
-                  {/* Female group */}
-                  {femaleAvatars.length > 0 && (
-                    <div>
-                      <p className="text-caption font-medium text-muted-foreground mb-2 uppercase tracking-wide">
-                        {t('startInterview.femaleGroup')}
-                      </p>
-                      <div className="flex flex-wrap gap-3" role="radiogroup" aria-label={t('startInterview.femaleGroup')}>
-                        {femaleAvatars.map((avatar) => (
-                          <AvatarCard
-                            key={avatar.id}
-                            avatar={avatar}
-                            selected={selectedAvatarId === avatar.id}
-                            onSelect={setSelectedAvatarId}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* ── Step 3: Preferences ─────────────────────────────────────────── */}
-          <Card>
-            <CardContent className="pt-5 pb-5 space-y-4">
-              <SectionHeader
-                step={3}
-                title={t('startInterview.step3Title')}
-                description={t('startInterview.step3Desc')}
-              />
-
-              <Field id="si-level" label={t('startInterview.experienceLevelLabel')}>
-                <select
-                  id="si-level"
-                  value={values.level}
-                  onChange={(e) =>
-                    setValues((v) => ({
-                      ...v,
-                      level: e.target.value as 'entry' | 'mid' | 'senior',
-                    }))
-                  }
-                  className={inputCls}
-                >
-                  {LEVEL_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label} ({opt.description})
-                    </option>
-                  ))}
-                </select>
-              </Field>
-
-              <Field id="si-language" label={t('startInterview.interviewLanguageLabel')}>
-                <select
-                  id="si-language"
-                  value={selectedLanguage}
-                  onChange={(e) => setSelectedLanguage(e.target.value as Language)}
-                  className={inputCls}
-                >
-                  {LANGUAGE_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-            </CardContent>
-          </Card>
-
-          {/* ── Step 4: Review + Start ───────────────────────────────────────── */}
-          <Card className="bg-muted ring-1 ring-primary/10 border-primary/20">
-            <CardContent className="pt-5 pb-5 space-y-4">
-              <SectionHeader
-                step={4}
-                title={t('startInterview.step4Title')}
-                description={t('startInterview.step4Desc')}
-              />
-
-              {/* Summary row */}
-              {values.title.trim() && (
-                <motion.div
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  className="rounded-xl bg-white border border-border px-4 py-3 space-y-1.5 text-body-sm shadow-card"
-                >
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="font-semibold text-foreground">{values.title.trim()}</span>
-                    {values.company_name.trim() && (
-                      <>
-                        <span className="text-muted-foreground">{t('startInterview.at')}</span>
-                        <span className="text-foreground">{values.company_name.trim()}</span>
-                      </>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <Badge variant="secondary" className="text-xs">
-                      {levelLabel}
-                    </Badge>
-                    <Badge variant="secondary" className="text-xs">
-                      {languageLabel}
-                    </Badge>
-                    <Badge variant="secondary" className="text-xs">
-                      {avatarLabel}
-                    </Badge>
-                    {values.jd_text.trim() && (
-                      <Badge variant="outline" className="text-xs">
-                        {t('startInterview.jdProvided')}
-                      </Badge>
-                    )}
-                  </div>
-                </motion.div>
-              )}
-
-              {/* Consent note */}
-              <p className="text-caption text-muted-foreground">
-                {t('startInterview.consentNote')}
-              </p>
-
-              {/* Inline API error — also shown via toast above */}
+              {/* API error */}
               {apiError && (
                 <div
                   role="alert"
-                  className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-body-sm text-destructive"
+                  className="rounded-[12px] border border-[rgba(230,113,79,0.35)]
+                    bg-[rgba(230,113,79,0.1)] px-4 py-3 text-[13px] text-[#e6714f]"
                 >
                   {apiError}
                 </div>
               )}
 
-              <Button
+              {/* Submit CTA */}
+              <Pill
                 type="submit"
                 disabled={isSubmitting}
                 aria-busy={isSubmitting}
-                className="w-full"
-                size="lg"
+                className="w-full justify-center"
               >
                 {isSubmitting ? (
                   <span className="flex items-center gap-2">
                     <span
-                      className="h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent"
+                      className="h-4 w-4 animate-spin rounded-full border-2 border-black border-t-transparent"
                       aria-hidden="true"
                     />
                     {t('startInterview.starting')}
                   </span>
                 ) : (
                   <span className="flex items-center gap-2">
-                    {t('startInterview.startButton')}
-                    <ChevronRight className="h-4 w-4" aria-hidden="true" />
+                    {consented
+                      ? t('startInterview.startButton')
+                      : 'Accept consent to begin'}
+                    <ArrowRight size={16} aria-hidden="true" />
                   </span>
                 )}
-              </Button>
-            </CardContent>
-          </Card>
+              </Pill>
+
+              {/* Ready status indicator */}
+              <div className="flex justify-center">
+                {!values.title.trim() ? (
+                  <StatusTag tone="amber">Fill in role details to begin</StatusTag>
+                ) : (
+                  <StatusTag tone="forest" dot>
+                    Ready
+                  </StatusTag>
+                )}
+              </div>
+            </GlassCard>
+          </div>
         </div>
       </form>
 
-      {/* Consent modal */}
+      {/* ── DPDP Consent modal ──────────────────────────────────────────────── */}
       {showConsent && (
         <ConsentModal
           onAgree={handleAgree}

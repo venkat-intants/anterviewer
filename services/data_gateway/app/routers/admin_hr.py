@@ -23,7 +23,7 @@ from typing import Annotated
 
 import bcrypt
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, EmailStr, Field
 from shared.auth.base import User
 from sqlalchemy import text
@@ -260,3 +260,115 @@ async def list_hr_managers(
         )
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# DPDP audit log (read-only) — admin actions + consent ledger events
+# ---------------------------------------------------------------------------
+
+
+class AuditEvent(BaseModel):
+    ts: str
+    kind: str  # admin_action | consent_granted | consent_denied | consent_revoked
+    summary: str
+    actor: str
+
+
+@router.get("/audit-log", response_model=list[AuditEvent])
+async def audit_log(
+    current_user: SuperAdminDep,
+    db: DbSessionDep,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+) -> list[AuditEvent]:
+    """Merged DPDP audit feed: append-only admin actions + consent ledger events."""
+    rows = (
+        await db.execute(
+            text(
+                "SELECT ts, kind, summary, actor FROM ("
+                "  SELECT event_ts AS ts, 'admin_action' AS kind, "
+                "         COALESCE(action,'') AS summary, COALESCE(actor_type,'system') AS actor "
+                "  FROM audit_log WHERE event_ts IS NOT NULL "
+                "  UNION ALL "
+                "  SELECT granted_at AS ts, "
+                "         CASE WHEN granted THEN 'consent_granted' ELSE 'consent_denied' END AS kind, "
+                "         COALESCE(purpose, consent_type) AS summary, 'candidate' AS actor "
+                "  FROM dpdp_consent_ledger "
+                "  UNION ALL "
+                "  SELECT revoked_at AS ts, 'consent_revoked' AS kind, "
+                "         COALESCE(purpose, consent_type) AS summary, 'candidate' AS actor "
+                "  FROM dpdp_consent_ledger WHERE revoked_at IS NOT NULL "
+                ") e ORDER BY ts DESC LIMIT :lim"
+            ),
+            {"lim": limit},
+        )
+    ).fetchall()
+    return [
+        AuditEvent(ts=r[0].isoformat(), kind=r[1], summary=r[2] or "", actor=r[3])
+        for r in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Platform feature flags
+# ---------------------------------------------------------------------------
+
+
+class FeatureFlagOut(BaseModel):
+    key: str
+    label: str
+    description: str | None
+    enabled: bool
+    updated_at: str | None
+
+
+class FeatureFlagToggle(BaseModel):
+    enabled: bool
+
+
+@router.get("/feature-flags", response_model=list[FeatureFlagOut])
+async def list_feature_flags(
+    current_user: SuperAdminDep, db: DbSessionDep
+) -> list[FeatureFlagOut]:
+    """List platform feature flags (super_admin only)."""
+    rows = (
+        await db.execute(
+            text(
+                "SELECT key, label, description, enabled, updated_at "
+                "FROM feature_flags ORDER BY key"
+            )
+        )
+    ).fetchall()
+    return [
+        FeatureFlagOut(
+            key=r[0], label=r[1], description=r[2], enabled=r[3],
+            updated_at=r[4].isoformat() if r[4] else None,
+        )
+        for r in rows
+    ]
+
+
+@router.put("/feature-flags/{key}", response_model=FeatureFlagOut)
+async def toggle_feature_flag(
+    key: str, body: FeatureFlagToggle, current_user: SuperAdminDep, db: DbSessionDep
+) -> FeatureFlagOut:
+    """Enable/disable a platform feature flag (super_admin only)."""
+    now = datetime.now(tz=UTC)
+    row = (
+        await db.execute(
+            text(
+                "UPDATE feature_flags SET enabled = :en, updated_at = :now, updated_by = :uid "
+                "WHERE key = :key "
+                "RETURNING key, label, description, enabled, updated_at"
+            ),
+            {"en": body.enabled, "now": now, "uid": uuid.UUID(current_user.user_id), "key": key},
+        )
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Feature flag not found."
+        )
+    await db.commit()
+    return FeatureFlagOut(
+        key=row[0], label=row[1], description=row[2], enabled=row[3],
+        updated_at=row[4].isoformat() if row[4] else None,
+    )

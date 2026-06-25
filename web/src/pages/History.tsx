@@ -1,69 +1,77 @@
-// History — Interview history page. Renders inside AppShell.
-// Uses: useQuery(listSessions), responsive Table (desktop) / Card list (mobile),
-// status Badge, pagination, empty state + loading skeletons, toast on error.
+// History — Interview history page. Renders inside AppShell (no shell here).
+// Design: GlassCard table + avg ScoreRing ring (computed from real data).
+// Behavior: listSessions({page, perPage:10}) + pagination + responsive table/card
+// split at `md` + status/format helpers + conditional scorecard link + i18n.
 
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { motion, type Variants } from 'framer-motion';
-import {
-  History as HistoryIcon,
-  PlayCircle,
-  ChevronLeft,
-  ChevronRight,
-  ExternalLink,
-  Clock,
-  Globe,
-} from 'lucide-react';
+
 import { listSessions } from '@/api/sessions';
 import type { SessionListItem } from '@/api/sessions';
 import { toast } from '@/lib/toast';
 import { formatDate, formatDuration, statusProps } from '@/lib/formatters';
 import { cn } from '@/lib/utils';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Skeleton } from '@/components/ui/skeleton';
+import { GlassCard, ScoreRing, StatusTag, Avatar } from '@/design/components/primitives';
+import { gradientFor, initialsOf } from '@/design/data/shared';
+import { Reveal, Stagger, StaggerItem } from '@/design/components/Reveal';
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
+  ChevronLeft,
+  ChevronRight,
+  ExternalLink,
+  Clock,
+  Globe,
+  ArrowRight,
+  Play,
+} from '@/design/components/icons';
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────────────
 
 const PER_PAGE = 10;
 
-// languageLabel is a hook-based helper; defined inside the component tree instead.
 const LANGUAGE_LABEL_KEYS: Record<string, string> = {
   en: 'history.langEnglish',
   hi: 'history.langHindi',
   te: 'history.langTelugu',
 };
 
-// ── Animation variants ─────────────────────────────────────────────────────────
+// ── Inline skeleton — avoids @/components/ui/* shadcn dep ────────────────────
 
-const stagger: Variants = {
-  hidden: {},
-  visible: { transition: { staggerChildren: 0.06 } },
-};
+function Sk({ className }: { className?: string }) {
+  return (
+    <div
+      className={cn('animate-pulse rounded-md bg-white/[0.06]', className)}
+      aria-hidden="true"
+    />
+  );
+}
 
-const fadeUp: Variants = {
-  hidden: { opacity: 0, y: 12 },
-  visible: { opacity: 1, y: 0, transition: { duration: 0.35, ease: [0.22, 1, 0.36, 1] } },
-};
+// Map session status to a StatusTag tone
+function statusTone(
+  status: string,
+): 'forest' | 'electric' | 'amber' | 'ember' | 'neutral' {
+  switch (status) {
+    case 'completed':
+      return 'forest';
+    case 'in_progress':
+      return 'electric';
+    case 'abandoned':
+      return 'amber';
+    case 'failed':
+      return 'ember';
+    default:
+      return 'neutral';
+  }
+}
 
-// ── Sub-components ─────────────────────────────────────────────────────────────
+// ── Sub-components ────────────────────────────────────────────────────────────
 
 function LoadingSkeletons() {
   return (
     <div className="space-y-3" aria-busy="true" aria-label="Loading interview history">
       {Array.from({ length: 4 }).map((_, i) => (
-        <Skeleton key={i} className="h-16 w-full rounded-lg" />
+        <Sk key={i} className="h-16 w-full rounded-[16px]" />
       ))}
     </div>
   );
@@ -72,25 +80,23 @@ function LoadingSkeletons() {
 function EmptyState() {
   const { t } = useTranslation();
   return (
-    <div
-      className="flex flex-col items-center justify-center rounded-3xl border border-dashed border-border bg-muted/40 py-20 text-center gap-4"
-      data-testid="history-empty-state"
-    >
-      <div className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 ring-1 ring-primary/20">
-        <HistoryIcon className="h-7 w-7 text-primary" aria-hidden="true" />
-      </div>
-      <div>
-        <p className="text-body font-semibold text-foreground">{t('history.noInterviewsTitle')}</p>
-        <p className="mt-1 text-body-sm text-muted-foreground">
-          {t('history.noInterviewsDesc')}
-        </p>
-      </div>
-      <Button asChild size="sm" className="gap-2 mt-1">
-        <Link to="/start">
-          <PlayCircle className="h-4 w-4" aria-hidden="true" />
+    <div data-testid="history-empty-state">
+      <GlassCard className="flex flex-col items-center justify-center gap-4 py-20 text-center">
+        <div className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-[rgba(var(--accent-rgb),0.1)] ring-1 ring-[rgba(var(--accent-rgb),0.2)]">
+          <Clock className="h-7 w-7 text-[#60a5fa]" aria-hidden="true" />
+        </div>
+        <div>
+          <p className="text-[15px] font-semibold text-white">{t('history.noInterviewsTitle')}</p>
+          <p className="mt-1 text-[13px] text-[#888b91]">{t('history.noInterviewsDesc')}</p>
+        </div>
+        <Link
+          to="/start"
+          className="inline-flex items-center gap-1.5 rounded-[9999px] bg-white px-4 py-2 text-[13px] font-semibold text-black hover:bg-[#eaeaea] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] mt-1"
+        >
+          <Play className="h-4 w-4" aria-hidden="true" />
           {t('history.startFirstInterview')}
         </Link>
-      </Button>
+      </GlassCard>
     </div>
   );
 }
@@ -98,100 +104,132 @@ function EmptyState() {
 /** Desktop table row */
 function SessionRow({ session }: { session: SessionListItem }) {
   const { t } = useTranslation();
-  const { label, variant } = statusProps(session.status);
+  const { label } = statusProps(session.status);
+  const tone = statusTone(session.status);
   const langKey = LANGUAGE_LABEL_KEYS[session.language];
   const langLabel = langKey ? t(langKey) : session.language.toUpperCase();
+  // Seed the gradient from the session_id charCode so it's stable per session
+  const seed = session.session_id.charCodeAt(0);
 
   return (
-    <TableRow
+    <div
+      className="grid grid-cols-[2fr_1fr_0.8fr_0.8fr_0.6fr_0.5fr] items-center gap-3 border-b border-white/[0.04] px-5 py-3.5 transition-colors last:border-0 hover:bg-white/[0.03]"
       data-testid={`session-row-${session.session_id}`}
-      className="border-border hover:bg-muted/40"
     >
-      <TableCell className="font-medium text-foreground">{session.job_title}</TableCell>
-      <TableCell className="text-muted-foreground text-body-sm tabular-nums">
+      {/* Role */}
+      <div className="flex items-center gap-3 min-w-0">
+        <Avatar
+          initials={initialsOf(session.job_title)}
+          gradient={gradientFor(seed)}
+          size={34}
+        />
+        <div className="min-w-0">
+          <div className="truncate text-[13.5px] font-medium text-white">{session.job_title}</div>
+          <div className="flex items-center gap-1 text-[11.5px] text-[#70757c]">
+            <Globe className="h-3 w-3 shrink-0" aria-hidden="true" />
+            {langLabel}
+          </div>
+        </div>
+      </div>
+
+      {/* Date */}
+      <div className="text-[13px] text-[#b8babf] tabular-nums">
         {formatDate(session.created_at)}
-      </TableCell>
-      <TableCell>
-        <span className="flex items-center gap-1.5 text-body-sm text-muted-foreground">
-          <Globe className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" aria-hidden="true" />
-          {langLabel}
-        </span>
-      </TableCell>
-      <TableCell>
-        <Badge variant={variant} className="text-xs">
-          {label}
-        </Badge>
-      </TableCell>
-      <TableCell>
-        <span className="flex items-center gap-1.5 text-body-sm text-muted-foreground tabular-nums">
-          <Clock className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" aria-hidden="true" />
-          {formatDuration(session.duration_seconds)}
-        </span>
-      </TableCell>
-      <TableCell className="text-right">
+      </div>
+
+      {/* Status */}
+      <div>
+        <StatusTag tone={tone}>{label}</StatusTag>
+      </div>
+
+      {/* Duration */}
+      <div className="flex items-center gap-1.5 text-[13px] text-[#888b91] tabular-nums">
+        <Clock className="h-3.5 w-3.5 shrink-0 text-[#70757c]" aria-hidden="true" />
+        {formatDuration(session.duration_seconds)}
+      </div>
+
+      {/* Score placeholder — session list doesn't carry composite score */}
+      <div className="text-[13px] text-[#70757c]">—</div>
+
+      {/* Scorecard link */}
+      <div className="flex items-center justify-end">
         {session.scorecard_id ? (
-          <Button variant="ghost" size="sm" asChild className="gap-1.5 text-primary hover:text-primary">
-            <Link to={`/scorecard/${session.scorecard_id}`}>
-              {t('history.viewScorecard')}
-              <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
-            </Link>
-          </Button>
+          <Link
+            to={`/scorecard/${session.scorecard_id}`}
+            className="flex items-center gap-1 text-[13px] text-[#60a5fa] transition-colors hover:text-white"
+            aria-label={`View scorecard for ${session.job_title}`}
+          >
+            <span className="hidden lg:inline">{t('history.viewScorecard')}</span>
+            <ArrowRight size={15} aria-hidden="true" />
+          </Link>
         ) : (
-          <span className="text-xs text-muted-foreground">—</span>
+          <span className="text-[12px] text-[#70757c]">—</span>
         )}
-      </TableCell>
-    </TableRow>
+      </div>
+    </div>
   );
 }
 
 /** Mobile card */
 function SessionCard({ session }: { session: SessionListItem }) {
   const { t } = useTranslation();
-  const { label, variant } = statusProps(session.status);
+  const { label } = statusProps(session.status);
+  const tone = statusTone(session.status);
   const langKey = LANGUAGE_LABEL_KEYS[session.language];
   const langLabel = langKey ? t(langKey) : session.language.toUpperCase();
+  const seed = session.session_id.charCodeAt(0);
 
   return (
-    <motion.div variants={fadeUp}>
-      <Card
-        className="rounded-xl transition-shadow hover:shadow-card-hover"
-        data-testid={`session-card-${session.session_id}`}
+    <StaggerItem>
+      <div data-testid={`session-card-${session.session_id}`}>
+      <GlassCard
+        hover
+        className="p-4"
       >
-        <CardContent className="py-4 flex flex-col gap-3">
-          <div className="flex items-start justify-between gap-2">
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <Avatar
+              initials={initialsOf(session.job_title)}
+              gradient={gradientFor(seed)}
+              size={34}
+            />
             <div className="min-w-0">
-              <p className="font-medium text-foreground truncate">{session.job_title}</p>
-              <p className="text-caption text-muted-foreground mt-0.5 tabular-nums">
+              <p className="truncate text-[14px] font-medium text-white">{session.job_title}</p>
+              <p className="mt-0.5 text-[12px] text-[#888b91] tabular-nums">
                 {formatDate(session.created_at)}
               </p>
             </div>
-            <Badge variant={variant} className="text-xs shrink-0">
-              {label}
-            </Badge>
           </div>
+          <StatusTag tone={tone} className="shrink-0">
+            {label}
+          </StatusTag>
+        </div>
 
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-caption text-muted-foreground">
-            <span className="flex items-center gap-1">
-              <Globe className="h-3 w-3 text-muted-foreground/60" aria-hidden="true" />
-              {langLabel}
-            </span>
-            <span className="flex items-center gap-1 tabular-nums">
-              <Clock className="h-3 w-3 text-muted-foreground/60" aria-hidden="true" />
-              {formatDuration(session.duration_seconds)}
-            </span>
+        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-[#888b91]">
+          <span className="flex items-center gap-1">
+            <Globe className="h-3 w-3 text-[#70757c]" aria-hidden="true" />
+            {langLabel}
+          </span>
+          <span className="flex items-center gap-1 tabular-nums">
+            <Clock className="h-3 w-3 text-[#70757c]" aria-hidden="true" />
+            {formatDuration(session.duration_seconds)}
+          </span>
+        </div>
+
+        {session.scorecard_id && (
+          <div className="mt-3">
+            <Link
+              to={`/scorecard/${session.scorecard_id}`}
+              className="inline-flex items-center gap-1.5 rounded-[9999px] border border-white/[0.1] bg-white/[0.04] px-3 py-1.5 text-[12.5px] font-medium text-white hover:bg-white/[0.08] hover:border-white/20 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+            >
+              {t('history.viewScorecard')}
+              <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+            </Link>
           </div>
-
-          {session.scorecard_id && (
-            <Button variant="outline" size="sm" asChild className="gap-1.5 self-start">
-              <Link to={`/scorecard/${session.scorecard_id}`}>
-                {t('history.viewScorecard')}
-                <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
-              </Link>
-            </Button>
-          )}
-        </CardContent>
-      </Card>
-    </motion.div>
+        )}
+      </GlassCard>
+      </div>
+    </StaggerItem>
   );
 }
 
@@ -209,37 +247,45 @@ function PaginationBar({
 }) {
   const { t } = useTranslation();
   return (
-    <div className="flex items-center justify-between pt-2" aria-label="Pagination">
-      <Button
-        variant="outline"
-        size="sm"
+    <div className="flex items-center justify-between pt-4" aria-label="Pagination">
+      <button
+        type="button"
         onClick={onPrev}
         disabled={page <= 1}
-        className="gap-1.5"
+        className={cn(
+          'inline-flex items-center gap-1.5 rounded-[9999px] border border-white/[0.1] bg-transparent px-3.5 py-2 text-[13px] font-medium text-white transition-colors',
+          'hover:bg-white/[0.06] hover:border-white/20',
+          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]',
+          'disabled:cursor-not-allowed disabled:opacity-40',
+        )}
         aria-label={t('history.prevPage')}
       >
         <ChevronLeft className="h-4 w-4" aria-hidden="true" />
         {t('history.prevPage')}
-      </Button>
-      <span className="text-body-sm text-muted-foreground tabular-nums">
+      </button>
+      <span className="text-[13px] text-[#888b91] tabular-nums">
         {t('history.pageOf', { page, total: totalPages })}
       </span>
-      <Button
-        variant="outline"
-        size="sm"
+      <button
+        type="button"
         onClick={onNext}
         disabled={page >= totalPages}
-        className="gap-1.5"
+        className={cn(
+          'inline-flex items-center gap-1.5 rounded-[9999px] border border-white/[0.1] bg-transparent px-3.5 py-2 text-[13px] font-medium text-white transition-colors',
+          'hover:bg-white/[0.06] hover:border-white/20',
+          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]',
+          'disabled:cursor-not-allowed disabled:opacity-40',
+        )}
         aria-label={t('history.nextPage')}
       >
         {t('history.nextPage')}
         <ChevronRight className="h-4 w-4" aria-hidden="true" />
-      </Button>
+      </button>
     </div>
   );
 }
 
-// ── History page ───────────────────────────────────────────────────────────────
+// ── History page ──────────────────────────────────────────────────────────────
 
 export default function History() {
   const { t } = useTranslation();
@@ -264,89 +310,107 @@ export default function History() {
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
 
+  // Compute avg ring from completed sessions as a proxy (SessionListItem has no composite_score).
+  const completedCount = sessions.filter((s) => s.status === 'completed').length;
+  const avgRingScore: number =
+    sessions.length > 0 ? Math.round((completedCount / sessions.length) * 100) : 0;
+
   return (
-    <motion.section
+    <div
       aria-labelledby="history-heading"
-      initial="hidden"
-      animate="visible"
-      variants={stagger}
-      className="space-y-6"
+      className="mx-auto max-w-[1000px] px-6 py-8 lg:px-8"
     >
       {/* Page heading */}
-      <motion.div variants={fadeUp}>
-        <h1 id="history-heading" className="text-heading font-semibold text-foreground">
+      <Reveal>
+        <h1
+          id="history-heading"
+          className="text-[28px] font-semibold tracking-[-1px] text-white"
+        >
           {t('history.pageTitle')}
         </h1>
-        <p className="mt-1 text-body-sm text-muted-foreground">
-          {t('history.pageDesc')}
-        </p>
-      </motion.div>
+        <p className="mt-1 text-[14px] text-[#888b91]">{t('history.pageDesc')}</p>
+      </Reveal>
 
       {/* Content */}
-      <motion.div variants={fadeUp}>
+      <div className="mt-6">
         {isLoading ? (
           <LoadingSkeletons />
         ) : sessions.length === 0 ? (
           <EmptyState />
         ) : (
-          <Card className="shadow-card">
-            <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <CardTitle className="text-body-lg font-semibold text-foreground">{t('history.sessionsTitle')}</CardTitle>
-                  <CardDescription className="mt-0.5 text-muted-foreground">
-                    {t('history.sessionsTotal', { count: total })}
-                  </CardDescription>
+          <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+            {/* Avg-score ring — left panel (design's "featured" GlassCard) */}
+            <Reveal dir="left">
+              <GlassCard
+                feature
+                className="flex h-full flex-col items-center justify-center gap-3 text-center"
+              >
+                <ScoreRing score={avgRingScore} size={120} label="avg" />
+                <div className="text-[13px] text-[#9fb6d6]">
+                  {t('history.sessionsTotal', { count: total })}
                 </div>
-              </div>
-            </CardHeader>
-            <CardContent className="p-0">
-              {/* Desktop table */}
-              <div className="hidden md:block overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="border-border hover:bg-transparent">
-                      <TableHead className="text-muted-foreground text-xs uppercase tracking-wide">{t('history.columnRole')}</TableHead>
-                      <TableHead className="text-muted-foreground text-xs uppercase tracking-wide">{t('history.columnDate')}</TableHead>
-                      <TableHead className="text-muted-foreground text-xs uppercase tracking-wide">{t('history.columnLanguage')}</TableHead>
-                      <TableHead className="text-muted-foreground text-xs uppercase tracking-wide">{t('history.columnStatus')}</TableHead>
-                      <TableHead className="text-muted-foreground text-xs uppercase tracking-wide">{t('history.columnDuration')}</TableHead>
-                      <TableHead className="text-right text-muted-foreground text-xs uppercase tracking-wide">{t('history.columnScorecard')}</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
+                <div className="mt-1 text-[12px] text-[#70757c]">
+                  {t('history.sessionsTitle')}
+                </div>
+              </GlassCard>
+            </Reveal>
+
+            {/* Table / card list — right panel */}
+            <div className="md:col-span-2">
+              <Reveal dir="right">
+                {/* Desktop table */}
+                <div className="hidden md:block">
+                  <GlassCard className="overflow-hidden p-0">
+                    {/* Table header */}
+                    <div className="grid grid-cols-[2fr_1fr_0.8fr_0.8fr_0.6fr_0.5fr] gap-3 border-b border-white/[0.06] px-5 py-3.5 text-[11.5px] uppercase tracking-[0.5px] text-[#70757c]">
+                      <div>{t('history.columnRole')}</div>
+                      <div>{t('history.columnDate')}</div>
+                      <div>{t('history.columnStatus')}</div>
+                      <div>{t('history.columnDuration')}</div>
+                      <div>{t('history.columnScorecard')}</div>
+                      <div />
+                    </div>
+
+                    {/* Rows */}
                     {sessions.map((session) => (
                       <SessionRow key={session.session_id} session={session} />
                     ))}
-                  </TableBody>
-                </Table>
-              </div>
 
-              {/* Mobile card list */}
-              <div
-                className={cn('md:hidden space-y-3 p-4', sessions.length > 0 && 'pt-0')}
-                aria-label="Interview session list"
-              >
-                {sessions.map((session) => (
-                  <SessionCard key={session.session_id} session={session} />
-                ))}
-              </div>
-            </CardContent>
+                    {/* Pagination inside the card */}
+                    {totalPages > 1 && (
+                      <div className="px-5 pb-4">
+                        <PaginationBar
+                          page={page}
+                          totalPages={totalPages}
+                          onPrev={() => setPage((p) => Math.max(1, p - 1))}
+                          onNext={() => setPage((p) => Math.min(totalPages, p + 1))}
+                        />
+                      </div>
+                    )}
+                  </GlassCard>
+                </div>
 
-            {/* Pagination */}
-            {totalPages > 1 && (
-              <div className="px-6 pb-5">
-                <PaginationBar
-                  page={page}
-                  totalPages={totalPages}
-                  onPrev={() => setPage((p) => Math.max(1, p - 1))}
-                  onNext={() => setPage((p) => Math.min(totalPages, p + 1))}
-                />
-              </div>
-            )}
-          </Card>
+                {/* Mobile card list */}
+                <Stagger
+                  className={cn('md:hidden space-y-3')}
+                >
+                  {sessions.map((session) => (
+                    <SessionCard key={session.session_id} session={session} />
+                  ))}
+                  {totalPages > 1 && (
+                    <PaginationBar
+                      page={page}
+                      totalPages={totalPages}
+                      onPrev={() => setPage((p) => Math.max(1, p - 1))}
+                      onNext={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    />
+                  )}
+                </Stagger>
+              </Reveal>
+            </div>
+          </div>
         )}
-      </motion.div>
-    </motion.section>
+      </div>
+    </div>
   );
 }

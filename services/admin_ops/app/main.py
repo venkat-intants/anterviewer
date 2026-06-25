@@ -34,6 +34,7 @@ from fastapi import APIRouter  # noqa: E402
 
 from app.routers.analytics import router as analytics_router  # noqa: E402
 from app.routers.erasure import router as erasure_router  # noqa: E402
+from app.routers.system import router as system_router  # noqa: E402
 
 admin_router = APIRouter(prefix="/admin", dependencies=[Depends(verify_admin_role)])
 
@@ -74,6 +75,7 @@ app.include_router(health_router)
 app.include_router(admin_router)
 app.include_router(erasure_router)
 app.include_router(analytics_router)
+app.include_router(system_router)
 
 
 @app.get("/")

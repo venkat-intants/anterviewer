@@ -66,13 +66,15 @@ export default {
         input: 'hsl(var(--input))',
         ring: 'hsl(var(--ring))',
 
-        // ── Superwhisper palette (literal hex) ──────────────────────────────
-        // Brand accents — chromatic colour is rationed; electric blue is THE
-        // signal, lavender belongs to the aurora gradient.
-        'electric-signal': '#0088ff',
-        electric: '#0088ff',
-        'lavender-mist': '#b855e7',
-        lavender: '#b855e7',
+        // ── Superwhisper palette ────────────────────────────────────────────
+        // Brand accents — chromatic colour is rationed; electric is THE signal,
+        // lavender is the aurora gradient partner. Both are wired to the
+        // themeable accent CSS vars (see index.css + the header theme toggle),
+        // so `bg-electric-signal/30`, `text-lavender`, etc. recolour per theme.
+        'electric-signal': 'rgb(var(--accent-rgb-sp) / <alpha-value>)',
+        electric: 'rgb(var(--accent-rgb-sp) / <alpha-value>)',
+        'lavender-mist': 'rgb(var(--accent-2-rgb-sp) / <alpha-value>)',
+        lavender: 'rgb(var(--accent-2-rgb-sp) / <alpha-value>)',
         'sky-wash': '#60a5fa',
         ember: '#e6714f',
         'amber-glow': '#ffb764',
@@ -94,6 +96,12 @@ export default {
         bone: '#e5e7eb',
         'deep-navy': '#001b33',
         'midnight-indigo': '#030719',
+        // Bare aliases the anterview-ui landing design references directly
+        // (sit alongside the -wash / -pulse / -glow / -static variants above).
+        sky: '#60a5fa',
+        forest: '#27c93f',
+        amber: '#ffb764',
+        pink: '#dd55e7',
 
         // ── Cluely light-theme palette (scoped to the marketing landing page) ──
         // A namespaced set so it never collides with the dark app tokens above.
@@ -118,6 +126,16 @@ export default {
         },
       },
 
+      // Fractional spacing steps the anterview-ui landing design uses
+      // (py-15, p-6.5, px-5.5, mt-5.5, gap-4.5, …).
+      spacing: {
+        '4.5': '1.125rem',
+        '5.5': '1.375rem',
+        '6.5': '1.625rem',
+        '7.5': '1.875rem',
+        '15': '3.75rem',
+      },
+
       backgroundImage: {
         // The single defining atmosphere of the brand.
         aurora:
@@ -134,7 +152,11 @@ export default {
 
       fontFamily: {
         sans: ['"SF Pro Text"', '-apple-system', 'BlinkMacSystemFont', 'Inter', 'system-ui', 'Segoe UI', 'Roboto', 'sans-serif'],
-        mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
+        // anterview-ui landing uses font-inter explicitly; mono now prefers
+        // JetBrains Mono (loaded via landing/styles/anterview.css) for the
+        // landing's "REC · 1.8s latency" / step-number / scorecard mono text.
+        inter: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
         flow: ['Inter Tight', 'Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
         // Cluely landing — Geist (all UI) + EB Garamond (the one serif display).
         geist: ['Geist', 'Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
@@ -167,6 +189,10 @@ export default {
         lg: 'var(--radius)',
         md: 'calc(var(--radius) - 2px)',
         sm: 'calc(var(--radius) - 4px)',
+        // anterview-ui landing radii
+        card: '24px',
+        pill: '9999px',
+        'sm-card': '12px',
       },
 
       boxShadow: {
@@ -193,6 +219,15 @@ export default {
         // Highlighted card glow (lavender-blue).
         'cluely-glow':
           '20px 20px 24px 0 rgba(148,172,243,0.4), inset -3px -3px 4px 0 rgba(191,229,251,0.4), inset 4px 4px 4px 0 rgba(19,26,228,0.1)',
+
+        // ── Futuristic glow elevation (Wave 1 redesign) ──────────────────────
+        // Ring-tinted glows for primary actions and "live"/focus surfaces.
+        glow: '0 0 0 1px hsl(var(--ring) / 0.18), 0 8px 30px -8px hsl(var(--ring) / 0.45)',
+        'glow-lg': '0 0 0 1px hsl(var(--ring) / 0.22), 0 16px 50px -10px hsl(var(--ring) / 0.55)',
+        'glow-soft': '0 10px 40px -12px hsl(var(--ring) / 0.35)',
+        // Floating elevated panel that works on the light Fog canvas.
+        float: '0 1px 2px rgb(29 29 31 / 0.04), 0 12px 32px -12px rgb(29 29 31 / 0.18)',
+        'float-lg': '0 1px 2px rgb(29 29 31 / 0.04), 0 24px 60px -16px rgb(29 29 31 / 0.24)',
       },
 
       keyframes: {
@@ -203,6 +238,44 @@ export default {
         'accordion-up': {
           from: { height: 'var(--radix-accordion-content-height)' },
           to: { height: '0' },
+        },
+        // ── Futuristic motion system (Wave 1 redesign) ───────────────────────
+        'fade-up': {
+          from: { opacity: '0', transform: 'translateY(14px)' },
+          to: { opacity: '1', transform: 'translateY(0)' },
+        },
+        'fade-in': {
+          from: { opacity: '0' },
+          to: { opacity: '1' },
+        },
+        'scale-in': {
+          from: { opacity: '0', transform: 'scale(0.96)' },
+          to: { opacity: '1', transform: 'scale(1)' },
+        },
+        shimmer: {
+          '0%': { backgroundPosition: '-200% 0' },
+          '100%': { backgroundPosition: '200% 0' },
+        },
+        'glow-pulse': {
+          '0%, 100%': { opacity: '0.5' },
+          '50%': { opacity: '1' },
+        },
+        'gradient-pan': {
+          '0%, 100%': { backgroundPosition: '0% 50%' },
+          '50%': { backgroundPosition: '100% 50%' },
+        },
+        'float-soft': {
+          '0%, 100%': { transform: 'translateY(0)' },
+          '50%': { transform: 'translateY(-8px)' },
+        },
+        blob: {
+          '0%, 100%': { transform: 'translate(0, 0) scale(1)' },
+          '33%': { transform: 'translate(28px, -34px) scale(1.12)' },
+          '66%': { transform: 'translate(-22px, 18px) scale(0.94)' },
+        },
+        'border-flow': {
+          '0%, 100%': { backgroundPosition: '0% 50%' },
+          '50%': { backgroundPosition: '100% 50%' },
         },
       },
 
@@ -217,6 +290,17 @@ export default {
         'voice-bar': 'voice-bar 1.4s ease-in-out infinite',
         // Cluely landing — slow buoyant float for the floating product mockup.
         'cluely-float': 'cluely-float 9s ease-in-out infinite',
+        // ── Futuristic motion system (Wave 1 redesign) ───────────────────────
+        'fade-up': 'fade-up 0.6s cubic-bezier(0.22, 1, 0.36, 1) both',
+        'fade-in': 'fade-in 0.5s ease both',
+        'scale-in': 'scale-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) both',
+        shimmer: 'shimmer 2.2s linear infinite',
+        'glow-pulse': 'glow-pulse 3s ease-in-out infinite',
+        'gradient-pan': 'gradient-pan 6s ease infinite',
+        'float-soft': 'float-soft 6s ease-in-out infinite',
+        'spin-slow': 'spin 16s linear infinite',
+        blob: 'blob 20s ease-in-out infinite',
+        'border-flow': 'border-flow 4s ease infinite',
       },
     },
   },

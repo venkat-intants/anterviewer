@@ -1,10 +1,12 @@
-// LanguageSwitcher — compact EN / हिंदी / తెలుగు toggle in the app header.
+// LanguageSwitcher — EN / हिंदी / తెలుగు picker in the app header.
 // Calls i18n.changeLanguage(); persistence is handled in lib/i18n.ts via the
 // 'languageChanged' event → localStorage write.
-// Rendered inside TopBar (AppShell) — visible on all pages including admin,
-// but admin text stays English regardless (admin UI is EN-only by design).
+// Rendered inside TopBar (AppShell) — visible on all pages.
+// Visual: Globe icon button + floating dropdown, matching the dark shell design.
 
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Globe, ChevronDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const LANGUAGES = [
@@ -18,33 +20,69 @@ type LangCode = (typeof LANGUAGES)[number]['code'];
 export default function LanguageSwitcher() {
   const { i18n, t } = useTranslation();
   const current = i18n.language as LangCode;
+  const [open, setOpen] = useState(false);
+
+  const currentLabel =
+    LANGUAGES.find(
+      ({ code }) => current === code || (code === 'en' && !(['hi', 'te'] as string[]).includes(current)),
+    )?.label ?? 'EN';
 
   return (
-    <div
-      role="group"
-      aria-label={t('lang.label')}
-      className="hidden sm:flex items-center rounded-full border border-border bg-secondary p-0.5 gap-0.5"
-    >
-      {LANGUAGES.map(({ code, label }) => {
-        const isActive = current === code || (code === 'en' && !['hi', 'te'].includes(current));
-        return (
-          <button
-            key={code}
-            type="button"
-            onClick={() => void i18n.changeLanguage(code)}
-            aria-label={t(`lang.${code}`)}
-            aria-pressed={isActive}
-            className={cn(
-              'rounded-full px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-              isActive
-                ? 'bg-white text-foreground shadow-sm'
-                : 'text-muted-foreground hover:text-foreground',
-            )}
+    <div role="group" aria-label={t('lang.label')} className="relative hidden sm:block">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={t('lang.label')}
+        className="flex items-center gap-1.5 rounded-[10px] border border-white/[0.1] bg-white/[0.04] px-3 py-2 text-[13px] text-[#b8babf] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] transition-colors"
+      >
+        <Globe size={15} aria-hidden="true" />
+        <span>{currentLabel}</span>
+        <ChevronDown size={13} aria-hidden="true" />
+      </button>
+
+      {open && (
+        <>
+          {/* Backdrop to dismiss */}
+          <div
+            className="fixed inset-0 z-30"
+            aria-hidden="true"
+            onClick={() => setOpen(false)}
+          />
+          <div
+            role="menu"
+            className="absolute right-0 top-[calc(100%+8px)] z-40 w-32 overflow-hidden rounded-[12px] border border-white/[0.1] bg-[#0f0f10] p-1 shadow-2xl"
           >
-            {label}
-          </button>
-        );
-      })}
+            {LANGUAGES.map(({ code, label }) => {
+              const isActive =
+                current === code ||
+                (code === 'en' && !(['hi', 'te'] as string[]).includes(current));
+              return (
+                <button
+                  key={code}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={isActive}
+                  aria-label={t(`lang.${code}`)}
+                  onClick={() => {
+                    void i18n.changeLanguage(code);
+                    setOpen(false);
+                  }}
+                  className={cn(
+                    'flex w-full items-center rounded-[8px] px-3 py-2 text-left text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] transition-colors',
+                    isActive
+                      ? 'bg-white/[0.06] text-white'
+                      : 'text-[#b8babf] hover:bg-white/[0.04] hover:text-white',
+                  )}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
     </div>
   );
 }

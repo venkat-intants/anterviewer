@@ -13,13 +13,13 @@ const badgeVariants = cva(
         secondary:
           "border-transparent bg-secondary text-secondary-foreground",
         destructive:
-          "border-transparent bg-rose-50 text-rose-700",
+          "border-transparent bg-rose-500/15 text-rose-400",
         outline: "border-border text-foreground",
         // Soft tinted status pills (readable on light surfaces) — used by the
         // scorecard score bands, HR pipeline stages, exam pass/fail, etc.
-        success: "border-transparent bg-emerald-50 text-emerald-700",
-        accent: "border-transparent bg-blue-50 text-blue-700",
-        warning: "border-transparent bg-amber-50 text-amber-700",
+        success: "border-transparent bg-emerald-500/15 text-emerald-400",
+        accent: "border-transparent bg-blue-500/15 text-blue-400",
+        warning: "border-transparent bg-amber-500/15 text-amber-400",
       },
     },
     defaultVariants: {

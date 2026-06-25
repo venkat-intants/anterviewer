@@ -1,12 +1,13 @@
 // NotFound — 404 page rendered for any unmatched route.
-// Unauthenticated users get a link to /login; authenticated users get /dashboard.
+// Design: branded gradient 404 + aurora background.
+// Unauthenticated users get a link to /; authenticated users get /dashboard.
 
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { motion } from 'framer-motion';
-import { SearchX } from 'lucide-react';
+import { AuroraField } from '@/design/components/AuroraField';
+import { Pill } from '@/design/components/primitives';
+import { Home, ArrowLeft } from '@/design/components/icons';
 import { useAuth } from '@/context/AuthContext';
-import { Button } from '@/components/ui/button';
 
 export default function NotFound() {
   const { t } = useTranslation();
@@ -15,44 +16,32 @@ export default function NotFound() {
 
   return (
     <main
-      className="min-h-screen flex items-center justify-center bg-background px-4"
+      className="relative flex min-h-screen flex-col items-center justify-center bg-black px-6 text-center font-sans text-white"
       aria-labelledby="not-found-heading"
     >
-      <div className="max-w-md w-full text-center space-y-8">
-        <motion.div
-          initial={{ opacity: 0, scale: 0.8 }}
-          animate={{ opacity: 1, scale: 1 }}
-          transition={{ type: 'spring', stiffness: 300, damping: 24 }}
-          className="mx-auto flex h-20 w-20 items-center justify-center rounded-xl bg-primary/10 shadow-card"
-        >
-          <SearchX className="h-10 w-10 text-primary" aria-hidden="true" />
-        </motion.div>
-
-        <motion.div
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.1 }}
-          className="space-y-3"
-        >
-          <p className="text-display font-semibold text-foreground/[0.08] select-none">404</p>
-          <h1
-            id="not-found-heading"
-            className="text-heading font-semibold text-foreground"
-          >
-            {t('error.pageNotFoundTitle')}
-          </h1>
-          <p className="text-body-sm text-muted-foreground">{t('error.pageNotFoundDesc')}</p>
-        </motion.div>
-
-        <motion.div
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.2 }}
-        >
-          <Button asChild>
-            <Link to={homePath}>{t('error.goHome')}</Link>
-          </Button>
-        </motion.div>
+      <AuroraField />
+      <div className="relative z-10 flex flex-col items-center">
+        <div className="bg-[linear-gradient(160deg,#fff,#a887dc,#e6c4e7)] bg-clip-text text-[120px] font-semibold leading-none tracking-[-4px] text-transparent select-none">
+          404
+        </div>
+        <h1 id="not-found-heading" className="mt-4 text-[24px] font-semibold tracking-[-0.6px]">
+          {t('error.pageNotFoundTitle')}
+        </h1>
+        <p className="mt-2 max-w-sm text-[14px] text-[#888b91]">{t('error.pageNotFoundDesc')}</p>
+        <div className="mt-8 flex items-center gap-3">
+          <Link to={homePath}>
+            <Pill className="px-5 py-3">
+              <Home size={16} aria-hidden="true" /> {t('error.goHome')}
+            </Pill>
+          </Link>
+          {!isAuthenticated && (
+            <Link to="/login">
+              <Pill variant="ghost" className="px-5 py-3">
+                <ArrowLeft size={16} aria-hidden="true" /> {t('nav.login', 'Sign in')}
+              </Pill>
+            </Link>
+          )}
+        </div>
       </div>
     </main>
   );
