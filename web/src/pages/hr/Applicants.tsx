@@ -5,6 +5,7 @@
 //           real ats_breakdown/strengths/concerns in the detail drawer.
 
 import { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -133,29 +134,43 @@ function ApplicantDrawer({
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
+  // Lock background scroll while the panel is open (restored on close).
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, []);
+
   if (!a) return null;
 
   const seed = seedFrom(a.full_name);
   const atsDisplay = a.ats_overall ?? null;
   const rec = recInfo(a.ats_recommendation);
 
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/65 p-4 backdrop-blur-sm sm:items-center"
+  return createPortal(
+    <motion.div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4 backdrop-blur-xl"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
       onClick={onClose}
     >
-      <div
-        className="relative my-auto w-full max-w-[880px] max-h-[90vh] overflow-y-auto rounded-[20px] border border-white/10 bg-[#0a0b0d] p-7 shadow-[0_24px_80px_rgba(0,0,0,0.65)]"
-        style={{ animation: 'av-modal-in 0.22s cubic-bezier(.2,.7,.2,1)' }}
+      <motion.div
+        className="relative flex max-h-[90vh] w-full max-w-[1040px] flex-col overflow-hidden rounded-[24px] border border-white/10 bg-[#0a0b0d] shadow-[0_30px_90px_rgba(0,0,0,0.65)]"
+        initial={{ opacity: 0, scale: 0.96, y: 12 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.97, y: 8 }}
+        transition={{ type: 'spring', stiffness: 320, damping: 32, mass: 0.85 }}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
         aria-label={`${a.full_name} applicant details`}
       >
-        <style>{`@keyframes av-modal-in{from{opacity:0;transform:translateY(10px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}`}</style>
-
-        {/* Header */}
-        <div className="flex items-center justify-between">
+        {/* Header — pinned */}
+        <div className="flex shrink-0 items-center justify-between border-b border-white/[0.07] px-7 py-5">
           <span className="text-[12px] uppercase tracking-[1px] text-[#70757c]">Candidate</span>
           <button
             onClick={onClose}
@@ -166,8 +181,10 @@ function ApplicantDrawer({
           </button>
         </div>
 
-        {/* Body — wide landscape layout: two columns side by side */}
-        <div className="mt-6 grid gap-x-8 gap-y-6 md:grid-cols-2">
+        {/* Body — sizes to content; scrolls only as a safety net on very short screens */}
+        <div className="min-h-0 flex-1 overflow-y-auto px-7 py-6">
+        {/* Wide landscape layout: two columns side by side */}
+        <div className="grid gap-x-8 gap-y-6 md:grid-cols-2">
           {/* LEFT column — identity, score/status, role, summary */}
           <div className="space-y-5">
             {/* Identity */}
@@ -288,15 +305,30 @@ function ApplicantDrawer({
             )}
           </div>
         </div>
+        </div>
 
-        {/* Actions */}
-        <div className="mt-7 flex flex-wrap gap-2.5">
+        {/* Actions — grouped on the right of the card */}
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2.5 border-t border-white/[0.07] px-7 py-5">
+          <Pill
+            variant="outline"
+            onClick={() => onRescore(a.id)}
+            disabled={rescorePending}
+            aria-label="Re-score"
+            className="gap-1.5"
+          >
+            <RefreshCw
+              size={14}
+              className={cn(rescorePending && 'animate-spin')}
+              aria-hidden="true"
+            />
+            Re-score
+          </Pill>
           <Pill
             variant="ghost"
             onClick={() => onShortlist(a.id)}
             disabled={statusPending || a.status === 'shortlisted'}
             aria-label="Shortlist"
-            className="flex-1 gap-1.5"
+            className="gap-1.5"
           >
             <CheckCircle2 size={15} aria-hidden="true" />
             Shortlist
@@ -306,28 +338,15 @@ function ApplicantDrawer({
             onClick={() => onReject(a.id)}
             disabled={statusPending || a.status === 'rejected'}
             aria-label="Reject"
-            className="flex-1 gap-1.5"
+            className="gap-1.5"
           >
             <XCircle size={15} aria-hidden="true" />
             Reject
           </Pill>
-          <Pill
-            variant="outline"
-            onClick={() => onRescore(a.id)}
-            disabled={rescorePending}
-            aria-label="Re-score"
-            className="w-full gap-1.5"
-          >
-            <RefreshCw
-              size={14}
-              className={cn(rescorePending && 'animate-spin')}
-              aria-hidden="true"
-            />
-            Re-score
-          </Pill>
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>,
+    document.body,
   );
 }
 
@@ -821,6 +840,7 @@ export default function Applicants() {
       <AnimatePresence>
         {selected && (
           <ApplicantDrawer
+            key={selected.id}
             applicant={selected}
             onClose={() => setSelected(null)}
             onShortlist={(id) => statusMut.mutate({ id, status: 'shortlisted' })}
