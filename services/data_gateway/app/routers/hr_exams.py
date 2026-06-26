@@ -19,17 +19,20 @@ SECURITY:
 
 from __future__ import annotations
 
+import csv
+import io
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, HTTPException, Query, Response, status
-from pydantic import BaseModel, Field, field_validator, model_validator
+from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile, status
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.exam_ai_client import ExamGenerationError, generate_exam_questions_remote
 from app.exam_grading import GradeInput, GradeQuestion, grade_breakdown
 from app.exam_link import hash_exam_token, mint_exam_token
 from app.models import Applicant, Exam, ExamAssignment, ExamAttempt, ExamQuestion
@@ -111,6 +114,61 @@ class QuestionUpdateIn(BaseModel):
 
 class ReorderIn(BaseModel):
     question_ids: list[uuid.UUID] = Field(min_length=1)
+
+
+class BulkQuestionsIn(BaseModel):
+    """Insert many questions at once (used by AI-generate 'add all' + Excel import)."""
+
+    questions: list[QuestionIn] = Field(min_length=1, max_length=200)
+
+
+class GenerateQuestionsIn(BaseModel):
+    """Ask Gemini (via feedback_billing) to draft MCQs — returned for preview, NOT saved."""
+
+    topic: str = Field(min_length=1, max_length=300)
+    num_questions: int = Field(default=5, ge=1, le=30)
+    difficulty: str = Field(default="medium")
+    language: str = Field(default="en")
+
+    @field_validator("difficulty")
+    @classmethod
+    def _validate_difficulty(cls, v: str) -> str:
+        v = (v or "medium").lower()
+        if v not in {"easy", "medium", "hard", "mixed"}:
+            raise ValueError("difficulty must be easy | medium | hard | mixed")
+        return v
+
+    @field_validator("language")
+    @classmethod
+    def _validate_language(cls, v: str) -> str:
+        v = (v or "en").lower()
+        if v not in {"en", "hi", "te"}:
+            raise ValueError("language must be en | hi | te")
+        return v
+
+
+class GeneratedQuestionOut(BaseModel):
+    """A drafted question — no id/position (it isn't persisted until HR adds it)."""
+
+    prompt: str
+    options: list[str]
+    correct_index: int
+    points: int = 1
+
+
+class GenerateQuestionsOut(BaseModel):
+    questions: list[GeneratedQuestionOut]
+
+
+class ImportRowError(BaseModel):
+    row: int
+    message: str
+
+
+class ImportQuestionsOut(BaseModel):
+    added: int
+    errors: list[ImportRowError]
+    questions: list[QuestionOut]
 
 
 class AssignIn(BaseModel):
@@ -275,6 +333,146 @@ def _question_out(q: ExamQuestion) -> QuestionOut:
         points=q.points,
         position=q.position,
     )
+
+
+async def _bulk_insert_questions(
+    db: AsyncSession,
+    company_id: uuid.UUID,
+    exam_id: uuid.UUID,
+    items: list[QuestionIn],
+) -> list[ExamQuestion]:
+    """Append many already-validated questions at sequential positions. Caller must
+    have checked ownership + the attempt-lock first."""
+    max_pos = await db.scalar(
+        select(func.max(ExamQuestion.position)).where(
+            ExamQuestion.exam_id == exam_id, ExamQuestion.deleted_at.is_(None)
+        )
+    )
+    next_pos = (int(max_pos) + 1) if max_pos is not None else 0
+    now = datetime.now(tz=UTC)
+    created: list[ExamQuestion] = []
+    for offset, item in enumerate(items):
+        q = ExamQuestion(
+            id=uuid.uuid4(),
+            exam_id=exam_id,
+            company_id=company_id,
+            prompt=item.prompt.strip(),
+            options=item.options,
+            correct_index=item.correct_index,
+            points=item.points,
+            position=next_pos + offset,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(q)
+        created.append(q)
+    await db.commit()
+    return created
+
+
+# --- Spreadsheet (Excel / CSV) bulk-import helpers --------------------------
+# Template layout (one row per question, header in row 1):
+#   Question | Option A | Option B | Option C | Option D | Correct | Points
+# "Correct" names the right option by letter (A-D), number (1-4), or its text.
+_TEMPLATE_HEADER: list[str] = [
+    "Question", "Option A", "Option B", "Option C", "Option D", "Correct", "Points"
+]
+_MAX_IMPORT_BYTES: int = 2_000_000  # 2 MB upload cap (DoS guard)
+
+
+def _correct_to_index(raw: str, options: list[str]) -> int:
+    """Resolve the 'Correct' cell to a 0-based option index. Raises ValueError."""
+    s = (raw or "").strip()
+    if not s:
+        raise ValueError("missing correct answer")
+    if len(s) == 1 and s.isalpha():  # 'A'..'D'
+        idx = ord(s.upper()) - ord("A")
+        if 0 <= idx < len(options):
+            return idx
+        raise ValueError(f"correct '{s}' is out of range for {len(options)} options")
+    if s.isdigit():  # '1'..'4'
+        idx = int(s) - 1
+        if 0 <= idx < len(options):
+            return idx
+        raise ValueError(f"correct '{s}' is out of range for {len(options)} options")
+    for i, o in enumerate(options):  # literal option text
+        if o.strip().casefold() == s.casefold():
+            return i
+    raise ValueError(f"correct answer '{s}' matches no option")
+
+
+def _read_spreadsheet(filename: str, content: bytes) -> list[list[str]]:
+    """Read an uploaded .xlsx or .csv into a list of string rows."""
+    name = (filename or "").lower()
+    if name.endswith(".csv"):
+        text = content.decode("utf-8-sig", errors="replace")
+        return [[(c or "") for c in row] for row in csv.reader(io.StringIO(text))]
+    try:
+        import openpyxl  # lazy: only needed for the Excel path
+    except ImportError as exc:  # pragma: no cover - dep is in requirements
+        raise HTTPException(
+            status_code=500, detail="Excel support is not installed on the server."
+        ) from exc
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    except Exception as exc:  # noqa: BLE001 - openpyxl raises many types on bad files
+        raise HTTPException(
+            status_code=400, detail="Could not read that file — is it a valid .xlsx or .csv?"
+        ) from exc
+    ws = wb.active
+    rows: list[list[str]] = []
+    if ws is not None:
+        for row in ws.iter_rows(values_only=True):
+            rows.append(["" if c is None else str(c) for c in row])
+    wb.close()
+    return rows
+
+
+def _parse_question_rows(
+    rows: list[list[str]],
+) -> tuple[list[QuestionIn], list[ImportRowError]]:
+    """Parse spreadsheet rows into QuestionIn objects + a per-row error list."""
+    items: list[QuestionIn] = []
+    errors: list[ImportRowError] = []
+    start = 0
+    if rows and rows[0] and "question" in (rows[0][0] or "").strip().casefold():
+        start = 1  # skip the header row
+    for i in range(start, len(rows)):
+        rownum = i + 1  # 1-based for human-facing messages
+        cells = [(c or "").strip() for c in rows[i]]
+        if not any(cells):
+            continue  # blank line — skip silently
+        prompt = cells[0] if cells else ""
+        options = [cells[j] for j in range(1, 5) if j < len(cells) and cells[j]]
+        correct_raw = cells[5] if len(cells) > 5 else ""
+        points_raw = cells[6] if len(cells) > 6 else ""
+        if not prompt:
+            errors.append(ImportRowError(row=rownum, message="missing question text"))
+            continue
+        if len(options) < 2:
+            errors.append(ImportRowError(row=rownum, message="need at least 2 options"))
+            continue
+        try:
+            correct_index = _correct_to_index(correct_raw, options)
+        except ValueError as exc:
+            errors.append(ImportRowError(row=rownum, message=str(exc)))
+            continue
+        points = 1
+        if points_raw:
+            try:
+                points = max(1, min(100, int(float(points_raw))))
+            except ValueError:
+                points = 1
+        try:
+            items.append(
+                QuestionIn(
+                    prompt=prompt, options=options, correct_index=correct_index, points=points
+                )
+            )
+        except ValidationError as exc:
+            msg = str((exc.errors() or [{}])[0].get("msg", "invalid question"))
+            errors.append(ImportRowError(row=rownum, message=msg))
+    return items, errors
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +681,153 @@ async def reorder_questions(
         by_id[qid].updated_at = now
     await db.commit()
     return [_question_out(by_id[qid]) for qid in body.question_ids]
+
+
+# ---------------------------------------------------------------------------
+# Bulk add / AI generate / Excel import (locked once attempts exist)
+# ---------------------------------------------------------------------------
+@router.post(
+    "/exams/{exam_id}/questions/bulk",
+    status_code=status.HTTP_201_CREATED,
+    response_model=list[QuestionOut],
+)
+async def bulk_add_questions(
+    exam_id: uuid.UUID, body: BulkQuestionsIn, ctx: HrCtxDep, db: DbSessionDep
+) -> list[QuestionOut]:
+    """Append many questions at once (AI-generate 'add all', or a reviewed import)."""
+    _hr_uid, company_id = ctx
+    await _get_owned_exam(db, company_id, exam_id)
+    await _require_no_attempts(db, company_id, exam_id)
+    created = await _bulk_insert_questions(db, company_id, exam_id, body.questions)
+    log.info(
+        "hr.exam.questions.bulk_added",
+        exam_id=str(exam_id), company_id=str(company_id), count=len(created),
+    )
+    return [_question_out(q) for q in created]
+
+
+@router.post("/exams/{exam_id}/questions/generate", response_model=GenerateQuestionsOut)
+async def generate_questions(
+    exam_id: uuid.UUID, body: GenerateQuestionsIn, ctx: HrCtxDep, db: DbSessionDep
+) -> GenerateQuestionsOut:
+    """Draft MCQs with Gemini (via feedback_billing). Returned for PREVIEW — not saved.
+    HR reviews them, then persists the wanted ones via the bulk endpoint."""
+    hr_uid, company_id = ctx
+    await _get_owned_exam(db, company_id, exam_id)
+
+    try:
+        raw = await generate_exam_questions_remote(
+            topic=body.topic,
+            num_questions=body.num_questions,
+            difficulty=body.difficulty,
+            language=body.language,
+            acting_user_id=str(hr_uid),
+        )
+    except ExamGenerationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=f"AI generation failed: {exc}"
+        ) from exc
+
+    out: list[GeneratedQuestionOut] = []
+    for q in raw:
+        opts = [str(o) for o in (q.get("options") or [])]
+        try:
+            ci = int(q.get("correct_index", 0))
+        except (TypeError, ValueError):
+            continue
+        prompt = str(q.get("prompt") or "").strip()
+        if prompt and opts and 0 <= ci < len(opts):
+            out.append(
+                GeneratedQuestionOut(prompt=prompt, options=opts, correct_index=ci, points=1)
+            )
+    if not out:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The AI returned no usable questions. Try again or refine the topic.",
+        )
+    log.info(
+        "hr.exam.questions.generated",
+        exam_id=str(exam_id), company_id=str(company_id), count=len(out),
+    )
+    return GenerateQuestionsOut(questions=out)
+
+
+@router.post(
+    "/exams/{exam_id}/questions/import",
+    status_code=status.HTTP_201_CREATED,
+    response_model=ImportQuestionsOut,
+)
+async def import_questions(
+    exam_id: uuid.UUID,
+    ctx: HrCtxDep,
+    db: DbSessionDep,
+    file: Annotated[UploadFile, File(description=".xlsx or .csv in the template layout")],
+) -> ImportQuestionsOut:
+    """Bulk-import questions from an uploaded Excel/CSV in the template layout.
+
+    Valid rows are inserted; malformed rows are reported (partial success).
+    """
+    _hr_uid, company_id = ctx
+    await _get_owned_exam(db, company_id, exam_id)
+    await _require_no_attempts(db, company_id, exam_id)
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    if len(content) > _MAX_IMPORT_BYTES:
+        raise HTTPException(status_code=413, detail="File too large (max 2 MB).")
+
+    rows = _read_spreadsheet(file.filename or "", content)
+    items, errors = _parse_question_rows(rows)
+    if not items and not errors:
+        raise HTTPException(
+            status_code=400, detail="No question rows found. Use the template layout."
+        )
+    created = (
+        await _bulk_insert_questions(db, company_id, exam_id, items) if items else []
+    )
+    log.info(
+        "hr.exam.questions.imported",
+        exam_id=str(exam_id), company_id=str(company_id),
+        added=len(created), errors=len(errors),
+    )
+    return ImportQuestionsOut(
+        added=len(created),
+        errors=errors,
+        questions=[_question_out(q) for q in created],
+    )
+
+
+@router.get("/exam-question-template")
+async def download_question_template(ctx: HrCtxDep) -> Response:
+    """Download the .xlsx bulk-upload template (header + two example rows).
+
+    Distinct top-level path (NOT /exams/...) so it never collides with the
+    /exams/{exam_id} UUID route.
+    """
+    try:
+        import openpyxl  # lazy import — only this route needs it
+    except ImportError as exc:  # pragma: no cover - dep is in requirements
+        raise HTTPException(
+            status_code=500, detail="Excel support is not installed on the server."
+        ) from exc
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Questions"
+    ws.append(_TEMPLATE_HEADER)
+    ws.append(["What is 2 + 2?", "3", "4", "5", "6", "B", "1"])
+    ws.append(["Capital of France?", "Paris", "Rome", "Berlin", "Madrid", "A", "1"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return Response(
+        content=buf.getvalue(),
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+        headers={
+            "Content-Disposition": 'attachment; filename="exam-questions-template.xlsx"'
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

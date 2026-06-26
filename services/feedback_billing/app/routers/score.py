@@ -261,3 +261,61 @@ async def internal_score_resume(
         recommendation=result["recommendation"],
         summary=result["summary"],
     )
+
+
+# ---------------------------------------------------------------------------
+# AI exam-question generation (HR workflow — MCQ authoring)
+# ---------------------------------------------------------------------------
+
+
+class GenerateExamRequest(BaseModel):
+    """Request body for POST /generate-exam — generate MCQs for a topic/role."""
+
+    topic: str = Field(..., min_length=1, max_length=300, description="Subject or role")
+    num_questions: int = Field(default=5, ge=1, le=30)
+    difficulty: str = Field(default="medium", description="easy | medium | hard | mixed")
+    language: str = Field(default="en", description="BCP-47: 'en', 'hi', or 'te'")
+
+
+class GeneratedQuestion(BaseModel):
+    prompt: str
+    options: list[str]
+    correct_index: int
+
+
+class GenerateExamResponse(BaseModel):
+    questions: list[GeneratedQuestion]
+
+
+@router.post(
+    "/generate-exam",
+    status_code=status.HTTP_200_OK,
+    response_model=GenerateExamResponse,
+    summary="Generate MCQ exam questions for a topic via Gemini (stateless)",
+)
+async def internal_generate_exam(
+    body: GenerateExamRequest,
+    _jwt_payload: Annotated[dict[str, Any], Depends(_require_jwt)],
+    app_settings: Annotated[Settings, Depends(_get_settings)],
+) -> GenerateExamResponse:
+    """Generate MCQs. Stateless — returns the questions for the caller to persist."""
+    from app.exam_generator import ExamGenerationError, generate_exam_questions
+
+    try:
+        questions = await generate_exam_questions(
+            topic=body.topic,
+            num_questions=body.num_questions,
+            difficulty=body.difficulty,
+            language=body.language,
+            settings=app_settings,
+        )
+    except ExamGenerationError as exc:
+        log.error("score.generate_exam_error", error=exc.message)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Exam generation failed: {exc.message}",
+        ) from exc
+
+    return GenerateExamResponse(
+        questions=[GeneratedQuestion(**q) for q in questions]
+    )

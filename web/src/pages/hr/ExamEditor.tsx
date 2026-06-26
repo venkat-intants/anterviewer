@@ -3,7 +3,7 @@
 // Behavior: all live logic — MCQ model, addQuestion/deleteQuestion, publish/unpublish,
 //           thresholdMut, attempt-lock banner, full assign+magic-link+revoke panel.
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -20,6 +20,13 @@ import {
   ListChecks,
   ClipboardList,
   Clock,
+  Sparkles,
+  Upload,
+  Download,
+  FileText,
+  AlertTriangle,
+  X,
+  Pencil,
 } from '@/design/components/icons';
 import {
   getExam,
@@ -29,7 +36,15 @@ import {
   listAssignments,
   assignExam,
   revokeAssignment,
+  generateQuestions,
+  bulkAddQuestions,
+  importQuestions,
+  downloadQuestionTemplate,
   type AssignResult,
+  type GeneratedQuestion,
+  type ImportResult,
+  type ExamDifficulty,
+  type ExamLanguage,
 } from '@/api/exams';
 import { listApplicants } from '@/api/applicants';
 import { toast } from '@/lib/toast';
@@ -89,11 +104,25 @@ export default function ExamEditor() {
     void qc.invalidateQueries({ queryKey: ['hr', 'exams'] });
   };
 
-  // ── Composer state (MCQ model — prompt + 2-6 options + correct_index + points) ──
+  // ── Composer: three ways to add questions ──────────────────────────────────
+  const [composerTab, setComposerTab] = useState<'manual' | 'ai' | 'excel'>('manual');
+
+  // Manual MCQ model — prompt + 4 options (default) + correct_index + points.
   const [prompt, setPrompt] = useState('');
-  const [options, setOptions] = useState<string[]>(['', '']);
+  const [options, setOptions] = useState<string[]>(['', '', '', '']);
   const [correctIdx, setCorrectIdx] = useState(0);
   const [points, setPoints] = useState('1');
+
+  // AI (Gemini) generation
+  const [aiTopic, setAiTopic] = useState('');
+  const [aiCount, setAiCount] = useState('5');
+  const [aiDifficulty, setAiDifficulty] = useState<ExamDifficulty>('medium');
+  const [aiLanguage, setAiLanguage] = useState<ExamLanguage>('en');
+  const [aiPreview, setAiPreview] = useState<GeneratedQuestion[]>([]);
+
+  // Excel / CSV bulk import
+  const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // ── Assign state ──────────────────────────────────────────────────────────
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -125,12 +154,57 @@ export default function ExamEditor() {
       }),
     onSuccess: () => {
       setPrompt('');
-      setOptions(['', '']);
+      setOptions(['', '', '', '']);
       setCorrectIdx(0);
       setPoints('1');
       refresh();
     },
     onError: (e: unknown) => toast.error(e instanceof Error ? e.message : 'Add failed'),
+  });
+
+  const generateMut = useMutation({
+    mutationFn: () =>
+      generateQuestions(examId, {
+        topic: aiTopic.trim(),
+        num_questions: Math.max(1, Math.min(30, Number(aiCount) || 5)),
+        difficulty: aiDifficulty,
+        language: aiLanguage,
+      }),
+    onSuccess: (res) => {
+      setAiPreview(res.questions);
+      if (res.questions.length === 0) toast.error('No questions generated — try again.');
+    },
+    onError: (e: unknown) => toast.error(e instanceof Error ? e.message : 'Generation failed'),
+  });
+
+  const addGeneratedMut = useMutation({
+    mutationFn: (questions: GeneratedQuestion[]) =>
+      bulkAddQuestions(
+        examId,
+        questions.map((q) => ({
+          prompt: q.prompt,
+          options: q.options,
+          correct_index: q.correct_index,
+          points: q.points,
+        })),
+      ),
+    onSuccess: (created) => {
+      setAiPreview([]);
+      toast.success(`${created.length} question(s) added`);
+      refresh();
+    },
+    onError: (e: unknown) => toast.error(e instanceof Error ? e.message : 'Add failed'),
+  });
+
+  const importMut = useMutation({
+    mutationFn: (file: File) => importQuestions(examId, file),
+    onSuccess: (res) => {
+      setImportResult(res);
+      if (res.added > 0) toast.success(`${res.added} question(s) imported`);
+      if (res.added === 0) toast.error('No questions imported — check the file.');
+      refresh();
+    },
+    onError: (e: unknown) => toast.error(e instanceof Error ? e.message : 'Import failed'),
   });
 
   const delMut = useMutation({
@@ -167,6 +241,29 @@ export default function ExamEditor() {
     if (filled.some((o) => !o)) return toast.error('All option fields must be filled.');
     if (correctIdx >= filled.length) return toast.error('Pick the correct answer.');
     addMut.mutate();
+  }
+
+  function handleGenerate(ev: React.FormEvent) {
+    ev.preventDefault();
+    if (!aiTopic.trim()) return toast.error('Enter a topic or role for the AI to use.');
+    generateMut.mutate();
+  }
+
+  function handleFilePick(ev: React.ChangeEvent<HTMLInputElement>) {
+    const file = ev.target.files?.[0];
+    if (file) {
+      setImportResult(null);
+      importMut.mutate(file);
+    }
+    ev.target.value = ''; // let HR re-pick the same file after a fix
+  }
+
+  async function handleDownloadTemplate() {
+    try {
+      await downloadQuestionTemplate();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Template download failed');
+    }
   }
 
   async function copyLink(link: string) {
@@ -369,98 +466,354 @@ export default function ExamEditor() {
               </Stagger>
             )}
 
-            {/* MCQ composer — hidden when locked */}
+            {/* Composer — three ways to add questions; hidden when locked */}
             {!locked && (
-              <form
-                onSubmit={submitQuestion}
-                className="space-y-3 rounded-[16px] border border-dashed border-white/[0.1] bg-[rgba(28,29,31,0.3)] p-4"
-                aria-label="New question composer"
-              >
-                <textarea
-                  className={cn(inputCls, 'resize-none')}
-                  rows={2}
-                  placeholder="Question prompt…"
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  aria-label="Question prompt"
-                />
+              <div className="rounded-[16px] border border-dashed border-white/[0.1] bg-[rgba(28,29,31,0.3)] p-4">
+                {/* Tab bar */}
+                <div
+                  role="tablist"
+                  aria-label="How to add questions"
+                  className="mb-4 flex flex-wrap gap-1 rounded-[12px] border border-white/[0.08] bg-[rgba(20,21,23,0.6)] p-1"
+                >
+                  {[
+                    { key: 'manual', label: 'Manual', icon: Pencil },
+                    { key: 'ai', label: 'AI generate', icon: Sparkles },
+                    { key: 'excel', label: 'Excel upload', icon: Upload },
+                  ].map((t) => {
+                    const Icon = t.icon;
+                    const active = composerTab === t.key;
+                    return (
+                      <button
+                        key={t.key}
+                        type="button"
+                        role="tab"
+                        aria-selected={active}
+                        onClick={() => setComposerTab(t.key as 'manual' | 'ai' | 'excel')}
+                        className={cn(
+                          'flex flex-1 items-center justify-center gap-1.5 rounded-[9px] px-3 py-2 text-[13px] font-medium transition-colors',
+                          active
+                            ? 'bg-[rgba(var(--accent-rgb),0.16)] text-[#60a5fa]'
+                            : 'text-[#888b91] hover:text-white',
+                        )}
+                      >
+                        <Icon size={14} aria-hidden="true" />
+                        {t.label}
+                      </button>
+                    );
+                  })}
+                </div>
 
-                <div className="space-y-2">
-                  {options.map((opt, oi) => (
-                    <div key={oi} className="flex items-center gap-2">
-                      <input
-                        type="radio"
-                        name="correct"
-                        checked={correctIdx === oi}
-                        onChange={() => setCorrectIdx(oi)}
-                        className="h-4 w-4 flex-none accent-[var(--accent)]"
-                        aria-label={`Mark option ${oi + 1} correct`}
-                      />
-                      <input
-                        className={inputCls}
-                        placeholder={`Option ${oi + 1}`}
-                        value={opt}
-                        onChange={(e) =>
-                          setOptions((prev) =>
-                            prev.map((o, j) => (j === oi ? e.target.value : o)),
-                          )
-                        }
-                        aria-label={`Option ${oi + 1}`}
-                      />
-                      {options.length > 2 && (
+                {/* ── Manual tab ── */}
+                {composerTab === 'manual' && (
+                  <form
+                    onSubmit={submitQuestion}
+                    className="space-y-3"
+                    aria-label="New question composer"
+                  >
+                    <textarea
+                      className={cn(inputCls, 'resize-none')}
+                      rows={2}
+                      placeholder="Question prompt…"
+                      value={prompt}
+                      onChange={(e) => setPrompt(e.target.value)}
+                      aria-label="Question prompt"
+                    />
+
+                    <div className="space-y-2">
+                      {options.map((opt, oi) => (
+                        <div key={oi} className="flex items-center gap-2">
+                          <input
+                            type="radio"
+                            name="correct"
+                            checked={correctIdx === oi}
+                            onChange={() => setCorrectIdx(oi)}
+                            className="h-4 w-4 flex-none accent-[var(--accent)]"
+                            aria-label={`Mark option ${oi + 1} correct`}
+                          />
+                          <input
+                            className={inputCls}
+                            placeholder={`Option ${oi + 1}`}
+                            value={opt}
+                            onChange={(e) =>
+                              setOptions((prev) =>
+                                prev.map((o, j) => (j === oi ? e.target.value : o)),
+                              )
+                            }
+                            aria-label={`Option ${oi + 1}`}
+                          />
+                          {options.length > 2 && (
+                            <button
+                              type="button"
+                              aria-label="Remove option"
+                              className="shrink-0 flex h-8 w-8 items-center justify-center rounded-[8px] border border-white/[0.1] text-[#888b91] hover:border-[rgba(230,113,79,0.4)] hover:text-[#e6714f] transition-colors"
+                              onClick={() => {
+                                setOptions((prev) => prev.filter((_, j) => j !== oi));
+                                setCorrectIdx((c) => (c >= oi && c > 0 ? c - 1 : c));
+                              }}
+                            >
+                              <Trash2 size={13} aria-hidden="true" />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-[11.5px] text-[#70757c]">
+                      Select the radio next to the correct option.
+                    </p>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      {options.length < 6 && (
                         <button
                           type="button"
-                          aria-label="Remove option"
-                          className="shrink-0 flex h-8 w-8 items-center justify-center rounded-[8px] border border-white/[0.1] text-[#888b91] hover:border-[rgba(230,113,79,0.4)] hover:text-[#e6714f] transition-colors"
-                          onClick={() => {
-                            setOptions((prev) => prev.filter((_, j) => j !== oi));
-                            setCorrectIdx((c) => (c >= oi && c > 0 ? c - 1 : c));
-                          }}
+                          className="inline-flex items-center gap-1.5 rounded-[8px] border border-white/[0.1] bg-transparent px-3 py-1.5 text-[12.5px] text-[#888b91] hover:text-white hover:border-white/[0.2] transition-colors"
+                          onClick={() => setOptions((prev) => [...prev, ''])}
                         >
-                          <Trash2 size={13} aria-hidden="true" />
+                          <Plus size={13} aria-hidden="true" /> Add option
                         </button>
                       )}
+                      <label className="ml-auto flex items-center gap-2 text-[12px] text-[#888b91]">
+                        Points
+                        <input
+                          type="number"
+                          min={1}
+                          value={points}
+                          onChange={(e) => setPoints(e.target.value)}
+                          className="w-16 rounded-[8px] border border-white/[0.1] bg-[rgba(28,29,31,0.6)] px-2 py-1 text-[13px] text-white focus:outline-none focus:border-[var(--accent)] transition-colors"
+                          aria-label="Points"
+                        />
+                      </label>
+                      <Pill
+                        type="submit"
+                        variant="accent"
+                        className="gap-1.5 px-4 py-2"
+                        disabled={addMut.isPending}
+                        aria-busy={addMut.isPending}
+                      >
+                        {addMut.isPending ? (
+                          <Loader2 size={14} className="animate-spin" aria-hidden="true" />
+                        ) : (
+                          <Plus size={14} aria-hidden="true" />
+                        )}
+                        Add question
+                      </Pill>
                     </div>
-                  ))}
-                </div>
+                  </form>
+                )}
 
-                <div className="flex flex-wrap items-center gap-2">
-                  {options.length < 6 && (
-                    <button
-                      type="button"
-                      className="inline-flex items-center gap-1.5 rounded-[8px] border border-white/[0.1] bg-transparent px-3 py-1.5 text-[12.5px] text-[#888b91] hover:text-white hover:border-white/[0.2] transition-colors"
-                      onClick={() => setOptions((prev) => [...prev, ''])}
-                    >
-                      <Plus size={13} aria-hidden="true" /> Add option
-                    </button>
-                  )}
-                  <label className="ml-auto flex items-center gap-2 text-[12px] text-[#888b91]">
-                    Points
-                    <input
-                      type="number"
-                      min={1}
-                      value={points}
-                      onChange={(e) => setPoints(e.target.value)}
-                      className="w-16 rounded-[8px] border border-white/[0.1] bg-[rgba(28,29,31,0.6)] px-2 py-1 text-[13px] text-white focus:outline-none focus:border-[var(--accent)] transition-colors"
-                      aria-label="Points"
-                    />
-                  </label>
-                  <Pill
-                    type="submit"
-                    variant="accent"
-                    className="gap-1.5 px-4 py-2"
-                    disabled={addMut.isPending}
-                    aria-busy={addMut.isPending}
-                  >
-                    {addMut.isPending ? (
-                      <Loader2 size={14} className="animate-spin" aria-hidden="true" />
-                    ) : (
-                      <Plus size={14} aria-hidden="true" />
+                {/* ── AI generate tab ── */}
+                {composerTab === 'ai' && (
+                  <div className="space-y-3" aria-label="AI question generator">
+                    <form onSubmit={handleGenerate} className="space-y-3">
+                      <input
+                        className={inputCls}
+                        placeholder="Topic or role — e.g. “React fundamentals” or “Junior Java Developer”"
+                        value={aiTopic}
+                        onChange={(e) => setAiTopic(e.target.value)}
+                        aria-label="Topic for AI generation"
+                      />
+                      <div className="flex flex-wrap items-end gap-3">
+                        <label className="flex flex-col gap-1 text-[12px] text-[#888b91]">
+                          Questions
+                          <input
+                            type="number"
+                            min={1}
+                            max={30}
+                            value={aiCount}
+                            onChange={(e) => setAiCount(e.target.value)}
+                            className="w-20 rounded-[8px] border border-white/[0.1] bg-[rgba(28,29,31,0.6)] px-2 py-1.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent)]"
+                            aria-label="Number of questions"
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1 text-[12px] text-[#888b91]">
+                          Difficulty
+                          <select
+                            value={aiDifficulty}
+                            onChange={(e) => setAiDifficulty(e.target.value as ExamDifficulty)}
+                            className="rounded-[8px] border border-white/[0.1] bg-[rgba(28,29,31,0.6)] px-2 py-1.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent)]"
+                            aria-label="Difficulty"
+                          >
+                            <option value="easy">Easy</option>
+                            <option value="medium">Medium</option>
+                            <option value="hard">Hard</option>
+                            <option value="mixed">Mixed</option>
+                          </select>
+                        </label>
+                        <label className="flex flex-col gap-1 text-[12px] text-[#888b91]">
+                          Language
+                          <select
+                            value={aiLanguage}
+                            onChange={(e) => setAiLanguage(e.target.value as ExamLanguage)}
+                            className="rounded-[8px] border border-white/[0.1] bg-[rgba(28,29,31,0.6)] px-2 py-1.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent)]"
+                            aria-label="Language"
+                          >
+                            <option value="en">English</option>
+                            <option value="hi">हिन्दी</option>
+                            <option value="te">తెలుగు</option>
+                          </select>
+                        </label>
+                        <Pill
+                          type="submit"
+                          variant="accent"
+                          className="ml-auto gap-1.5 px-4 py-2"
+                          disabled={generateMut.isPending}
+                          aria-busy={generateMut.isPending}
+                        >
+                          {generateMut.isPending ? (
+                            <Loader2 size={14} className="animate-spin" aria-hidden="true" />
+                          ) : (
+                            <Sparkles size={14} aria-hidden="true" />
+                          )}
+                          {generateMut.isPending ? 'Generating…' : 'Generate'}
+                        </Pill>
+                      </div>
+                    </form>
+
+                    {/* Preview of generated questions */}
+                    {aiPreview.length > 0 && (
+                      <div className="space-y-2.5 rounded-[14px] border border-[rgba(var(--accent-rgb),0.25)] bg-[rgba(var(--accent-rgb),0.05)] p-3.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-[12.5px] font-semibold text-[#60a5fa]">
+                            {aiPreview.length} draft question{aiPreview.length !== 1 ? 's' : ''} — review &amp; add
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => setAiPreview([])}
+                            className="text-[12px] text-[#888b91] hover:text-white transition-colors"
+                          >
+                            Discard
+                          </button>
+                        </div>
+                        <ul className="space-y-2">
+                          {aiPreview.map((q, qi) => (
+                            <li
+                              key={qi}
+                              className="rounded-[10px] border border-white/[0.08] bg-[rgba(28,29,31,0.5)] p-3"
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <p className="text-[13px] font-medium text-white">
+                                  {qi + 1}. {q.prompt}
+                                </p>
+                                <button
+                                  type="button"
+                                  aria-label="Remove this draft"
+                                  className="shrink-0 text-[#888b91] hover:text-[#e6714f] transition-colors"
+                                  onClick={() =>
+                                    setAiPreview((prev) => prev.filter((_, j) => j !== qi))
+                                  }
+                                >
+                                  <X size={14} aria-hidden="true" />
+                                </button>
+                              </div>
+                              <ul className="mt-1.5 space-y-0.5">
+                                {q.options.map((opt, oi) => (
+                                  <li
+                                    key={oi}
+                                    className={cn(
+                                      'flex items-center gap-1.5 text-[12.5px]',
+                                      oi === q.correct_index
+                                        ? 'font-medium text-[#27c93f]'
+                                        : 'text-[#888b91]',
+                                    )}
+                                  >
+                                    {oi === q.correct_index ? (
+                                      <Check size={12} className="shrink-0" aria-hidden="true" />
+                                    ) : (
+                                      <span className="h-3 w-3 shrink-0" aria-hidden="true" />
+                                    )}
+                                    {opt}
+                                  </li>
+                                ))}
+                              </ul>
+                            </li>
+                          ))}
+                        </ul>
+                        <Pill
+                          variant="accent"
+                          className="gap-1.5 px-4 py-2"
+                          disabled={addGeneratedMut.isPending}
+                          aria-busy={addGeneratedMut.isPending}
+                          onClick={() => addGeneratedMut.mutate(aiPreview)}
+                        >
+                          {addGeneratedMut.isPending ? (
+                            <Loader2 size={14} className="animate-spin" aria-hidden="true" />
+                          ) : (
+                            <Plus size={14} aria-hidden="true" />
+                          )}
+                          Add {aiPreview.length} question{aiPreview.length !== 1 ? 's' : ''}
+                        </Pill>
+                      </div>
                     )}
-                    Add question
-                  </Pill>
-                </div>
-              </form>
+                  </div>
+                )}
+
+                {/* ── Excel upload tab ── */}
+                {composerTab === 'excel' && (
+                  <div className="space-y-3" aria-label="Excel/CSV bulk upload">
+                    <p className="text-[12.5px] text-[#888b91]">
+                      Upload an <span className="text-white">.xlsx</span> or{' '}
+                      <span className="text-white">.csv</span> with one question per row:
+                      {' '}Question · Option A–D · Correct (A/B/C/D) · Points.
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void handleDownloadTemplate()}
+                        className="inline-flex items-center gap-1.5 rounded-[9px] border border-white/[0.12] bg-transparent px-3.5 py-2 text-[13px] text-[#b8babf] hover:text-white hover:border-white/[0.25] transition-colors"
+                      >
+                        <Download size={14} aria-hidden="true" /> Download template
+                      </button>
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept=".xlsx,.csv"
+                        onChange={handleFilePick}
+                        className="hidden"
+                        aria-label="Choose spreadsheet file"
+                      />
+                      <Pill
+                        variant="accent"
+                        className="gap-1.5 px-4 py-2"
+                        disabled={importMut.isPending}
+                        aria-busy={importMut.isPending}
+                        onClick={() => fileInputRef.current?.click()}
+                      >
+                        {importMut.isPending ? (
+                          <Loader2 size={14} className="animate-spin" aria-hidden="true" />
+                        ) : (
+                          <Upload size={14} aria-hidden="true" />
+                        )}
+                        {importMut.isPending ? 'Uploading…' : 'Upload file'}
+                      </Pill>
+                    </div>
+
+                    {/* Import result summary */}
+                    {importResult && (
+                      <div className="space-y-2 rounded-[14px] border border-white/[0.1] bg-[rgba(28,29,31,0.5)] p-3.5">
+                        <p className="flex items-center gap-1.5 text-[13px] font-medium text-[#27c93f]">
+                          <FileText size={14} aria-hidden="true" />
+                          {importResult.added} question{importResult.added !== 1 ? 's' : ''} imported
+                        </p>
+                        {importResult.errors.length > 0 && (
+                          <div className="space-y-1">
+                            <p className="flex items-center gap-1.5 text-[12.5px] font-medium text-[#ffb764]">
+                              <AlertTriangle size={13} aria-hidden="true" />
+                              {importResult.errors.length} row
+                              {importResult.errors.length !== 1 ? 's' : ''} skipped
+                            </p>
+                            <ul className="max-h-32 space-y-0.5 overflow-y-auto pl-5 text-[12px] text-[#888b91]">
+                              {importResult.errors.map((er, ei) => (
+                                <li key={ei} className="list-disc">
+                                  Row {er.row}: {er.message}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             )}
           </div>
 

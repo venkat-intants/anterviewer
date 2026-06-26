@@ -3,7 +3,8 @@
 // Tenant-scoped server-side by the HR's company. correct_index is returned here
 // (HR only); the applicant take path lives in publicExam.ts and never sees it.
 
-import { apiGet, apiPost, apiPut, apiDelete, clientFetch } from './client';
+import { apiGet, apiPost, apiPut, apiDelete, clientFetch, uploadWithProgress } from './client';
+import { getToken } from './tokenStore';
 
 // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
 const API_BASE: string = import.meta.env.VITE_API_BASE_URL;
@@ -138,6 +139,83 @@ export function updateQuestion(
 
 export function deleteQuestion(examId: string, qid: string): Promise<void> {
   return apiDelete<void>(`/hr/exams/${examId}/questions/${qid}`);
+}
+
+// ── Bulk add / AI generate / Excel import ────────────────────────────────────
+export type ExamDifficulty = 'easy' | 'medium' | 'hard' | 'mixed';
+export type ExamLanguage = 'en' | 'hi' | 'te';
+
+export interface GeneratedQuestion {
+  prompt: string;
+  options: string[];
+  correct_index: number;
+  points: number;
+}
+
+export interface GenerateParams {
+  topic: string;
+  num_questions: number;
+  difficulty: ExamDifficulty;
+  language: ExamLanguage;
+}
+
+export interface ImportRowError {
+  row: number;
+  message: string;
+}
+
+export interface ImportResult {
+  added: number;
+  errors: ImportRowError[];
+  questions: ExamQuestion[];
+}
+
+/** Ask Gemini (via backend) to draft questions — returned for preview, NOT saved. */
+export function generateQuestions(
+  examId: string,
+  params: GenerateParams,
+): Promise<{ questions: GeneratedQuestion[] }> {
+  return apiPost<{ questions: GeneratedQuestion[] }>(
+    `/hr/exams/${examId}/questions/generate`,
+    params,
+  );
+}
+
+/** Insert many already-built questions at once (AI 'add all', reviewed import). */
+export function bulkAddQuestions(
+  examId: string,
+  questions: QuestionInput[],
+): Promise<ExamQuestion[]> {
+  return apiPost<ExamQuestion[]>(`/hr/exams/${examId}/questions/bulk`, { questions });
+}
+
+/** Upload an .xlsx/.csv in the template layout; backend parses + inserts valid rows. */
+export function importQuestions(examId: string, file: File): Promise<ImportResult> {
+  const fd = new FormData();
+  fd.append('file', file);
+  return uploadWithProgress<ImportResult>(
+    `${API_BASE}/hr/exams/${examId}/questions/import`,
+    fd,
+  );
+}
+
+/** Fetch the .xlsx bulk-upload template (auth-scoped) and trigger a browser download. */
+export async function downloadQuestionTemplate(): Promise<void> {
+  const token = getToken();
+  const res = await fetch(`${API_BASE}/hr/exam-question-template`, {
+    credentials: 'include',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new Error(`Could not download template (HTTP ${res.status})`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'exam-questions-template.xlsx';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 export function reorderQuestions(examId: string, questionIds: string[]): Promise<ExamQuestion[]> {
