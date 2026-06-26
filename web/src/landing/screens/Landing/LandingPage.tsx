@@ -3,7 +3,7 @@ import { Nav } from './Nav'
 import { Hero } from './Hero'
 import { TrustMarquee, ProblemSolution, HowItWorks, LiveDemo } from './Sections'
 import { FeatureBento, Avatars, Languages, AudienceTabs } from './Showcase'
-import { ScorecardPreview, Metrics, Testimonials, Pricing, Compliance, FAQ, FinalCTA } from './Proof'
+import { ScorecardPreview, Metrics, Testimonials, Compliance, FAQ, FinalCTA } from './Proof'
 import { Footer } from './Footer'
 
 /**
@@ -29,7 +29,6 @@ export function LandingPage() {
         <ScorecardPreview />
         <Metrics />
         <Testimonials />
-        <Pricing />
         <Compliance />
         <FAQ />
         <FinalCTA />

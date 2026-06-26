@@ -19,7 +19,6 @@ export const NAV_LINKS = [
   { href: '#features', label: 'Product' },
   { href: '#audience', label: 'For Colleges' },
   { href: '#audience', label: 'For HR' },
-  { href: '#pricing', label: 'Pricing' },
   { href: '#languages', label: 'Languages' },
 ]
 
@@ -100,13 +99,6 @@ export const TESTIMONIALS = [
   { q: 'Anterview let us screen 40,000 applicants in two weeks — in Hindi and Telugu. The scorecards were fairer than our old panels.', n: 'Dr. Rajesh Tiwari', r: 'Dean of Placements · VNR VJIET', i: 'RT', g: 'linear-gradient(135deg,#0088ff,#a887dc)', photo: 'https://images.pexels.com/photos/3777943/pexels-photo-3777943.jpeg?auto=compress&cs=tinysrgb&w=160' },
   { q: 'We cut time-to-first-round from 14 days to under 48 hours. Candidates love that they get real feedback, not silence.', n: 'Sneha Reddy', r: 'Head of TA · a fintech unicorn', i: 'SR', g: 'linear-gradient(135deg,#16c253,#0088ff)', photo: 'https://images.pexels.com/photos/1239291/pexels-photo-1239291.jpeg?auto=compress&cs=tinysrgb&w=160' },
   { q: 'For our state skilling mission, interviewing in the mother tongue changed everything. Completion rates doubled.', n: 'K. Venkatesh', r: 'Programme Director · State Skill Council', i: 'KV', g: 'linear-gradient(135deg,#a887dc,#dd55e7)', photo: 'https://images.pexels.com/photos/220453/pexels-photo-220453.jpeg?auto=compress&cs=tinysrgb&w=160' },
-]
-
-export type Tier = { name: string; tagline: string; price: string; unit: string; featured: boolean; cta: string; features: string[] }
-export const tiers = (annual: boolean): Tier[] => [
-  { name: 'Practice', tagline: 'For individual candidates getting interview-ready.', price: 'Free', unit: '', featured: false, cta: 'Start free', features: ['3 mock interviews / month', 'EN / HI / TE', 'PDF scorecard', '2 avatar choices'] },
-  { name: 'Teams', tagline: 'For colleges & HR teams hiring at volume.', price: annual ? '₹9' : '₹12', unit: '/ session', featured: true, cta: 'Start a pilot', features: ['Unlimited sessions', 'All 6 avatars + custom rubrics', 'Pipeline, analytics & CSV export', 'Magic-link invites & proctoring'] },
-  { name: 'Government', tagline: 'For state skilling missions at population scale.', price: 'L1 bid', unit: 'pricing', featured: false, cta: 'Request pricing', features: ['20-lakh candidate scale', 'All 22 languages', 'DPDP audit trail & residency', 'Dedicated support & SLAs'] },
 ]
 
 export const COMPLIANCE: { icon: LucideIcon; title: string; desc: string }[] = [

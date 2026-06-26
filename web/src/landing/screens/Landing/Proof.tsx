@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { animate, useInView, useMotionValue } from 'framer-motion'
-import { Check } from 'lucide-react'
 import { Reveal } from '../../components/Reveal'
 import { ScoreRing } from '../../components/primitives'
-import { COMPETENCIES, METRICS, TESTIMONIALS, tiers, COMPLIANCE, FAQS } from '../../data/landing'
+import { COMPETENCIES, METRICS, TESTIMONIALS, COMPLIANCE, FAQS } from '../../data/landing'
 
 export function ScorecardPreview() {
   return (
@@ -114,45 +113,6 @@ export function Testimonials() {
       <div className="mt-8 flex justify-center gap-2">
         {TESTIMONIALS.map((_, k) => (
           <button key={k} onClick={() => setI(k)} className="h-2 rounded-pill transition-all" style={{ width: k === i ? 24 : 8, background: k === i ? '#0088ff' : 'rgba(255,255,255,0.2)' }} />
-        ))}
-      </div>
-    </section>
-  )
-}
-
-export function Pricing() {
-  const [annual, setAnnual] = useState(true)
-  return (
-    <section id="pricing" className="relative z-10 mx-auto max-w-[1100px] px-6 py-15">
-      <div className="mb-8 text-center">
-        <div className="mb-3.5 text-xs uppercase tracking-[1.5px] text-electric">Pricing</div>
-        <h2 className="mb-6 text-[40px] font-semibold tracking-[-2px]">Plans that scale with you.</h2>
-        <div className="inline-flex items-center gap-1 rounded-pill border border-white/[0.08] bg-charcoal p-1">
-          <button onClick={() => setAnnual(false)} className="rounded-pill px-4.5 py-2 text-[13px] font-medium transition-all" style={annual ? { color: '#888b91' } : { background: '#fff', color: '#000' }}>Monthly</button>
-          <button onClick={() => setAnnual(true)} className="rounded-pill px-4.5 py-2 text-[13px] font-medium transition-all" style={annual ? { background: '#fff', color: '#000' } : { color: '#888b91' }}>Annual <span className="text-[11px] text-forest">−20%</span></button>
-        </div>
-      </div>
-      <div className="grid grid-cols-1 items-stretch gap-4 md:grid-cols-3">
-        {tiers(annual).map((tier) => (
-          <div key={tier.name} className="relative flex flex-col rounded-card p-8"
-            style={tier.featured ? { background: 'linear-gradient(160deg,#001b33,#030719)', border: '1px solid rgba(0,136,255,0.4)' } : { background: '#0f0f10', border: '1px solid rgba(255,255,255,0.08)' }}>
-            {tier.featured && <div className="absolute right-4.5 top-4.5 rounded-pill bg-white px-2.5 py-1 text-[11px] font-semibold text-black">Popular</div>}
-            <div className="text-[15px] font-semibold text-white">{tier.name}</div>
-            <div className="my-1 min-h-9 text-[13px] text-ash">{tier.tagline}</div>
-            <div className="mb-6 flex items-baseline gap-1"><span className="text-[40px] font-semibold tracking-[-2px] text-white">{tier.price}</span><span className="text-sm text-ash">{tier.unit}</span></div>
-            {tier.name === 'Government' ? (
-              <a href="mailto:support@intants.com?subject=Anterview%20L1%20bid%20pricing" className="mb-6 rounded-[9px] py-3 text-center text-sm font-semibold"
-                style={tier.featured ? { background: '#fff', color: '#000' } : { background: 'rgba(255,255,255,0.06)', color: '#fff', border: '1px solid rgba(255,255,255,0.15)' }}>{tier.cta}</a>
-            ) : (
-              <Link to="/register" className="mb-6 rounded-[9px] py-3 text-center text-sm font-semibold"
-                style={tier.featured ? { background: '#fff', color: '#000' } : { background: 'rgba(255,255,255,0.06)', color: '#fff', border: '1px solid rgba(255,255,255,0.15)' }}>{tier.cta}</Link>
-            )}
-            <div className="flex flex-col gap-2.5">
-              {tier.features.map((f) => (
-                <div key={f} className="flex items-start gap-2.5 text-[13.5px] text-mist"><Check size={15} className="mt-0.5 flex-none text-electric" strokeWidth={2.5} />{f}</div>
-              ))}
-            </div>
-          </div>
         ))}
       </div>
     </section>

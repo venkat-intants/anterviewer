@@ -3,7 +3,7 @@
 import { X, AtSign, Globe } from 'lucide-react'
 
 const COLS = [
-  { h: 'Product', links: ['Features', 'How it works', 'Pricing', 'Languages'] },
+  { h: 'Product', links: ['Features', 'How it works', 'Languages'] },
   { h: 'Solutions', links: ['For Colleges', 'For Corporate HR', 'For Govt Skilling', 'Book a demo'] },
   { h: 'Legal', links: ['Privacy', 'DPDP Compliance', 'Terms', 'Data Residency'] },
 ]
