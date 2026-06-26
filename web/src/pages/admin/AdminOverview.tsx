@@ -145,7 +145,7 @@ interface StatTileProps {
 
 function StatTile({ icon, label, value, sub, loading, spark, feature }: StatTileProps) {
   return (
-    <GlassCard feature={feature} hover className="p-5">
+    <GlassCard feature={feature} hover className="p-5 h-full">
       <div className="flex items-center justify-between">
         <span className="text-[12.5px] text-[#888b91]">{label}</span>
         <span className="text-[#9a9aa0]" aria-hidden="true">
@@ -179,7 +179,7 @@ function StatTile({ icon, label, value, sub, loading, spark, feature }: StatTile
 
 function TileSkeleton() {
   return (
-    <GlassCard className="p-5">
+    <GlassCard className="p-5 h-full">
       <div className="flex items-center gap-2.5">
         <div className="h-4 w-4 rounded bg-white/[0.06] animate-pulse" />
         <div className="h-3 w-28 rounded bg-white/[0.06] animate-pulse" />
@@ -391,15 +391,15 @@ export default function AdminOverview() {
           regardless of whether it's in skeleton or data state. */}
       <div data-testid="overview-tiles">
         {overviewLoading ? (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 auto-rows-fr">
             {Array.from({ length: 6 }).map((_, i) => (
               <TileSkeleton key={i} />
             ))}
           </div>
         ) : (
-          <Stagger className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Stagger className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 auto-rows-fr">
             {/* Tile 1 — Total Candidates */}
-            <StaggerItem>
+            <StaggerItem className="h-full">
               <StatTile
                 icon={<Users size={16} />}
                 label="Total Candidates"
@@ -409,7 +409,7 @@ export default function AdminOverview() {
             </StaggerItem>
 
             {/* Tile 2 — Total Interviews */}
-            <StaggerItem>
+            <StaggerItem className="h-full">
               <StatTile
                 icon={<ClipboardList size={16} />}
                 label="Total Interviews"
@@ -419,7 +419,7 @@ export default function AdminOverview() {
             </StaggerItem>
 
             {/* Tile 3 — Completed + completion rate */}
-            <StaggerItem>
+            <StaggerItem className="h-full">
               <StatTile
                 icon={<CheckCircle2 size={16} />}
                 label="Completed"
@@ -429,7 +429,7 @@ export default function AdminOverview() {
             </StaggerItem>
 
             {/* Tile 4 — Avg Composite Score */}
-            <StaggerItem>
+            <StaggerItem className="h-full">
               <StatTile
                 icon={<TrendingUp size={16} />}
                 label="Avg Composite Score"
@@ -439,7 +439,7 @@ export default function AdminOverview() {
             </StaggerItem>
 
             {/* Tile 5 — Avg Duration */}
-            <StaggerItem>
+            <StaggerItem className="h-full">
               <StatTile
                 icon={<Clock size={16} />}
                 label="Avg Duration"
@@ -448,7 +448,7 @@ export default function AdminOverview() {
             </StaggerItem>
 
             {/* Tile 6 — Activity (today / 7d / 30d) */}
-            <StaggerItem>
+            <StaggerItem className="h-full">
               <StatTile
                 icon={<Calendar size={16} />}
                 label="Activity"
@@ -468,8 +468,8 @@ export default function AdminOverview() {
       {/* Charts row */}
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
         {/* Daily interview trends */}
-        <Reveal dir="left">
-          <GlassCard className="p-5">
+        <Reveal dir="left" className="h-full">
+          <GlassCard className="p-5 h-full">
             <h3 className="mb-4 text-[16px] font-semibold text-white">
               Daily Interview Volume (30 days)
             </h3>
@@ -486,8 +486,8 @@ export default function AdminOverview() {
         </Reveal>
 
         {/* Score distribution */}
-        <Reveal dir="right">
-          <GlassCard className="p-5">
+        <Reveal dir="right" className="h-full">
+          <GlassCard className="p-5 h-full">
             <h3 className="mb-4 text-[16px] font-semibold text-white">
               Score Distribution
             </h3>
@@ -539,7 +539,7 @@ export default function AdminOverview() {
       <Reveal>
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
           {/* Microservices panel */}
-          <GlassCard className="p-5">
+          <GlassCard className="p-5 h-full">
             <h3 className="mb-4 flex items-center gap-2 text-[16px] font-semibold text-white">
               <Server size={17} className="text-[#60a5fa]" aria-hidden="true" />
               Microservices
@@ -585,7 +585,7 @@ export default function AdminOverview() {
           </GlassCard>
 
           {/* Datastores + overall status panel */}
-          <GlassCard className="p-5">
+          <GlassCard className="p-5 h-full">
             <div className="mb-4 flex items-center justify-between gap-3">
               <h3 className="flex items-center gap-2 text-[16px] font-semibold text-white">
                 <Activity size={16} className="text-[#60a5fa]" aria-hidden="true" />
