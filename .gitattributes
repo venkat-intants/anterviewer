@@ -1,0 +1,17 @@
+# Treat binary document/asset formats as binary so Git never applies
+# end-of-line (CRLF/LF) normalization to them — that would corrupt the bytes.
+*.pdf   binary
+*.docx  binary
+*.xlsx  binary
+*.pptx  binary
+*.zip   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
