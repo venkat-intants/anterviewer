@@ -22,10 +22,27 @@ export interface PublicQuestion {
   points: number;
 }
 
+export interface PublicSampleTest {
+  stdin: string;
+  expected_output: string;
+}
+
+export interface PublicCodingQuestion {
+  id: string;
+  position: number;
+  prompt: string;
+  starter_code: string | null;
+  allowed_languages: string[];
+  points: number;
+  time_limit_ms: number;
+  sample_tests: PublicSampleTest[];
+}
+
 export interface TakeExam {
   exam_id: string;
   title: string;
   description: string | null;
+  kind: 'mcq' | 'coding';
   time_limit_seconds: number | null;
   total_questions: number;
   allow_retake: boolean;
@@ -33,6 +50,7 @@ export interface TakeExam {
   server_now: string;
   deadline: string | null;
   questions: PublicQuestion[];
+  coding_questions: PublicCodingQuestion[];
 }
 
 export interface AttemptStart {
@@ -80,5 +98,51 @@ export function submitExam(
     skipAuth: true,
     headers: tokenHeaders(token),
     body: JSON.stringify({ attempt_id: attemptId, answers }),
+  });
+}
+
+// ── Coding round (kind === 'coding') ─────────────────────────────────────────
+export interface PublicTestResult {
+  index: number;
+  passed: boolean;
+  stdin: string;
+  expected_output: string;
+  actual_output: string;
+  stderr: string;
+  timed_out: boolean;
+  error: string | null;
+}
+
+export interface CodingAnswer {
+  language: string;
+  source: string;
+}
+
+/** Run the candidate's code against the SAMPLE tests only — no score, no save. */
+export function runCode(
+  token: string,
+  questionId: string,
+  language: string,
+  source: string,
+): Promise<{ results: PublicTestResult[] }> {
+  return clientFetch<{ results: PublicTestResult[] }>(`${API_BASE}/exam/run-code`, {
+    method: 'POST',
+    skipAuth: true,
+    headers: tokenHeaders(token),
+    body: JSON.stringify({ question_id: questionId, language, source }),
+  });
+}
+
+/** Submit a coding attempt — graded server-side against ALL test cases. */
+export function submitCoding(
+  token: string,
+  attemptId: string,
+  submissions: Record<string, CodingAnswer>,
+): Promise<ExamResult> {
+  return clientFetch<ExamResult>(`${API_BASE}/exam/submit-coding`, {
+    method: 'POST',
+    skipAuth: true,
+    headers: tokenHeaders(token),
+    body: JSON.stringify({ attempt_id: attemptId, submissions }),
   });
 }

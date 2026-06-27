@@ -35,7 +35,14 @@ from app.config import settings
 from app.exam_ai_client import ExamGenerationError, generate_exam_questions_remote
 from app.exam_grading import GradeInput, GradeQuestion, grade_breakdown
 from app.exam_link import hash_exam_token, mint_exam_token
-from app.models import Applicant, Exam, ExamAssignment, ExamAttempt, ExamQuestion
+from app.models import (
+    Applicant,
+    CodingQuestion,
+    Exam,
+    ExamAssignment,
+    ExamAttempt,
+    ExamQuestion,
+)
 from app.routers.hr_applicants import DbSessionDep, HrCtxDep
 
 log = structlog.get_logger(__name__)
@@ -55,6 +62,16 @@ class ExamCreateIn(BaseModel):
     pass_threshold: int = Field(default=60, ge=0, le=100)
     time_limit_seconds: int | None = Field(default=None, ge=10, le=86_400)
     allow_retake: bool = False
+    # 'mcq' (default) or 'coding' — selects the question type + grader.
+    kind: str = Field(default="mcq")
+
+    @field_validator("kind")
+    @classmethod
+    def _validate_kind(cls, v: str) -> str:
+        v = (v or "mcq").lower()
+        if v not in {"mcq", "coding"}:
+            raise ValueError("kind must be mcq | coding")
+        return v
 
 
 class ExamUpdateIn(BaseModel):
@@ -196,6 +213,7 @@ class ExamOut(BaseModel):
     time_limit_seconds: int | None
     allow_retake: bool
     status: str
+    kind: str
     created_at: str
 
 
@@ -253,6 +271,17 @@ async def _get_owned_exam(db: AsyncSession, company_id: uuid.UUID, exam_id: uuid
     if exam is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found.")
     return exam
+
+
+async def _question_count(db: AsyncSession, exam: Exam) -> int:
+    """Count live questions in the table that matches the exam's kind."""
+    model = CodingQuestion if exam.kind == "coding" else ExamQuestion
+    n = await db.scalar(
+        select(func.count()).select_from(model).where(
+            model.exam_id == exam.id, model.deleted_at.is_(None)
+        )
+    )
+    return int(n or 0)
 
 
 async def _attempt_count(db: AsyncSession, company_id: uuid.UUID, exam_id: uuid.UUID) -> int:
@@ -320,6 +349,7 @@ def _exam_out(e: Exam) -> ExamOut:
         time_limit_seconds=e.time_limit_seconds,
         allow_retake=e.allow_retake,
         status=e.status,
+        kind=e.kind,
         created_at=e.created_at.isoformat(),
     )
 
@@ -493,12 +523,13 @@ async def create_exam(body: ExamCreateIn, ctx: HrCtxDep, db: DbSessionDep) -> Ex
         time_limit_seconds=body.time_limit_seconds,
         allow_retake=body.allow_retake,
         status="draft",
+        kind=body.kind,
         created_at=now,
         updated_at=now,
     )
     db.add(exam)
     await db.commit()
-    log.info("hr.exam.created", exam_id=str(exam.id), company_id=str(company_id))
+    log.info("hr.exam.created", exam_id=str(exam.id), company_id=str(company_id), kind=body.kind)
     return _exam_out(exam)
 
 
@@ -517,14 +548,10 @@ async def list_exams(
 
     out: list[ExamSummaryOut] = []
     for e in exams:
-        qn = await db.scalar(
-            select(func.count()).select_from(ExamQuestion).where(
-                ExamQuestion.exam_id == e.id, ExamQuestion.deleted_at.is_(None)
-            )
-        )
+        qn = await _question_count(db, e)
         an = await _attempt_count(db, company_id, e.id)
         out.append(
-            ExamSummaryOut(**_exam_out(e).model_dump(), question_count=int(qn or 0), attempt_count=an)
+            ExamSummaryOut(**_exam_out(e).model_dump(), question_count=qn, attempt_count=an)
         )
     return out
 
@@ -549,12 +576,10 @@ async def update_exam(
     _hr_uid, company_id = ctx
     exam = await _get_owned_exam(db, company_id, exam_id)
 
-    if body.status == "published":
-        live = await _live_questions(db, company_id, exam_id)
-        if not live:
-            raise HTTPException(
-                status_code=400, detail="Add at least one question before publishing."
-            )
+    if body.status == "published" and await _question_count(db, exam) < 1:
+        raise HTTPException(
+            status_code=400, detail="Add at least one question before publishing."
+        )
 
     if body.title is not None:
         exam.title = body.title.strip()

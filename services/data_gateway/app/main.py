@@ -43,6 +43,7 @@ from app.routers.auth import router as auth_router
 from app.routers.consent import router as consent_router
 from app.routers.exam_take import router as exam_take_router
 from app.routers.hr_applicants import router as hr_applicants_router
+from app.routers.hr_coding import router as hr_coding_router
 from app.routers.hr_exams import router as hr_exams_router
 from app.routers.hr_interviews import router as hr_interviews_router
 from app.routers.hr_pipeline import router as hr_pipeline_router
@@ -191,6 +192,7 @@ app.include_router(auth_router)
 app.include_router(admin_hr_router)
 app.include_router(hr_applicants_router)
 app.include_router(hr_exams_router)
+app.include_router(hr_coding_router)
 app.include_router(exam_take_router)
 app.include_router(hr_interviews_router)
 app.include_router(interview_take_router)

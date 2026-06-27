@@ -47,6 +47,7 @@ import {
   type ExamLanguage,
 } from '@/api/exams';
 import { listApplicants } from '@/api/applicants';
+import CodingAuthoring from './CodingAuthoring';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 import {
@@ -352,7 +353,9 @@ export default function ExamEditor() {
         <div className="mt-4 flex items-center gap-4 text-[13px] text-[#888b91]">
           <span className="flex items-center gap-1.5">
             <ListChecks size={15} aria-hidden="true" />
-            {questionCount} question{questionCount !== 1 ? 's' : ''}
+            {exam.kind === 'coding'
+              ? 'Coding round'
+              : `${questionCount} question${questionCount !== 1 ? 's' : ''}`}
           </span>
           {timeLimitMin !== null && (
             <span className="flex items-center gap-1.5">
@@ -403,6 +406,9 @@ export default function ExamEditor() {
       </Reveal>
 
       {/* ── Questions ── */}
+      {exam.kind === 'coding' ? (
+        <CodingAuthoring examId={examId} locked={locked} />
+      ) : (
       <Reveal delay={0.1}>
         <GlassCard className="mt-5 p-5">
           <p className="text-[14px] font-semibold text-white">
@@ -831,6 +837,7 @@ export default function ExamEditor() {
           )}
         </GlassCard>
       </Reveal>
+      )}
 
       {/* ── Assign & share links ── */}
       <Reveal delay={0.14}>

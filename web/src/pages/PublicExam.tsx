@@ -30,6 +30,7 @@ import {
 import { cn } from '@/lib/utils';
 import { AuroraField } from '@/design/components/AuroraField';
 import { GlassCard, Pill, StatusTag } from '@/design/components/primitives';
+import CodingTaking from '@/pages/exam/CodingTaking';
 
 function fmt(totalSec: number): string {
   const s = Math.max(0, totalSec);
@@ -116,9 +117,16 @@ export default function PublicExam() {
     return () => clearInterval(id);
   }, [phase, deadline]);
 
-  // Auto-submit when the clock hits zero.
+  // Auto-submit when the clock hits zero (MCQ only — the coding take owns its own
+  // countdown + submit, since its payload is source code, not answer indices).
   useEffect(() => {
-    if (phase === 'taking' && remaining !== null && remaining <= 0) doSubmit();
+    if (
+      phase === 'taking' &&
+      examQ.data?.kind !== 'coding' &&
+      remaining !== null &&
+      remaining <= 0
+    )
+      doSubmit();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [remaining, phase]);
 
@@ -343,7 +351,23 @@ export default function PublicExam() {
     );
   }
 
-  // ── Taking ──
+  // ── Taking: coding round (self-contained editor + run + submit) ──
+  if (exam.kind === 'coding') {
+    return (
+      <CodingTaking
+        token={token}
+        exam={exam}
+        attemptId={attemptId ?? ''}
+        deadline={deadline}
+        onResult={(r) => {
+          setResult(r);
+          setPhase('result');
+        }}
+      />
+    );
+  }
+
+  // ── Taking: MCQ ──
   return (
     <div className="min-h-screen bg-midnight font-sans">
       {/* Sticky bar */}

@@ -20,6 +20,8 @@ export interface ExamQuestion {
   position: number;
 }
 
+export type ExamKind = 'mcq' | 'coding';
+
 export interface Exam {
   id: string;
   title: string;
@@ -29,6 +31,7 @@ export interface Exam {
   time_limit_seconds: number | null;
   allow_retake: boolean;
   status: ExamStatus;
+  kind: ExamKind;
   created_at: string;
 }
 
@@ -81,6 +84,7 @@ export interface ExamCreateInput {
   pass_threshold?: number;
   time_limit_seconds?: number | null;
   allow_retake?: boolean;
+  kind?: ExamKind;
 }
 
 export type ExamUpdateInput = Partial<{
@@ -222,6 +226,65 @@ export function reorderQuestions(examId: string, questionIds: string[]): Promise
   return apiPut<ExamQuestion[]>(`/hr/exams/${examId}/questions/order`, {
     question_ids: questionIds,
   });
+}
+
+// ── Coding questions (exams of kind='coding') ────────────────────────────────
+export const CODING_LANGUAGES = [
+  'python', 'javascript', 'typescript', 'java', 'cpp', 'c', 'go', 'csharp', 'ruby', 'rust',
+] as const;
+export type CodingLanguage = (typeof CODING_LANGUAGES)[number];
+
+export interface CodingTestCase {
+  stdin: string;
+  expected_output: string;
+  is_sample: boolean;
+  weight: number;
+}
+
+/** HR-facing coding question — INCLUDES reference_solution + all test cases. */
+export interface CodingQuestion {
+  id: string;
+  prompt: string;
+  allowed_languages: string[];
+  starter_code: string | null;
+  reference_solution: string | null;
+  test_cases: CodingTestCase[];
+  time_limit_ms: number;
+  points: number;
+  position: number;
+}
+
+export interface CodingQuestionInput {
+  prompt: string;
+  allowed_languages: string[];
+  starter_code?: string | null;
+  reference_solution?: string | null;
+  test_cases: CodingTestCase[];
+  time_limit_ms?: number;
+  points?: number;
+}
+
+export function listCodingQuestions(examId: string): Promise<CodingQuestion[]> {
+  return apiGet<CodingQuestion[]>(`/hr/exams/${examId}/coding-questions`);
+}
+
+export function addCodingQuestion(examId: string, q: CodingQuestionInput): Promise<CodingQuestion> {
+  return apiPost<CodingQuestion>(`/hr/exams/${examId}/coding-questions`, q);
+}
+
+export function updateCodingQuestion(
+  examId: string,
+  qid: string,
+  q: Partial<CodingQuestionInput>,
+): Promise<CodingQuestion> {
+  return clientFetch<CodingQuestion>(`${API_BASE}/hr/exams/${examId}/coding-questions/${qid}`, {
+    method: 'PATCH',
+    body: JSON.stringify(q),
+  });
+}
+
+export function deleteCodingQuestion(examId: string, qid: string): Promise<void> {
+  return apiDelete<void>(`/hr/exams/${examId}/coding-questions/${qid}`);
 }
 
 // ── Assignments (magic links) ────────────────────────────────────────────────

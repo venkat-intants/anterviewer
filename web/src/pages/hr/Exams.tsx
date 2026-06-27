@@ -107,6 +107,7 @@ export default function Exams() {
   const [threshold, setThreshold] = useState('60');
   const [minutes, setMinutes] = useState('');
   const [allowRetake, setAllowRetake] = useState(false);
+  const [kind, setKind] = useState<'mcq' | 'coding'>('mcq');
   const [showForm, setShowForm] = useState(false);
 
   const { data: exams, isLoading } = useQuery({
@@ -121,6 +122,7 @@ export default function Exams() {
         pass_threshold: Number(threshold) || 60,
         time_limit_seconds: minutes.trim() ? Math.max(1, Number(minutes)) * 60 : null,
         allow_retake: allowRetake,
+        kind,
       }),
     onSuccess: (e) => {
       toast.success('Exam created — add questions next');
@@ -128,6 +130,7 @@ export default function Exams() {
       setMinutes('');
       setThreshold('60');
       setAllowRetake(false);
+      setKind('mcq');
       setShowForm(false);
       void qc.invalidateQueries({ queryKey: ['hr', 'exams'] });
       navigate(`/hr/exams/${e.id}`);
@@ -165,6 +168,25 @@ export default function Exams() {
           <GlassCard feature className="mt-6 p-5">
             <h3 className="mb-4 text-[16px] font-semibold">New exam</h3>
             <form onSubmit={onSubmit} className="space-y-4">
+              {/* Exam type */}
+              <div className="flex gap-2">
+                {(['mcq', 'coding'] as const).map((k) => (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => setKind(k)}
+                    className={
+                      'flex-1 rounded-[10px] border px-3 py-2 text-[13px] font-medium transition-colors ' +
+                      (kind === k
+                        ? 'border-[rgba(var(--accent-rgb),0.5)] bg-[rgba(var(--accent-rgb),0.14)] text-[#60a5fa]'
+                        : 'border-white/[0.1] text-[#888b91] hover:text-white')
+                    }
+                    aria-pressed={kind === k}
+                  >
+                    {k === 'mcq' ? 'MCQ exam' : 'Coding round'}
+                  </button>
+                ))}
+              </div>
               <Field
                 label="Exam title"
                 placeholder="e.g. Python Fundamentals Screening"

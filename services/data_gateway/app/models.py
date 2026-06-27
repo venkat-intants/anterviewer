@@ -215,6 +215,7 @@ class Exam(Base):
             "pass_threshold BETWEEN 0 AND 100", name="ck_exams_pass_threshold_range"
         ),
         CheckConstraint("status IN ('draft','published','closed')", name="ck_exams_status"),
+        CheckConstraint("kind IN ('mcq','coding')", name="ck_exams_kind"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -231,6 +232,8 @@ class Exam(Base):
     time_limit_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     allow_retake: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(Text, default="draft", nullable=False)
+    # kind: 'mcq' (default) | 'coding'. Selects which child table + grader to use.
+    kind: Mapped[str] = mapped_column(Text, default="mcq", nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
@@ -269,6 +272,53 @@ class ExamQuestion(Base):
     options: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
     correct_index: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     points: Mapped[int] = mapped_column(SmallInteger, default=1, nullable=False)
+    position: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class CodingQuestion(Base):
+    """A coding-round question (exams.kind='coding'). Mirrors ExamQuestion.
+
+    SECRECY (same discipline as ExamQuestion.correct_index): ``reference_solution``
+    and any hidden test case's ``expected_output`` are NEVER serialized to the
+    applicant — the take endpoint serves only prompt/starter_code/allowed_languages
+    and the SAMPLE test cases. company_id is pinned to the exam by a composite FK.
+
+    test_cases: JSONB array of {stdin, expected_output, is_sample(bool), weight(int)}.
+    allowed_languages: JSONB array of language slugs, e.g. ["python","cpp"].
+    """
+
+    __tablename__ = "coding_questions"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["exam_id", "company_id"], ["exams.id", "exams.company_id"],
+            name="fk_coding_questions_exam", ondelete="CASCADE",
+        ),
+        CheckConstraint("points >= 1", name="ck_coding_questions_points_positive"),
+        CheckConstraint(
+            "jsonb_array_length(allowed_languages) >= 1",
+            name="ck_coding_questions_languages_count",
+        ),
+        CheckConstraint(
+            "jsonb_array_length(test_cases) >= 1", name="ck_coding_questions_test_cases_count"
+        ),
+        CheckConstraint("time_limit_ms >= 100", name="ck_coding_questions_time_limit"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    exam_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
+    )
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    starter_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reference_solution: Mapped[str | None] = mapped_column(Text, nullable=True)
+    allowed_languages: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
+    test_cases: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
+    time_limit_ms: Mapped[int] = mapped_column(Integer, default=5000, nullable=False)
+    points: Mapped[int] = mapped_column(SmallInteger, default=100, nullable=False)
     position: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))

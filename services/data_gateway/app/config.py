@@ -85,6 +85,21 @@ class Settings(BaseSettings):
     # Cap on the submitted-answers payload size (DoS guard).
     exam_max_answers: int = 500
 
+    # --- Coding round — sandboxed code execution (HR workflow Phase 2) ---
+    # Swappable: 'piston' (free public API now; self-host in-region for India
+    # residency + the L1 cost cap later — same env, different PISTON_API_URL).
+    execution_provider: str = "piston"
+    piston_api_url: str = "https://emkc.org/api/v2/piston"
+    # Per-run wall-clock cap (ms) passed to the runner; also our own client timeout.
+    code_run_timeout_ms: int = 5000
+    # DoS guards. NOTE: grading runs these SYNCHRONOUSLY (N Piston calls per submit),
+    # so the test-case cap also bounds submit latency. Keep it low until grading
+    # moves to a background task (Tier-2). max test cases / question, max questions
+    # / coding exam, max submitted source size.
+    code_max_test_cases: int = 20
+    code_max_questions_per_exam: int = 20
+    code_max_source_bytes: int = 64_000
+
     # --- Interview invite magic-link (HR workflow Phase 3) ---
     # SEPARATE signing secret — NEVER reuse jwt_secret OR exam_link_secret. A
     # leaked interview secret must forge neither user sessions nor exam links.
