@@ -4,7 +4,7 @@
 //           progress bar, failure list, shortlist/reject/rescore mutations,
 //           real ats_breakdown/strengths/concerns in the detail drawer.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -26,6 +26,9 @@ import {
   bulkUploadApplicants,
   updateApplicantStatus,
   rescoreApplicant,
+  whyMatch,
+  getReindexStatus,
+  reindexApplicants,
   type Applicant,
   type ApplicantStatus,
   type BulkUploadResult,
@@ -97,6 +100,23 @@ function seedFrom(name: string): number {
   return Math.abs(h);
 }
 
+/** Debounce a fast-changing value (search box) so we don't query on every keystroke. */
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(t);
+  }, [value, delayMs]);
+  return debounced;
+}
+
+/** Match-score colour: warm at high relevance, cool at low. */
+function matchColor(score: number): string {
+  if (score >= 70) return '#27c93f';
+  if (score >= 45) return '#ffb764';
+  return '#888b91';
+}
+
 // ── Input base class ─────────────────────────────────────────────────────────
 
 const inputCls =
@@ -114,6 +134,8 @@ interface DrawerProps {
   onRescore: (id: string) => void;
   statusPending: boolean;
   rescorePending: boolean;
+  /** Active search phrase — when set, the drawer shows match score + "why matched". */
+  searchQuery: string;
 }
 
 function ApplicantDrawer({
@@ -124,7 +146,20 @@ function ApplicantDrawer({
   onRescore,
   statusPending,
   rescorePending,
+  searchQuery,
 }: DrawerProps) {
+  // Lazy "why matched": fetched only when a candidate is open during a search,
+  // so the LLM cost is paid per-look — not for every result on every keystroke.
+  const showMatch = searchQuery.trim().length > 0;
+  // Skip the LLM call for non-matches (match_score 0) — nothing to explain.
+  const worthExplaining = a == null || a.match_score == null || a.match_score > 0;
+  const { data: why, isLoading: whyLoading } = useQuery({
+    queryKey: ['hr', 'why-match', a?.id, searchQuery.trim()],
+    queryFn: () => whyMatch(a!.id, searchQuery.trim()),
+    enabled: Boolean(a) && showMatch && worthExplaining,
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  });
   // Close on Escape (hook must run before any early return).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -243,6 +278,33 @@ function ApplicantDrawer({
             {/* ATS summary */}
             {a.ats_summary && (
               <p className="text-[13px] leading-relaxed text-[#888b91]">{a.ats_summary}</p>
+            )}
+
+            {/* Why matched — only during a search */}
+            {showMatch && (
+              <div className="rounded-[12px] border border-[rgba(var(--accent-rgb),0.25)] bg-[rgba(var(--accent-rgb),0.06)] p-4">
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 text-[12px] font-semibold text-[#60a5fa]">
+                    <Search size={13} aria-hidden="true" />
+                    Why this matched
+                  </span>
+                  {a.match_score != null && (
+                    <span
+                      className="text-[13px] font-semibold"
+                      style={{ color: matchColor(a.match_score) }}
+                    >
+                      {a.match_score}% match
+                    </span>
+                  )}
+                </div>
+                <p className="mt-2 text-[13px] leading-relaxed text-[#b8babf]">
+                  {!worthExplaining
+                    ? 'Low relevance to this search.'
+                    : whyLoading
+                      ? 'Analysing the resume against your search…'
+                      : why?.reason || 'No explanation available.'}
+                </p>
+              </div>
             )}
           </div>
 
@@ -404,13 +466,23 @@ function ApplicantRow({
         {atsDisplay ?? '—'}
       </div>
 
-      {/* Shortlisted badge */}
+      {/* Match score (during search) — else shortlisted badge */}
       <div>
-        {a.status === 'shortlisted' && (
-          <span className="inline-flex items-center gap-1 text-[11.5px] font-semibold text-[#27c93f]">
-            <Star size={12} aria-hidden="true" />
-            Shortlisted
+        {a.match_score != null ? (
+          <span
+            className="inline-flex items-center gap-1 rounded-full bg-white/[0.06] px-2 py-0.5 text-[11.5px] font-semibold"
+            style={{ color: matchColor(a.match_score) }}
+            title="Relevance to your search"
+          >
+            {a.match_score}% match
           </span>
+        ) : (
+          a.status === 'shortlisted' && (
+            <span className="inline-flex items-center gap-1 text-[11.5px] font-semibold text-[#27c93f]">
+              <Star size={12} aria-hidden="true" />
+              Shortlisted
+            </span>
+          )
         )}
       </div>
 
@@ -625,14 +697,44 @@ export default function Applicants() {
   // List state
   const [filter, setFilter] = useState('all');
   const [query, setQuery] = useState('');
+  const debouncedQuery = useDebouncedValue(query, 350);
+  const trimmedQuery = debouncedQuery.trim();
+  const searching = trimmedQuery.length > 0;
+  const statusParam: ApplicantStatus | undefined =
+    filter === 'all' ? undefined : (filter as ApplicantStatus);
 
   // Drawer state
   const [selected, setSelected] = useState<Applicant | null>(null);
 
   // ── Queries ──────────────────────────────────────────────────────────────
-  const { data: applicants, isLoading } = useQuery({
-    queryKey: ['hr', 'applicants'],
-    queryFn: () => listApplicants(),
+  // Server-side hybrid search: q + status go to data_gateway, which runs the
+  // pgvector + full-text ranking. Previous results stay on screen while the next
+  // query resolves (no flicker between keystrokes).
+  const { data: applicants, isLoading, isFetching } = useQuery({
+    queryKey: ['hr', 'applicants', 'list', trimmedQuery, statusParam ?? 'all'],
+    queryFn: () => listApplicants({ q: trimmedQuery || undefined, status: statusParam }),
+    placeholderData: (prev) => prev,
+  });
+
+  // How many existing applicants still need a search embedding (one-click backfill).
+  const { data: reindexStatus } = useQuery({
+    queryKey: ['hr', 'applicants', 'reindex-status'],
+    queryFn: getReindexStatus,
+  });
+
+  const reindexMut = useMutation({
+    mutationFn: reindexApplicants,
+    onSuccess: (res) => {
+      void qc.invalidateQueries({ queryKey: ['hr', 'applicants'] });
+      if (res.remaining > 0 && res.reindexed > 0) {
+        reindexMut.mutate(); // keep draining batches until none remain
+      } else if (res.remaining > 0) {
+        toast.error('Some resumes could not be indexed — try again shortly.');
+      } else {
+        toast.success('All resumes are now searchable.');
+      }
+    },
+    onError: (e: unknown) => toast.error(e instanceof Error ? e.message : 'Indexing failed'),
   });
 
   // ── Mutations ─────────────────────────────────────────────────────────────
@@ -711,19 +813,9 @@ export default function Applicants() {
     uploadMut.mutate();
   }
 
-  // ── Derived list ─────────────────────────────────────────────────────────
-  const list = useMemo(() => {
-    const base = applicants ?? [];
-    return base.filter((a) => {
-      const matchFilter = filter === 'all' || a.status === filter;
-      const matchQuery =
-        query === '' ||
-        a.full_name.toLowerCase().includes(query.toLowerCase()) ||
-        (a.email ?? '').toLowerCase().includes(query.toLowerCase()) ||
-        a.target_job_title.toLowerCase().includes(query.toLowerCase());
-      return matchFilter && matchQuery;
-    });
-  }, [applicants, filter, query]);
+  // The server already applied the status filter + hybrid search ranking — use
+  // the list exactly as returned (relevance order when searching, ATS order otherwise).
+  const list = applicants ?? [];
 
   const pending = uploadMut.isPending;
 
@@ -758,17 +850,45 @@ export default function Applicants() {
 
       {/* List section */}
       <div className="space-y-4">
+        {/* Backfill banner — existing resumes need embedding before they're searchable */}
+        {reindexStatus && reindexStatus.remaining > 0 && (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-[rgba(255,183,100,0.25)] bg-[rgba(255,183,100,0.07)] px-4 py-3">
+            <p className="flex items-center gap-2 text-[12.5px] text-[#ffb764]">
+              <AlertTriangle size={14} aria-hidden="true" />
+              {reindexStatus.remaining} earlier resume{reindexStatus.remaining === 1 ? '' : 's'}{' '}
+              {reindexStatus.remaining === 1 ? "isn't" : "aren't"} searchable yet — index{' '}
+              {reindexStatus.remaining === 1 ? 'it' : 'them'} to include in semantic search.
+            </p>
+            <Pill
+              variant="outline"
+              onClick={() => reindexMut.mutate()}
+              disabled={reindexMut.isPending}
+              className="gap-1.5"
+            >
+              <RefreshCw
+                size={14}
+                className={cn(reindexMut.isPending && 'animate-spin')}
+                aria-hidden="true"
+              />
+              {reindexMut.isPending ? 'Indexing…' : 'Make searchable'}
+            </Pill>
+          </div>
+        )}
+
         {/* Controls bar */}
         <div className="flex flex-wrap items-center gap-3">
-          <div className="flex w-[260px] items-center gap-2 rounded-[9999px] border border-white/[0.08] bg-[rgba(28,29,31,0.7)] px-3.5 py-2.5">
+          <div className="flex w-[320px] items-center gap-2 rounded-[9999px] border border-white/[0.08] bg-[rgba(28,29,31,0.7)] px-3.5 py-2.5">
             <Search size={15} className="shrink-0 text-[#70757c]" aria-hidden="true" />
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search applicants…"
-              aria-label="Search applicants"
+              placeholder="Search by skill, role, or meaning…"
+              aria-label="Search applicants by skills or meaning"
               className="min-w-0 flex-1 bg-transparent text-[13px] text-white placeholder:text-[#5a5f66] focus:outline-none"
             />
+            {searching && isFetching && (
+              <RefreshCw size={13} className="shrink-0 animate-spin text-[#5a5f66]" aria-hidden="true" />
+            )}
             {query && (
               <button
                 type="button"
@@ -784,7 +904,11 @@ export default function Applicants() {
           <SegTabs tabs={STATUS_FILTERS} active={filter} onChange={setFilter} />
 
           <span className="ml-auto text-[12.5px] text-[#70757c]">
-            {isLoading ? '…' : `${list.length} applicant${list.length === 1 ? '' : 's'}`}
+            {isLoading
+              ? '…'
+              : searching
+                ? `${list.length} match${list.length === 1 ? '' : 'es'}`
+                : `${list.length} applicant${list.length === 1 ? '' : 's'}`}
           </span>
         </div>
 
@@ -798,14 +922,14 @@ export default function Applicants() {
         ) : list.length === 0 ? (
           <GlassCard className="py-16 text-center">
             <p className="text-[15px] font-medium text-white">
-              {(applicants ?? []).length === 0
-                ? 'No applicants yet'
-                : 'No applicants match your filters'}
+              {searching || statusParam ? 'No matching candidates' : 'No applicants yet'}
             </p>
             <p className="mt-1 text-[13px] text-[#70757c]">
-              {(applicants ?? []).length === 0
-                ? 'Upload resumes above to get started.'
-                : 'Try adjusting the search or filter.'}
+              {searching
+                ? 'Try a broader phrase or different keywords.'
+                : statusParam
+                  ? 'No applicants in this status.'
+                  : 'Upload resumes above to get started.'}
             </p>
           </GlassCard>
         ) : (
@@ -848,6 +972,7 @@ export default function Applicants() {
             onRescore={(id) => rescoreMut.mutate(id)}
             statusPending={statusMut.isPending}
             rescorePending={rescoreMut.isPending}
+            searchQuery={trimmedQuery}
           />
         )}
       </AnimatePresence>

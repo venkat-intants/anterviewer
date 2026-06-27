@@ -31,6 +31,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db_session
 from app.dependencies import require_role
+from app.embedding_client import (
+    EmbeddingError,
+    embed_one_remote,
+    embed_texts_remote,
+    to_pgvector_literal,
+    why_match_remote,
+)
 from app.models import Applicant
 from app.routers.resume import _delete_from_s3, _extract_pdf_text, _upload_to_s3
 from app.scoring_client import ResumeScoreError, score_resume_remote
@@ -95,6 +102,19 @@ class ApplicantOut(BaseModel):
     # The linked candidate user (set once the applicant redeems an interview
     # invite) — lets HR open the candidate's full profile. None until provisioned.
     user_id: str | None = None
+    # Relevance to the current semantic search query (0-100), set only on a
+    # ?q= search response. A RELATIVE ranking signal — higher = better match.
+    match_score: int | None = None
+
+
+class WhyMatchOut(BaseModel):
+    reason: str
+
+
+class ReindexResult(BaseModel):
+    reindexed: int
+    failed: int
+    remaining: int
 
 
 class StatusUpdate(BaseModel):
@@ -136,6 +156,85 @@ def _apply_score(a: Applicant, score: dict[str, Any]) -> None:
     a.ats_recommendation = score.get("recommendation")
     a.ats_summary = score.get("summary")
     a.updated_at = datetime.now(tz=UTC)
+
+
+async def _store_embedding(
+    db: AsyncSession, company_id: uuid.UUID, applicant_id: uuid.UUID, vec: list[float]
+) -> None:
+    """Persist a resume embedding on the applicant row (ORM does not map it).
+
+    company_id is in the predicate as defence-in-depth: every applicant write in
+    this module stays tenant-scoped, even though applicant_id is already owned.
+    """
+    if not vec:
+        return
+    await db.execute(
+        text(
+            "UPDATE applicants SET embedding = CAST(:emb AS halfvec) "
+            "WHERE id = :id AND company_id = :cid"
+        ),
+        {"emb": to_pgvector_literal(vec), "id": applicant_id, "cid": company_id},
+    )
+    await db.commit()
+
+
+async def _embed_applicant(db: AsyncSession, applicant: Applicant, hr_uid: uuid.UUID) -> None:
+    """Best-effort: embed the resume so it is searchable. Never raises.
+
+    An embedding outage must NOT fail an upload — the applicant still persists and
+    remains findable via the full-text (exact-keyword) leg until reindexed.
+    """
+    if not applicant.resume_text or not applicant.resume_text.strip():
+        return
+    try:
+        vec = await embed_one_remote(
+            text=applicant.resume_text, task_type="document", acting_user_id=str(hr_uid)
+        )
+        await _store_embedding(db, applicant.company_id, applicant.id, vec)
+    except EmbeddingError as exc:
+        log.warning("hr.applicant.embed_unavailable", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 — embedding must never break ingest
+        # The applicant is already committed; this only rolls back the (uncommitted)
+        # embedding UPDATE and clears any aborted-transaction state so the next
+        # bulk file is unaffected.
+        await db.rollback()
+        log.warning("hr.applicant.embed_failed", error_type=type(exc).__name__)
+
+
+# Embeds requested in one /internal/embed call (feedback_billing caps at 64).
+_EMBED_BATCH = 16
+
+
+async def _embed_applicants_batch(
+    db: AsyncSession,
+    company_id: uuid.UUID,
+    hr_uid: uuid.UUID,
+    applicant_ids: list[uuid.UUID],
+) -> None:
+    """Best-effort batch embed for a just-uploaded batch (≈1 HTTP call / 16 resumes)."""
+    if not applicant_ids:
+        return
+    rows = (
+        await db.execute(
+            select(Applicant.id, Applicant.resume_text).where(
+                Applicant.company_id == company_id,
+                Applicant.id.in_(applicant_ids),
+                Applicant.resume_text.isnot(None),
+            )
+        )
+    ).all()
+    items = [(r.id, r.resume_text) for r in rows if r.resume_text and r.resume_text.strip()]
+    for i in range(0, len(items), _EMBED_BATCH):
+        chunk = items[i : i + _EMBED_BATCH]
+        try:
+            vecs = await embed_texts_remote(
+                texts=[t for _, t in chunk], task_type="document", acting_user_id=str(hr_uid)
+            )
+        except EmbeddingError as exc:
+            log.warning("hr.applicant.bulk.embed_unavailable", error=str(exc))
+            return
+        for (aid, _), vec in zip(chunk, vecs, strict=True):
+            await _store_embedding(db, company_id, aid, vec)
 
 
 async def _get_owned(db: AsyncSession, company_id: uuid.UUID, applicant_id: uuid.UUID) -> Applicant:
@@ -233,6 +332,8 @@ async def _ingest_resume(
         await db.rollback()
         await _delete_from_s3(s3_key)
         raise ValueError("could not save the applicant") from exc
+    # NOTE: embedding is deferred — bulk_upload_applicants batch-embeds the whole
+    # batch in one shot afterwards (far fewer HTTP calls than one per file).
     return applicant
 
 
@@ -321,6 +422,9 @@ async def create_applicant(
         log.warning("hr.applicant.score_unavailable", error=str(exc))
         # Applicant persists unscored; HR can POST /rescore later.
 
+    # Make the resume semantically searchable (best-effort — never fails upload).
+    await _embed_applicant(db, applicant, hr_uid)
+
     log.info(
         "hr.applicant.created",
         applicant_id=str(applicant_id),
@@ -366,6 +470,7 @@ async def bulk_upload_applicants(
 
     created: list[ApplicantOut] = []
     failed: list[dict[str, str]] = []
+    embed_ids: list[uuid.UUID] = []
     for f in files:
         fname = f.filename or "resume.pdf"
         # Browsers usually send application/pdf; some send octet-stream — allow both
@@ -396,6 +501,7 @@ async def bulk_upload_applicants(
                 jd_text=target_jd_text,
             )
             created.append(_to_out(applicant))
+            embed_ids.append(applicant.id)
         except (ValueError, BotoCoreError, ClientError) as exc:
             await db.rollback()
             failed.append({"filename": fname, "error": str(exc)[:140]})
@@ -403,6 +509,9 @@ async def bulk_upload_applicants(
             await db.rollback()
             log.error("hr.applicant.bulk.unexpected", error_type=type(exc).__name__)
             failed.append({"filename": fname, "error": "unexpected error"})
+
+    # Embed the whole batch in one or two calls (best-effort — never fails upload).
+    await _embed_applicants_batch(db, company_id, hr_uid, embed_ids)
 
     log.info(
         "hr.applicant.bulk.complete",
@@ -418,24 +527,199 @@ async def bulk_upload_applicants(
     )
 
 
+# Hybrid weighting: semantic meaning dominates, exact-keyword presence boosts.
+_SEMANTIC_WEIGHT = 0.7
+_LEXICAL_WEIGHT = 0.3
+_SEARCH_LIMIT = 200
+
+
+async def _semantic_search(
+    db: AsyncSession,
+    hr_uid: uuid.UUID,
+    company_id: uuid.UUID,
+    q: str,
+    status_filter: str | None,
+    job: str | None,
+) -> list[ApplicantOut]:
+    """Hybrid (semantic + exact-keyword) ranked search, scoped to the company.
+
+    semantic leg : cosine similarity of the resume embedding to the query vector.
+    lexical leg  : Postgres full-text rank of the query terms over the resume.
+    If the embedding service is down we degrade gracefully to pure full-text.
+    """
+    qvec: list[float] = []
+    try:
+        qvec = await embed_one_remote(text=q, task_type="query", acting_user_id=str(hr_uid))
+    except EmbeddingError as exc:
+        log.warning("hr.applicant.search.embed_unavailable", error=str(exc))
+
+    params: dict[str, Any] = {"company_id": company_id, "q": q, "limit": _SEARCH_LIMIT}
+    where = ["a.company_id = :company_id", "a.deleted_at IS NULL"]
+    if status_filter:
+        where.append("a.status = :status")
+        params["status"] = status_filter
+    if job:
+        where.append("a.target_job_title ILIKE :job")
+        params["job"] = f"%{job}%"
+
+    lexical = (
+        "ts_rank_cd(to_tsvector('english', coalesce(a.resume_text, '')), "
+        "plainto_tsquery('english', :q))"
+    )
+    if qvec:
+        params["qvec"] = to_pgvector_literal(qvec)
+        semantic = (
+            "CASE WHEN a.embedding IS NULL THEN 0 "
+            "ELSE 1 - (a.embedding <=> CAST(:qvec AS halfvec)) END"
+        )
+        # Keep only rows with some signal: an embedding OR a keyword hit.
+        where.append(f"(a.embedding IS NOT NULL OR ({lexical}) > 0)")
+    else:
+        semantic = "0"
+        where.append(f"({lexical}) > 0")  # pure full-text fallback
+
+    score_expr = f"({_SEMANTIC_WEIGHT} * ({semantic}) + {_LEXICAL_WEIGHT} * LEAST(({lexical}), 1.0))"
+    sql = text(
+        f"SELECT a.id AS id, GREATEST(0, ROUND(100 * {score_expr}))::int AS match_score "
+        f"FROM applicants a "
+        f"WHERE {' AND '.join(where)} "
+        f"ORDER BY {score_expr} DESC, a.ats_overall DESC NULLS LAST, a.created_at DESC "
+        f"LIMIT :limit"
+    )
+    ranked = (await db.execute(sql, params)).all()
+    if not ranked:
+        return []
+
+    score_by_id: dict[uuid.UUID, int] = {r.id: int(r.match_score) for r in ranked}
+    id_order = [r.id for r in ranked]
+    rows = (
+        await db.execute(
+            select(Applicant).where(
+                Applicant.id.in_(id_order),
+                Applicant.company_id == company_id,  # defence-in-depth: never cross tenants
+            )
+        )
+    ).scalars().all()
+    by_id = {a.id: a for a in rows}
+
+    out: list[ApplicantOut] = []
+    for aid in id_order:  # preserve relevance order
+        a = by_id.get(aid)
+        if a is None:
+            continue
+        item = _to_out(a)
+        item.match_score = score_by_id.get(aid)
+        out.append(item)
+    return out
+
+
 @router.get("/applicants", response_model=list[ApplicantOut])
 async def list_applicants(
     ctx: HrCtxDep,
     db: DbSessionDep,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
+    q: Annotated[
+        str | None, Query(max_length=500, description="Semantic + keyword search phrase")
+    ] = None,
+    job: Annotated[
+        str | None, Query(max_length=200, description="Filter by target job title (contains)")
+    ] = None,
 ) -> list[ApplicantOut]:
-    """Ranked applicant list for the caller's company (highest ATS score first)."""
-    _hr_uid, company_id = ctx
+    """Applicant list for the caller's company.
+
+    Default: ranked by ATS score. With ``?q=`` it becomes a hybrid semantic +
+    exact-keyword search (each result carries a 0-100 ``match_score``). The
+    ``status`` and ``job`` filters stack with either mode.
+    """
+    hr_uid, company_id = ctx
+    if q and q.strip():
+        return await _semantic_search(db, hr_uid, company_id, q.strip(), status_filter, job)
+
     stmt = select(Applicant).where(
         Applicant.company_id == company_id, Applicant.deleted_at.is_(None)
     )
     if status_filter:
         stmt = stmt.where(Applicant.status == status_filter)
+    if job:
+        stmt = stmt.where(Applicant.target_job_title.ilike(f"%{job}%"))
     stmt = stmt.order_by(
         Applicant.ats_overall.desc().nullslast(), Applicant.created_at.desc()
     )
     rows = (await db.execute(stmt)).scalars().all()
     return [_to_out(a) for a in rows]
+
+
+@router.get("/applicants/reindex-status", response_model=ReindexResult)
+async def reindex_status(ctx: HrCtxDep, db: DbSessionDep) -> ReindexResult:
+    """How many of this company's applicants still lack a search embedding."""
+    _hr_uid, company_id = ctx
+    remaining = await db.scalar(
+        text(
+            "SELECT count(*) FROM applicants WHERE company_id = :c AND deleted_at IS NULL "
+            "AND embedding IS NULL AND resume_text IS NOT NULL AND length(trim(resume_text)) > 0"
+        ),
+        {"c": company_id},
+    )
+    return ReindexResult(reindexed=0, failed=0, remaining=int(remaining or 0))
+
+
+@router.post("/applicants/reindex", response_model=ReindexResult)
+async def reindex_applicants(ctx: HrCtxDep, db: DbSessionDep) -> ReindexResult:
+    """Backfill embeddings for existing applicants that have none (one click).
+
+    Processes in batches; safe to call repeatedly until ``remaining`` is 0.
+    """
+    hr_uid, company_id = ctx
+    rows = (
+        await db.execute(
+            text(
+                "SELECT id, resume_text FROM applicants WHERE company_id = :c "
+                "AND deleted_at IS NULL AND embedding IS NULL "
+                "AND resume_text IS NOT NULL AND length(trim(resume_text)) > 0 "
+                "ORDER BY created_at DESC LIMIT 96"
+            ),
+            {"c": company_id},
+        )
+    ).all()
+    if not rows:
+        return ReindexResult(reindexed=0, failed=0, remaining=0)
+
+    batch = 16  # matches feedback_billing's /internal/embed cap (max 64)
+    done = 0
+    failed = 0
+    for i in range(0, len(rows), batch):
+        chunk = rows[i : i + batch]
+        try:
+            vecs = await embed_texts_remote(
+                texts=[r.resume_text for r in chunk],
+                task_type="document",
+                acting_user_id=str(hr_uid),
+            )
+        except EmbeddingError as exc:
+            log.warning("hr.applicant.reindex.embed_unavailable", error=str(exc))
+            failed += len(chunk)
+            continue
+        for r, vec in zip(chunk, vecs, strict=True):
+            if vec:
+                await db.execute(
+                    text(
+                        "UPDATE applicants SET embedding = CAST(:e AS halfvec) "
+                        "WHERE id = :id AND company_id = :cid"
+                    ),
+                    {"e": to_pgvector_literal(vec), "id": r.id, "cid": company_id},
+                )
+                done += 1
+        await db.commit()
+
+    remaining = await db.scalar(
+        text(
+            "SELECT count(*) FROM applicants WHERE company_id = :c AND deleted_at IS NULL "
+            "AND embedding IS NULL AND resume_text IS NOT NULL AND length(trim(resume_text)) > 0"
+        ),
+        {"c": company_id},
+    )
+    log.info("hr.applicant.reindex.complete", company_id=str(company_id), done=done, failed=failed)
+    return ReindexResult(reindexed=done, failed=failed, remaining=int(remaining or 0))
 
 
 @router.get("/applicants/{applicant_id}", response_model=ApplicantOut)
@@ -480,4 +764,33 @@ async def rescore_applicant(
         raise HTTPException(status_code=502, detail=f"Resume scoring failed: {exc}") from exc
     _apply_score(a, score)
     await db.commit()
+    # Refresh the search embedding too (also backfills it if it was missing).
+    await _embed_applicant(db, a, hr_uid)
     return _to_out(a)
+
+
+@router.get("/applicants/{applicant_id}/why-match", response_model=WhyMatchOut)
+async def why_match_applicant(
+    applicant_id: uuid.UUID,
+    ctx: HrCtxDep,
+    db: DbSessionDep,
+    q: Annotated[str, Query(min_length=1, description="The search phrase to explain against")],
+) -> WhyMatchOut:
+    """One-sentence explanation of why this candidate matches the query (lazy).
+
+    Computed on demand (when HR opens a candidate during a search) so the LLM cost
+    is paid per-look, not per-result on every keystroke.
+    """
+    hr_uid, company_id = ctx
+    a = await _get_owned(db, company_id, applicant_id)
+    if not a.resume_text:
+        raise HTTPException(status_code=400, detail="No resume text on file to explain.")
+    try:
+        reason = await why_match_remote(
+            resume_text=a.resume_text, query=q, acting_user_id=str(hr_uid)
+        )
+    except EmbeddingError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Could not generate explanation: {exc}"
+        ) from exc
+    return WhyMatchOut(reason=reason)

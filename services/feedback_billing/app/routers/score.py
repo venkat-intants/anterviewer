@@ -319,3 +319,85 @@ async def internal_generate_exam(
     return GenerateExamResponse(
         questions=[GeneratedQuestion(**q) for q in questions]
     )
+
+
+# ---------------------------------------------------------------------------
+# Semantic resume search (HR workflow) — embeddings + match explanation
+# ---------------------------------------------------------------------------
+
+
+class EmbedRequest(BaseModel):
+    """Request body for POST /internal/embed — embed resumes or an HR query."""
+
+    texts: list[str] = Field(..., min_length=1, max_length=64, description="Texts to embed")
+    task_type: str = Field(
+        default="document", description="'document' (resumes) | 'query' (search phrase)"
+    )
+
+
+class EmbedResponse(BaseModel):
+    embeddings: list[list[float]]
+
+
+@router.post(
+    "/embed",
+    status_code=status.HTTP_200_OK,
+    response_model=EmbedResponse,
+    summary="Embed texts with Gemini for semantic resume search (stateless)",
+)
+async def internal_embed(
+    body: EmbedRequest,
+    _jwt_payload: Annotated[dict[str, Any], Depends(_require_jwt)],
+    app_settings: Annotated[Settings, Depends(_get_settings)],
+) -> EmbedResponse:
+    """Return one embedding vector per input text (same order). Caller persists/queries."""
+    from app.embedder import EmbeddingError, embed_texts
+
+    try:
+        vectors = await embed_texts(
+            texts=body.texts, task_type=body.task_type, settings=app_settings
+        )
+    except EmbeddingError as exc:
+        log.error("score.embed_error", error=exc.message)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Embedding failed: {exc.message}",
+        ) from exc
+    return EmbedResponse(embeddings=vectors)
+
+
+class WhyMatchRequest(BaseModel):
+    """Request body for POST /internal/why-match — explain a resume↔query match."""
+
+    resume_text: str = Field(..., min_length=1)
+    query: str = Field(..., min_length=1, max_length=300)
+
+
+class WhyMatchResponse(BaseModel):
+    reason: str
+
+
+@router.post(
+    "/why-match",
+    status_code=status.HTTP_200_OK,
+    response_model=WhyMatchResponse,
+    summary="One-sentence explanation of why a resume matches an HR query (stateless)",
+)
+async def internal_why_match(
+    body: WhyMatchRequest,
+    _jwt_payload: Annotated[dict[str, Any], Depends(_require_jwt)],
+    app_settings: Annotated[Settings, Depends(_get_settings)],
+) -> WhyMatchResponse:
+    from app.embedder import EmbeddingError, generate_match_reason
+
+    try:
+        reason = await generate_match_reason(
+            resume_text=body.resume_text, query=body.query, settings=app_settings
+        )
+    except EmbeddingError as exc:
+        log.error("score.why_match_error", error=exc.message)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Match explanation failed: {exc.message}",
+        ) from exc
+    return WhyMatchResponse(reason=reason)

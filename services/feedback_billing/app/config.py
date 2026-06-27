@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
     gemini_api_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
 
+    # Embeddings for semantic resume search (HR workflow).
+    # gemini-embedding-001 is free (no card) and emits up to 3072 dims via
+    # outputDimensionality; 3072 is the native size and is already L2-normalized,
+    # so it slots straight into the applicants.embedding halfvec(3072) column.
+    embedding_model: str = "gemini-embedding-001"
+    embedding_dimensions: int = 3072
+
     sentry_dsn: str = ""
     cors_allowed_origins: str = "http://localhost:5173"
 
