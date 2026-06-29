@@ -25,7 +25,7 @@ from app.config import settings
 from app.models import CodingQuestion, Exam
 from app.piston_client import SUPPORTED_LANGUAGES
 from app.routers.hr_applicants import DbSessionDep, HrCtxDep
-from app.routers.hr_exams import _get_owned_exam, _require_no_attempts
+from app.routers.hr_exams import _default_section, _get_owned_exam, _require_no_attempts
 
 log = structlog.get_logger(__name__)
 
@@ -205,16 +205,19 @@ async def add_coding_question(
     _hr_uid, company_id = ctx
     await _get_coding_exam(db, company_id, exam_id)
     await _require_no_attempts(db, company_id, exam_id)
+    # Back-compat: target the exam's default coding section.
+    section = await _default_section(db, company_id, exam_id, "coding")
 
     max_pos = await db.scalar(
         select(func.max(CodingQuestion.position)).where(
-            CodingQuestion.exam_id == exam_id, CodingQuestion.deleted_at.is_(None)
+            CodingQuestion.section_id == section.id, CodingQuestion.deleted_at.is_(None)
         )
     )
     now = datetime.now(tz=UTC)
     q = CodingQuestion(
         id=uuid.uuid4(),
         exam_id=exam_id,
+        section_id=section.id,
         company_id=company_id,
         prompt=body.prompt.strip(),
         starter_code=body.starter_code,

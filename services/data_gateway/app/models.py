@@ -232,8 +232,97 @@ class Exam(Base):
     time_limit_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     allow_retake: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(Text, default="draft", nullable=False)
-    # kind: 'mcq' (default) | 'coding'. Selects which child table + grader to use.
+    # kind: 'mcq' (default) | 'coding'. LEGACY single-round discriminator; the real
+    # type now lives on exam_sections.kind. Kept for back-compat (existing flat exams
+    # + the default-section migration carry it forward) and as the default for new
+    # sections created without an explicit kind.
     kind: Mapped[str] = mapped_column(Text, default="mcq", nullable=False)
+    # When True, passing the terminal round (advances_to_interview) auto-creates a
+    # scheduled interview invite + emails the candidate. When False, HR invites
+    # manually (the eligible-applicants gate). Per-exam, HR-configurable.
+    auto_advance_on_pass: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class ExamRound(Base):
+    """An ordered round within an exam (Aptitude, Coding, Core CS, ...).
+
+    Rounds are the unit HR SCHEDULES and ASSIGNS independently: each round mints its
+    own magic link + deadline (exam_assignments.round_id), and a candidate's attempt
+    is per-round (exam_attempts.round_id). A round groups one or more exam_sections,
+    each of which carries its own kind (mcq | coding) — so a single exam can mix
+    MCQ and coding across (and within) rounds.
+
+    pass_threshold/time_limit_seconds default from the exam but are per-round here.
+    advances_to_interview marks the terminal round whose pass can auto-advance the
+    candidate to an interview (gated by exam.auto_advance_on_pass).
+    company_id is pinned to the exam by a composite FK so it cannot drift cross-tenant.
+    """
+
+    __tablename__ = "exam_rounds"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["exam_id", "company_id"], ["exams.id", "exams.company_id"],
+            name="fk_exam_rounds_exam", ondelete="CASCADE",
+        ),
+        UniqueConstraint("id", "company_id", name="uq_exam_rounds_id_company"),
+        CheckConstraint(
+            "pass_threshold BETWEEN 0 AND 100", name="ck_exam_rounds_pass_threshold_range"
+        ),
+        CheckConstraint("status IN ('draft','published')", name="ck_exam_rounds_status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    exam_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
+    )
+    round_number: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    pass_threshold: Mapped[int] = mapped_column(SmallInteger, default=60, nullable=False)
+    time_limit_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    advances_to_interview: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    status: Mapped[str] = mapped_column(Text, default="draft", nullable=False)
+    position: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class ExamSection(Base):
+    """A typed section within a round. kind ('mcq' | 'coding') selects which child
+    question table + grader the section uses; mixing sections of different kinds in
+    one round is how an exam mixes MCQ + coding. company_id is pinned to the round
+    by a composite FK. exam_id is denormalized for fast "all sections of an exam".
+    """
+
+    __tablename__ = "exam_sections"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["round_id", "company_id"], ["exam_rounds.id", "exam_rounds.company_id"],
+            name="fk_exam_sections_round", ondelete="CASCADE",
+        ),
+        UniqueConstraint("id", "company_id", name="uq_exam_sections_id_company"),
+        CheckConstraint("kind IN ('mcq','coding')", name="ck_exam_sections_kind"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    round_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    exam_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    # kind: 'mcq' | 'coding' — selects the question table + grader for this section.
+    kind: Mapped[str] = mapped_column(Text, default="mcq", nullable=False)
+    time_limit_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    position: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
@@ -252,6 +341,11 @@ class ExamQuestion(Base):
             ["exam_id", "company_id"], ["exams.id", "exams.company_id"],
             name="fk_exam_questions_exam", ondelete="CASCADE",
         ),
+        # New parent: the section. company_id is pinned to the section too.
+        ForeignKeyConstraint(
+            ["section_id", "company_id"], ["exam_sections.id", "exam_sections.company_id"],
+            name="fk_exam_questions_section", ondelete="CASCADE",
+        ),
         CheckConstraint(
             "jsonb_array_length(options) BETWEEN 2 AND 6",
             name="ck_exam_questions_options_count",
@@ -265,6 +359,7 @@ class ExamQuestion(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     exam_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    section_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     company_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
     )
@@ -296,6 +391,10 @@ class CodingQuestion(Base):
             ["exam_id", "company_id"], ["exams.id", "exams.company_id"],
             name="fk_coding_questions_exam", ondelete="CASCADE",
         ),
+        ForeignKeyConstraint(
+            ["section_id", "company_id"], ["exam_sections.id", "exam_sections.company_id"],
+            name="fk_coding_questions_section", ondelete="CASCADE",
+        ),
         CheckConstraint("points >= 1", name="ck_coding_questions_points_positive"),
         CheckConstraint(
             "jsonb_array_length(allowed_languages) >= 1",
@@ -309,6 +408,7 @@ class CodingQuestion(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     exam_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    section_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     company_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
     )
@@ -341,6 +441,11 @@ class ExamAssignment(Base):
             ["exam_id", "company_id"], ["exams.id", "exams.company_id"],
             name="fk_exam_assignments_exam", ondelete="CASCADE",
         ),
+        # The token now grants ONE round. company_id pinned to the round too.
+        ForeignKeyConstraint(
+            ["round_id", "company_id"], ["exam_rounds.id", "exam_rounds.company_id"],
+            name="fk_exam_assignments_round", ondelete="CASCADE",
+        ),
         UniqueConstraint("token_hash", name="uq_exam_assignments_token_hash"),
         UniqueConstraint("id", "company_id", name="uq_exam_assignments_id_company"),
         CheckConstraint(
@@ -354,6 +459,7 @@ class ExamAssignment(Base):
         Uuid, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
     )
     exam_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    round_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     applicant_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("applicants.id", ondelete="CASCADE"), nullable=False
     )
@@ -362,6 +468,9 @@ class ExamAssignment(Base):
     )
     token_hash: Mapped[str] = mapped_column(Text, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    # Optional scheduled start; gates the first /exam/start join-window (mirrors
+    # interview_invites.scheduled_at). NULL = redeemable any time before expiry.
+    scheduled_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     consumed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(Text, default="invited", nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
@@ -388,8 +497,13 @@ class ExamAttempt(Base):
             ["exam_id", "company_id"], ["exams.id", "exams.company_id"],
             name="fk_exam_attempts_exam", ondelete="CASCADE",
         ),
+        # Attempts are now per-ROUND (a candidate has one attempt per round).
+        ForeignKeyConstraint(
+            ["round_id", "company_id"], ["exam_rounds.id", "exam_rounds.company_id"],
+            name="fk_exam_attempts_round", ondelete="CASCADE",
+        ),
         UniqueConstraint(
-            "exam_id", "applicant_id", "attempt_no", name="uq_exam_attempts_exam_applicant_no"
+            "round_id", "applicant_id", "attempt_no", name="uq_exam_attempts_round_applicant_no"
         ),
         CheckConstraint(
             "score_percent IS NULL OR (score_percent BETWEEN 0 AND 100)",
@@ -405,6 +519,7 @@ class ExamAttempt(Base):
         Uuid, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
     )
     exam_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    round_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     applicant_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("applicants.id", ondelete="CASCADE"), nullable=False
     )
@@ -418,12 +533,47 @@ class ExamAttempt(Base):
     score_max: Mapped[int | None] = mapped_column(Integer, nullable=True)
     score_percent: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Proctoring (mirror of sessions.integrity_score/proctoring_summary). NULL =
+    # no proctoring data. Rolling score maintained by /exam/integrity-event.
+    integrity_score: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    proctoring_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str] = mapped_column(Text, default="in_progress", nullable=False)
     started_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
     submitted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class ExamIntegrityEvent(Base):
+    """One flagged proctoring event during a (coding/MCQ) exam attempt — the exam
+    analogue of interview ``integrity_events`` (which key off sessions.id). Exams
+    have no session, so these key off the attempt instead.
+
+    event_type: fullscreen_exit | tab_blur | copy | paste | ... (instantaneous;
+        ended_at NULL) — extend as needed. Detection is client-side; raw input
+        never leaves the browser, only these lightweight events. The rolling
+        integrity_score + proctoring_summary live on exam_attempts (read path).
+    """
+
+    __tablename__ = "exam_integrity_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["attempt_id"], ["exam_attempts.id"],
+            name="fk_exam_integrity_events_attempt", ondelete="CASCADE",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    attempt_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    event_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
 
 
 class InterviewInvite(Base):

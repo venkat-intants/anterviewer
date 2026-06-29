@@ -107,6 +107,7 @@ export default function Exams() {
   const [threshold, setThreshold] = useState('60');
   const [minutes, setMinutes] = useState('');
   const [allowRetake, setAllowRetake] = useState(false);
+  const [autoAdvance, setAutoAdvance] = useState(false);
   const [kind, setKind] = useState<'mcq' | 'coding'>('mcq');
   const [showForm, setShowForm] = useState(false);
 
@@ -122,6 +123,7 @@ export default function Exams() {
         pass_threshold: Number(threshold) || 60,
         time_limit_seconds: minutes.trim() ? Math.max(1, Number(minutes)) * 60 : null,
         allow_retake: allowRetake,
+        auto_advance_on_pass: autoAdvance,
         kind,
       }),
     onSuccess: (e) => {
@@ -130,6 +132,7 @@ export default function Exams() {
       setMinutes('');
       setThreshold('60');
       setAllowRetake(false);
+      setAutoAdvance(false);
       setKind('mcq');
       setShowForm(false);
       void qc.invalidateQueries({ queryKey: ['hr', 'exams'] });
@@ -214,13 +217,23 @@ export default function Exams() {
                   onChange={(e) => setMinutes(e.target.value)}
                   aria-label="Time limit in minutes"
                 />
-                <div className="flex items-end gap-3 pb-1">
-                  <ToggleSwitch
-                    checked={allowRetake}
-                    onChange={setAllowRetake}
-                    label="Allow retake"
-                  />
-                  <span className="text-[13px] text-[#b8babf]">Allow retake</span>
+                <div className="flex flex-col gap-2 pb-1">
+                  <div className="flex items-center gap-3">
+                    <ToggleSwitch
+                      checked={allowRetake}
+                      onChange={setAllowRetake}
+                      label="Allow retake"
+                    />
+                    <span className="text-[13px] text-[#b8babf]">Allow retake</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <ToggleSwitch
+                      checked={autoAdvance}
+                      onChange={setAutoAdvance}
+                      label="Auto-advance on pass"
+                    />
+                    <span className="text-[13px] text-[#b8babf]">Auto-advance on pass</span>
+                  </div>
                 </div>
               </div>
               <div className="flex gap-2">

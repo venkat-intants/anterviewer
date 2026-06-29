@@ -84,6 +84,14 @@ class Settings(BaseSettings):
     exam_submit_grace_seconds: int = 30
     # Cap on the submitted-answers payload size (DoS guard).
     exam_max_answers: int = 500
+    # Join window (MINUTES) for the FIRST /start of a SCHEDULED round, measured from
+    # exam_assignments.scheduled_at. Unscheduled rounds may start any time before the
+    # link expires. Mirrors interview_join_window_minutes (exams run longer → wider).
+    exam_join_window_minutes: int = 30
+    # Number of proctoring violations (fullscreen-exit / tab-switch) after which the
+    # exam auto-submits. Surfaced to the candidate UI; enforced client-side, logged
+    # server-side via /exam/integrity-event.
+    exam_integrity_max_violations: int = 3
 
     # --- Coding round — sandboxed code execution (HR workflow Phase 2) ---
     # Swappable: 'piston' (free public API now; self-host in-region for India
@@ -99,6 +107,8 @@ class Settings(BaseSettings):
     code_max_test_cases: int = 20
     code_max_questions_per_exam: int = 20
     code_max_source_bytes: int = 64_000
+    # Cap on candidate-supplied stdin for the "Run with custom input" feature.
+    code_max_stdin_bytes: int = 20_000
 
     # --- Interview invite magic-link (HR workflow Phase 3) ---
     # SEPARATE signing secret — NEVER reuse jwt_secret OR exam_link_secret. A

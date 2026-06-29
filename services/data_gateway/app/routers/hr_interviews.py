@@ -12,6 +12,7 @@ Cross-company ids return 404.
 
 from __future__ import annotations
 
+import html as html_lib
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
@@ -23,6 +24,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.email_util import send_email
 from app.interview_link import hash_interview_token, mint_interview_token
 from app.models import Applicant, InterviewInvite, Job, Scorecard
 from app.notifications_util import create_notification
@@ -134,6 +136,39 @@ async def _get_owned_invite(
     return inv
 
 
+async def _create_job_from_applicant(
+    db: AsyncSession,
+    applicant: Applicant,
+    *,
+    created_by_user_id: uuid.UUID | None,
+    language: str = "en",
+    job_title: str | None = None,
+    level: str | None = None,
+) -> Job:
+    """Create a tenant-owned Job from the applicant's screening role so the
+    interviewer prompt is grounded. Shared by manual invite + auto-advance."""
+    title = (job_title or applicant.target_job_title or "the role").strip()
+    lvl = (level or applicant.target_level or "mid").strip()
+    now = datetime.now(tz=UTC)
+    job = Job(
+        id=uuid.uuid4(),
+        title=title,
+        description=title,
+        level=lvl if lvl in ("entry", "mid", "senior") else "mid",
+        language=language,
+        nos_codes=[],
+        competencies={},
+        is_active=True,
+        jd_text=applicant.target_jd_text,
+        created_by_user_id=created_by_user_id,  # tenant-owned (M4)
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(job)
+    await db.flush()
+    return job
+
+
 async def _resolve_job(
     db: AsyncSession, hr_uid: uuid.UUID, company_id: uuid.UUID, applicant: Applicant, body: InviteCreateIn
 ) -> Job:
@@ -143,7 +178,9 @@ async def _resolve_job(
         job = await db.scalar(select(Job).where(Job.id == body.job_id, Job.is_active.is_(True)))
         if job is None:
             raise HTTPException(status_code=404, detail="Job not found or inactive.")
-        # M4: a tenant-owned job must belong to this company.
+        # M4: a tenant-owned job must belong to this company. A NULL owner means a
+        # GLOBAL/platform job (e.g. seeded role catalog) intentionally usable by any
+        # tenant — the company check is skipped for those by design.
         if job.created_by_user_id is not None:
             owner_company = await db.scalar(
                 text("SELECT company_id FROM users WHERE id = :uid"),
@@ -153,26 +190,125 @@ async def _resolve_job(
                 raise HTTPException(status_code=404, detail="Job not found.")
         return job
 
-    title = (body.job_title or applicant.target_job_title or "the role").strip()
-    level = (body.level or applicant.target_level or "mid").strip()
+    return await _create_job_from_applicant(
+        db, applicant, created_by_user_id=hr_uid, language=body.language,
+        job_title=body.job_title, level=body.level,
+    )
+
+
+def _interview_email(
+    *, applicant_name: str, job_title: str, magic_link: str | None, scheduled_at: datetime | None
+) -> tuple[str, str]:
+    """Build the candidate interview-invite email (subject, HTML body).
+
+    All DB-sourced values (name, job title) are HTML-escaped — a candidate name or
+    job title can contain markup (resume-scraped / HR-entered) and must not inject
+    into the outbound email. ``magic_link=None`` renders a "use your original link"
+    instruction (reschedule path — the link is not re-minted)."""
+    name = html_lib.escape(applicant_name or "there")
+    title = html_lib.escape(job_title or "the role")
+    when = (
+        f"<p>Your interview is scheduled for "
+        f"<strong>{scheduled_at.strftime('%d %b %Y, %H:%M UTC')}</strong>.</p>"
+        if scheduled_at
+        else "<p>You can start the interview any time before the link expires.</p>"
+    )
+    if magic_link:
+        link_attr = html_lib.escape(magic_link, quote=True)
+        link_text = html_lib.escape(magic_link)
+        cta = (
+            f'<p><a href="{link_attr}">Click here to join your interview</a></p>'
+            f"<p>If the link does not work, copy this URL into your browser:<br>{link_text}</p>"
+        )
+    else:
+        cta = "<p>Please use the interview link from your original invitation email.</p>"
+    subject = f"Your AI interview for {job_title or 'the role'}"
+    html = (
+        f"<p>Hi {name},</p>"
+        f"<p>You've been invited to an AI voice interview for <strong>{title}</strong>.</p>"
+        f"{when}{cta}"
+        f"<p>Good luck!<br>— {html_lib.escape(settings.email_from_name)}</p>"
+    )
+    return subject, html
+
+
+async def advance_applicant_to_interview(
+    db: AsyncSession,
+    *,
+    company_id: uuid.UUID,
+    applicant: Applicant,
+    created_by_user_id: uuid.UUID | None,
+    language: str = "en",
+    scheduled_at: datetime | None = None,
+    notify_user_id: uuid.UUID | None = None,
+) -> InterviewInvite | None:
+    """Auto-advance: mint an interview invite for an exam-passed applicant + email
+    the candidate the link. Caller owns the commit. Returns the invite, or None if
+    an active invite already exists (idempotent — never double-invites).
+
+    Reuses the exact invite-mint shape as create_invite (lazy provisioning; the
+    guest user/session/consent are created on first redeem in interview_take.py).
+    """
+    # Idempotent: don't create a second invite if one is already active.
+    existing = await db.scalar(
+        select(InterviewInvite).where(
+            InterviewInvite.applicant_id == applicant.id,
+            InterviewInvite.company_id == company_id,
+            InterviewInvite.status.in_(("invited", "consumed")),
+            InterviewInvite.deleted_at.is_(None),
+        )
+    )
+    if existing is not None:
+        # One active interview invite per applicant per company — don't double-invite
+        # (e.g. a prior manual invite or another exam pass). Log so it isn't silent.
+        log.info(
+            "hr.interview.auto_advance_skipped_existing",
+            applicant_id=str(applicant.id), company_id=str(company_id),
+        )
+        return None
+
+    job = await _create_job_from_applicant(
+        db, applicant, created_by_user_id=created_by_user_id, language=language
+    )
     now = datetime.now(tz=UTC)
-    job = Job(
+    raw_token = mint_interview_token()
+    invite = InterviewInvite(
         id=uuid.uuid4(),
-        title=title,
-        description=title,
-        level=level if level in ("entry", "mid", "senior") else "mid",
-        language=body.language,
-        nos_codes=[],
-        competencies={},
-        is_active=True,
-        jd_text=applicant.target_jd_text,
-        created_by_user_id=hr_uid,  # tenant-owned (M4)
+        company_id=company_id,
+        applicant_id=applicant.id,
+        job_id=job.id,
+        created_by_user_id=created_by_user_id,
+        token_hash=hash_interview_token(raw_token, settings.interview_link_secret),
+        language=language,
+        expires_at=now + timedelta(hours=settings.interview_link_ttl_hours),
+        scheduled_at=scheduled_at,
+        status="invited",
         created_at=now,
         updated_at=now,
     )
-    db.add(job)
-    await db.flush()
-    return job
+    db.add(invite)
+    if notify_user_id is not None:
+        await create_notification(
+            db,
+            user_id=notify_user_id,
+            kind="auto_advance",
+            title="Candidate auto-advanced to interview",
+            body=f"{applicant.full_name} passed the final round · {job.title}",
+            link="/hr/interviews",
+        )
+    base = settings.interview_link_base_url.rstrip("/")
+    magic_link = f"{base}/interview-invite#{raw_token}"
+    if applicant.email:
+        subject, html = _interview_email(
+            applicant_name=applicant.full_name, job_title=job.title,
+            magic_link=magic_link, scheduled_at=scheduled_at,
+        )
+        await send_email(to=applicant.email, subject=subject, html=html)
+    log.info(
+        "hr.interview.auto_advanced",
+        invite_id=str(invite.id), company_id=str(company_id), applicant_id=str(applicant.id),
+    )
+    return invite
 
 
 # ---------------------------------------------------------------------------
@@ -284,16 +420,76 @@ async def create_invite(body: InviteCreateIn, ctx: HrCtxDep, db: DbSessionDep) -
     await db.commit()
 
     base = settings.interview_link_base_url.rstrip("/")
+    magic_link = f"{base}/interview-invite#{raw_token}"
+    # Email the candidate the link + schedule (best-effort; HR still gets the link
+    # in the response to copy manually if email delivery is off/unconfigured).
+    if applicant.email:
+        subject, html = _interview_email(
+            applicant_name=applicant.full_name, job_title=job.title,
+            magic_link=magic_link, scheduled_at=invite.scheduled_at,
+        )
+        await send_email(to=applicant.email, subject=subject, html=html)
     log.info("hr.interview.invited", invite_id=str(invite.id), company_id=str(company_id))
     return InviteResult(
         invite_id=str(invite.id),
         applicant_id=str(applicant.id),
         applicant_name=applicant.full_name,
         job_title=job.title,
-        magic_link=f"{base}/interview-invite#{raw_token}",
+        magic_link=magic_link,
         expires_at=invite.expires_at.isoformat(),
         scheduled_at=invite.scheduled_at.isoformat() if invite.scheduled_at else None,
         status=invite.status,
+    )
+
+
+class InviteRescheduleIn(BaseModel):
+    scheduled_at: datetime
+
+    @field_validator("scheduled_at")
+    @classmethod
+    def _future(cls, v: datetime) -> datetime:
+        if v < datetime.now(tz=UTC):
+            raise ValueError("scheduled_at cannot be in the past.")
+        return v
+
+
+@router.patch("/interviews/{invite_id}", response_model=InviteResult)
+async def reschedule_invite(
+    invite_id: uuid.UUID, body: InviteRescheduleIn, ctx: HrCtxDep, db: DbSessionDep
+) -> InviteResult:
+    """Change an invite's scheduled_at (only while still invited/consumed, not
+    completed/expired/revoked). Re-emails the candidate the new time. The magic
+    link is NOT re-minted, so the response carries no raw token."""
+    _hr_uid, company_id = ctx
+    inv = await _get_owned_invite(db, company_id, invite_id)
+    if inv.status not in ("invited", "consumed"):
+        raise HTTPException(
+            status_code=409, detail="Only an active invite can be rescheduled."
+        )
+    inv.scheduled_at = body.scheduled_at
+    inv.updated_at = datetime.now(tz=UTC)
+    await db.commit()
+
+    applicant = await db.scalar(select(Applicant).where(Applicant.id == inv.applicant_id))
+    job_title = await db.scalar(select(Job.title).where(Job.id == inv.job_id)) or "the role"
+    if applicant is not None and applicant.email:
+        # magic_link is NOT re-minted on reschedule — render the "use your original
+        # link" instruction rather than a bogus href.
+        subject, html = _interview_email(
+            applicant_name=applicant.full_name, job_title=job_title,
+            magic_link=None, scheduled_at=inv.scheduled_at,
+        )
+        await send_email(to=applicant.email, subject=f"[Rescheduled] {subject}", html=html)
+    log.info("hr.interview.rescheduled", invite_id=str(inv.id), company_id=str(company_id))
+    return InviteResult(
+        invite_id=str(inv.id),
+        applicant_id=str(inv.applicant_id),
+        applicant_name=applicant.full_name if applicant else "",
+        job_title=job_title,
+        magic_link="",  # not re-minted on reschedule
+        expires_at=inv.expires_at.isoformat(),
+        scheduled_at=inv.scheduled_at.isoformat() if inv.scheduled_at else None,
+        status=inv.status,
     )
 
 

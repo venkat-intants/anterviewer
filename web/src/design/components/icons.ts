@@ -21,7 +21,8 @@ export {
   Briefcase, GraduationCap, Building2, Mail, Lock, User, Upload, Download,
   Share2, Eye, Pencil, Trash2, Copy, Link2, Calendar, MapPin, Languages,
   AtSign, Send, Phone, CreditCard, Gauge, Server, Database, ListChecks, FileCheck2,
-  Ban, RefreshCw, ClipboardList, ClipboardCheck, Code2, Terminal,
+  Ban, RefreshCw, ClipboardList, ClipboardCheck, Code2, Terminal, Maximize2,
+  GripVertical,
   // additional — admin pages
   CalendarDays, MessageSquare, ToggleLeft, KeyRound, UserPlus,
 } from 'lucide-react';

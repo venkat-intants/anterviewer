@@ -1,17 +1,23 @@
 """Applicant exam-taking — HR workflow Phase 2 (PUBLIC, no login).
 
-An applicant opens a magic link and takes an exam WITHOUT an account. Auth is the
-opaque token, sent in the ``X-Exam-Token`` header (never the URL path/query — the
-HR mint puts it in the URL *fragment*, which browsers don't send to servers or
-leak via Referer). Every request re-resolves the assignment row by token hash and
-re-checks tenant + status + expiry, so revocation is immediate.
+An applicant opens a magic link and takes ONE ROUND of an exam WITHOUT an account.
+Auth is the opaque token in the ``X-Exam-Token`` header (never the URL path/query;
+the HR mint puts it in the URL *fragment*, which browsers don't send to servers).
+Every request re-resolves the assignment row by token hash and re-checks tenant +
+status + expiry, so revocation is immediate.
 
-HARD SECURITY GUARANTEES:
-  - correct_index / pass_threshold are NEVER in any response on this router.
-  - Grading is 100% server-side; the client only submits chosen indices.
-  - The time limit is enforced on the SERVER at submit (client countdown is UX).
+A round groups one or more SECTIONS, each of kind 'mcq' or 'coding' — so a single
+round can mix MCQ + coding. Grading sums all sections to a round score compared to
+the ROUND's pass_threshold. Passing the terminal round (advances_to_interview) can
+auto-advance the candidate to an interview when the exam has auto_advance_on_pass.
+
+HARD SECURITY GUARANTEES (unchanged):
+  - correct_index / reference_solution / hidden expected_output / pass_threshold are
+    NEVER in any response on this router.
+  - Grading is 100% server-side; the client submits only chosen indices + source.
+  - The round time limit is enforced on the SERVER at submit (client countdown is UX).
   - Submit is idempotent; a second submit returns the stored result (no re-grade).
-  - One live attempt per applicant+exam (DB partial-unique index); a retake is
+  - One live attempt per applicant+ROUND (DB partial-unique index); a retake is
     allowed only when the exam permits it.
 """
 
@@ -39,15 +45,23 @@ from app.models import (
     Exam,
     ExamAssignment,
     ExamAttempt,
+    ExamIntegrityEvent,
     ExamQuestion,
+    ExamRound,
+    ExamSection,
 )
+from app.piston_client import run_code
 from app.routers.hr_applicants import DbSessionDep
+from app.routers.hr_interviews import advance_applicant_to_interview
 
 log = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/exam", tags=["exam-take"])
 
 _NOT_AVAILABLE = HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not available.")
+
+# Integrity event types that count toward the auto-submit violation threshold.
+_VIOLATION_EVENTS = {"fullscreen_exit", "tab_blur"}
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +71,7 @@ _NOT_AVAILABLE = HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ex
 class ExamTakeCtx:
     company_id: uuid.UUID
     exam: Exam
+    exam_round: ExamRound
     applicant: Applicant
     assignment: ExamAssignment
 
@@ -65,8 +80,8 @@ async def get_exam_link_ctx(
     db: DbSessionDep,
     x_exam_token: Annotated[str | None, Header(alias="X-Exam-Token")] = None,
 ) -> ExamTakeCtx:
-    """Resolve + validate a magic link. Always 404 on any failure (never reveals
-    whether a link/exam exists — mirrors the HR-side _get_owned 404 behaviour)."""
+    """Resolve + validate a magic link → the ROUND it grants. Always 404 on any
+    failure (never reveals whether a link/exam exists)."""
     if not x_exam_token:
         raise _NOT_AVAILABLE
     token_hash = hash_exam_token(x_exam_token, settings.exam_link_secret)
@@ -80,12 +95,24 @@ async def get_exam_link_ctx(
     )
     if asn is None:
         raise _NOT_AVAILABLE
+    # The ROUND's published status is the authoritative gate (rounds are published
+    # + assigned independently); the exam-level 'closed' is a kill switch for the
+    # whole exam. We do NOT require exam.status=='published' — publishing a round
+    # is the deliberate HR action that makes its link live.
     exam = await db.scalar(
         select(Exam).where(
             Exam.id == asn.exam_id,
             Exam.company_id == asn.company_id,
-            Exam.status == "published",
+            Exam.status != "closed",
             Exam.deleted_at.is_(None),
+        )
+    )
+    rnd = await db.scalar(
+        select(ExamRound).where(
+            ExamRound.id == asn.round_id,
+            ExamRound.company_id == asn.company_id,
+            ExamRound.status == "published",
+            ExamRound.deleted_at.is_(None),
         )
     )
     applicant = await db.scalar(
@@ -95,16 +122,19 @@ async def get_exam_link_ctx(
             Applicant.deleted_at.is_(None),
         )
     )
-    if exam is None or applicant is None:
+    if exam is None or rnd is None or applicant is None:
         raise _NOT_AVAILABLE
-    return ExamTakeCtx(company_id=asn.company_id, exam=exam, applicant=applicant, assignment=asn)
+    return ExamTakeCtx(
+        company_id=asn.company_id, exam=exam, exam_round=rnd,
+        applicant=applicant, assignment=asn,
+    )
 
 
 ExamTakeCtxDep = Annotated[ExamTakeCtx, Depends(get_exam_link_ctx)]
 
 
 # ---------------------------------------------------------------------------
-# Schemas (NO correct_index / pass_threshold anywhere here)
+# Schemas (NO correct_index / reference_solution / pass_threshold anywhere here)
 # ---------------------------------------------------------------------------
 class PublicQuestionOut(BaseModel):
     id: str
@@ -135,10 +165,28 @@ class PublicCodingQuestionOut(BaseModel):
     sample_tests: list[PublicSampleTest]
 
 
+class PublicSectionOut(BaseModel):
+    """One section of the round — typed; carries only the questions of its kind."""
+
+    id: str
+    title: str
+    kind: str
+    position: int
+    time_limit_seconds: int | None
+    questions: list[PublicQuestionOut] = Field(default_factory=list)
+    coding_questions: list[PublicCodingQuestionOut] = Field(default_factory=list)
+
+
 class TakeExamOut(BaseModel):
     exam_id: str
     title: str
     description: str | None
+    # Round context
+    round_id: str
+    round_title: str
+    round_number: int
+    # back-compat: 'mcq' | 'coding' | 'mixed' (first section's kind for single-kind
+    # rounds; 'mixed' when sections differ). New UI keys off `sections` instead.
     kind: str = "mcq"
     time_limit_seconds: int | None
     total_questions: int
@@ -146,7 +194,11 @@ class TakeExamOut(BaseModel):
     already_submitted: bool
     server_now: str
     deadline: str | None
-    questions: list[PublicQuestionOut]
+    scheduled_at: str | None = None
+    max_integrity_violations: int
+    sections: list[PublicSectionOut] = Field(default_factory=list)
+    # Flattened, back-compat with the pre-rounds single-section taker.
+    questions: list[PublicQuestionOut] = Field(default_factory=list)
     coding_questions: list[PublicCodingQuestionOut] = Field(default_factory=list)
 
 
@@ -165,6 +217,30 @@ class RunCodeIn(BaseModel):
         return v
 
 
+class RunCodeCustomIn(BaseModel):
+    """Candidate's 'Run with custom input' — one execution against THEIR own stdin.
+    No scoring, no persistence; never touches the graded/hidden test cases."""
+
+    question_id: uuid.UUID
+    language: str = Field(min_length=1, max_length=40)
+    source: str = Field(default="")
+    stdin: str = Field(default="")
+
+    @field_validator("source")
+    @classmethod
+    def _cap_source(cls, v: str) -> str:
+        if len(v.encode("utf-8", "ignore")) > settings.code_max_source_bytes:
+            raise ValueError("source too large")
+        return v
+
+    @field_validator("stdin")
+    @classmethod
+    def _cap_stdin(cls, v: str) -> str:
+        if len(v.encode("utf-8", "ignore")) > settings.code_max_stdin_bytes:
+            raise ValueError("input too large")
+        return v
+
+
 class PublicTestResult(BaseModel):
     index: int
     passed: bool
@@ -180,6 +256,14 @@ class RunCodeOut(BaseModel):
     results: list[PublicTestResult]
 
 
+class RunCodeCustomOut(BaseModel):
+    stdout: str
+    stderr: str
+    exit_code: int | None
+    timed_out: bool
+    error: str | None = None
+
+
 class CodingAnswer(BaseModel):
     language: str = Field(min_length=1, max_length=40)
     source: str = Field(default="")
@@ -192,9 +276,20 @@ class CodingAnswer(BaseModel):
         return v
 
 
-class CodingSubmitIn(BaseModel):
+class SubmitIn(BaseModel):
+    """Round submit. Carries MCQ answers and/or coding submissions — a mixed round
+    sends both; a single-kind round sends just one (back-compat)."""
+
     attempt_id: uuid.UUID
+    answers: dict[str, int] = Field(default_factory=dict)
     submissions: dict[str, CodingAnswer] = Field(default_factory=dict)
+
+    @field_validator("answers")
+    @classmethod
+    def _cap_answers(cls, v: dict[str, int]) -> dict[str, int]:
+        if len(v) > settings.exam_max_answers:
+            raise ValueError("too many answers")
+        return v
 
     @field_validator("submissions")
     @classmethod
@@ -204,22 +299,49 @@ class CodingSubmitIn(BaseModel):
         return v
 
 
-class AttemptStartOut(BaseModel):
-    attempt_id: str
-    started_at: str
-    deadline: str | None
+class CodingSubmitIn(BaseModel):
+    """Back-compat coding submit (coding-only rounds). Also accepts answers so a
+    mixed round can submit through this endpoint too."""
 
-
-class SubmitIn(BaseModel):
     attempt_id: uuid.UUID
+    submissions: dict[str, CodingAnswer] = Field(default_factory=dict)
     answers: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("submissions")
+    @classmethod
+    def _cap_submissions(cls, v: dict[str, CodingAnswer]) -> dict[str, CodingAnswer]:
+        if len(v) > settings.code_max_questions_per_exam:
+            raise ValueError("too many submissions")
+        return v
 
     @field_validator("answers")
     @classmethod
     def _cap_answers(cls, v: dict[str, int]) -> dict[str, int]:
+        # Same DoS guard as SubmitIn — this endpoint also grades the MCQ portion.
         if len(v) > settings.exam_max_answers:
             raise ValueError("too many answers")
         return v
+
+
+class IntegrityEventIn(BaseModel):
+    attempt_id: uuid.UUID
+    event_type: str = Field(min_length=1, max_length=40)
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    metadata: dict[str, object] | None = None
+
+
+class IntegrityIngestOut(BaseModel):
+    accepted: bool
+    violation_count: int
+    max_violations: int
+    integrity_score: int
+
+
+class AttemptStartOut(BaseModel):
+    attempt_id: str
+    started_at: str
+    deadline: str | None
 
 
 class ExamResultOut(BaseModel):
@@ -235,12 +357,31 @@ class ExamResultOut(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-async def _live_questions(db: AsyncSession, ctx: ExamTakeCtx) -> list[ExamQuestion]:
+async def _round_sections(db: AsyncSession, ctx: ExamTakeCtx) -> list[ExamSection]:
+    rows = (
+        await db.execute(
+            select(ExamSection)
+            .where(
+                ExamSection.round_id == ctx.exam_round.id,
+                ExamSection.company_id == ctx.company_id,
+                ExamSection.deleted_at.is_(None),
+            )
+            .order_by(ExamSection.position.asc())
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+async def _mcq_for_sections(
+    db: AsyncSession, ctx: ExamTakeCtx, section_ids: list[uuid.UUID]
+) -> list[ExamQuestion]:
+    if not section_ids:
+        return []
     rows = (
         await db.execute(
             select(ExamQuestion)
             .where(
-                ExamQuestion.exam_id == ctx.exam.id,
+                ExamQuestion.section_id.in_(section_ids),
                 ExamQuestion.company_id == ctx.company_id,
                 ExamQuestion.deleted_at.is_(None),
             )
@@ -250,12 +391,16 @@ async def _live_questions(db: AsyncSession, ctx: ExamTakeCtx) -> list[ExamQuesti
     return list(rows)
 
 
-async def _live_coding_questions(db: AsyncSession, ctx: ExamTakeCtx) -> list[CodingQuestion]:
+async def _coding_for_sections(
+    db: AsyncSession, ctx: ExamTakeCtx, section_ids: list[uuid.UUID]
+) -> list[CodingQuestion]:
+    if not section_ids:
+        return []
     rows = (
         await db.execute(
             select(CodingQuestion)
             .where(
-                CodingQuestion.exam_id == ctx.exam.id,
+                CodingQuestion.section_id.in_(section_ids),
                 CodingQuestion.company_id == ctx.company_id,
                 CodingQuestion.deleted_at.is_(None),
             )
@@ -265,9 +410,16 @@ async def _live_coding_questions(db: AsyncSession, ctx: ExamTakeCtx) -> list[Cod
     return list(rows)
 
 
+def _public_question(q: ExamQuestion) -> PublicQuestionOut:
+    return PublicQuestionOut(
+        id=str(q.id), position=q.position, prompt=q.prompt,
+        options=list(q.options or []), points=q.points,
+    )
+
+
 def _public_coding_question(q: CodingQuestion) -> PublicCodingQuestionOut:
-    """Serialize a coding question for the candidate — sample tests ONLY, never
-    the reference_solution or any hidden test case's expected_output."""
+    """Serialize a coding question for the candidate — sample tests ONLY, never the
+    reference_solution or any hidden test case's expected_output."""
     samples = [
         PublicSampleTest(
             stdin=str(tc.get("stdin") or ""),
@@ -277,33 +429,29 @@ def _public_coding_question(q: CodingQuestion) -> PublicCodingQuestionOut:
         if bool(tc.get("is_sample"))
     ]
     return PublicCodingQuestionOut(
-        id=str(q.id),
-        position=q.position,
-        prompt=q.prompt,
-        starter_code=q.starter_code,
-        allowed_languages=list(q.allowed_languages or []),
-        points=q.points,
-        time_limit_ms=q.time_limit_ms,
-        sample_tests=samples,
+        id=str(q.id), position=q.position, prompt=q.prompt,
+        starter_code=q.starter_code, allowed_languages=list(q.allowed_languages or []),
+        points=q.points, time_limit_ms=q.time_limit_ms, sample_tests=samples,
     )
 
 
 async def _in_progress_attempt(db: AsyncSession, ctx: ExamTakeCtx) -> ExamAttempt | None:
-    return await db.scalar(
+    attempt: ExamAttempt | None = await db.scalar(
         select(ExamAttempt).where(
-            ExamAttempt.exam_id == ctx.exam.id,
+            ExamAttempt.round_id == ctx.exam_round.id,
             ExamAttempt.applicant_id == ctx.applicant.id,
             ExamAttempt.company_id == ctx.company_id,
             ExamAttempt.status == "in_progress",
             ExamAttempt.deleted_at.is_(None),
         )
     )
+    return attempt
 
 
 async def _has_submitted(db: AsyncSession, ctx: ExamTakeCtx) -> bool:
     n = await db.scalar(
         select(func.count()).select_from(ExamAttempt).where(
-            ExamAttempt.exam_id == ctx.exam.id,
+            ExamAttempt.round_id == ctx.exam_round.id,
             ExamAttempt.applicant_id == ctx.applicant.id,
             ExamAttempt.company_id == ctx.company_id,
             ExamAttempt.status == "submitted",
@@ -313,10 +461,10 @@ async def _has_submitted(db: AsyncSession, ctx: ExamTakeCtx) -> bool:
     return int(n or 0) > 0
 
 
-def _deadline(exam: Exam, started_at: datetime) -> datetime | None:
-    if exam.time_limit_seconds is None:
+def _deadline(rnd: ExamRound, started_at: datetime) -> datetime | None:
+    if rnd.time_limit_seconds is None:
         return None
-    return started_at + timedelta(seconds=exam.time_limit_seconds)
+    return started_at + timedelta(seconds=rnd.time_limit_seconds)
 
 
 # ---------------------------------------------------------------------------
@@ -324,32 +472,54 @@ def _deadline(exam: Exam, started_at: datetime) -> datetime | None:
 # ---------------------------------------------------------------------------
 @router.get("", response_model=TakeExamOut)
 async def get_take_exam(ctx: ExamTakeCtxDep, db: DbSessionDep) -> TakeExamOut:
-    is_coding = ctx.exam.kind == "coding"
-    mcq = [] if is_coding else await _live_questions(db, ctx)
-    coding = await _live_coding_questions(db, ctx) if is_coding else []
+    sections = await _round_sections(db, ctx)
+    mcq_section_ids = [s.id for s in sections if s.kind == "mcq"]
+    coding_section_ids = [s.id for s in sections if s.kind == "coding"]
+    mcq = await _mcq_for_sections(db, ctx, mcq_section_ids)
+    coding = await _coding_for_sections(db, ctx, coding_section_ids)
+    mcq_by_section: dict[uuid.UUID, list[ExamQuestion]] = {}
+    for mq in mcq:
+        mcq_by_section.setdefault(mq.section_id, []).append(mq)
+    coding_by_section: dict[uuid.UUID, list[CodingQuestion]] = {}
+    for cq in coding:
+        coding_by_section.setdefault(cq.section_id, []).append(cq)
+
+    section_out = [
+        PublicSectionOut(
+            id=str(s.id), title=s.title, kind=s.kind, position=s.position,
+            time_limit_seconds=s.time_limit_seconds,
+            questions=[_public_question(q) for q in mcq_by_section.get(s.id, [])],
+            coding_questions=[
+                _public_coding_question(q) for q in coding_by_section.get(s.id, [])
+            ],
+        )
+        for s in sections
+    ]
+    kinds = {s.kind for s in sections}
+    kind = next(iter(kinds)) if len(kinds) == 1 else "mixed"
+
     in_prog = await _in_progress_attempt(db, ctx)
-    deadline = _deadline(ctx.exam, in_prog.started_at) if in_prog else None
+    deadline = _deadline(ctx.exam_round, in_prog.started_at) if in_prog else None
     return TakeExamOut(
         exam_id=str(ctx.exam.id),
         title=ctx.exam.title,
         description=ctx.exam.description,
-        kind=ctx.exam.kind,
-        time_limit_seconds=ctx.exam.time_limit_seconds,
-        total_questions=len(coding) if is_coding else len(mcq),
+        round_id=str(ctx.exam_round.id),
+        round_title=ctx.exam_round.title,
+        round_number=ctx.exam_round.round_number,
+        kind=kind,
+        time_limit_seconds=ctx.exam_round.time_limit_seconds,
+        total_questions=len(mcq) + len(coding),
         allow_retake=ctx.exam.allow_retake,
         already_submitted=await _has_submitted(db, ctx),
         server_now=datetime.now(tz=UTC).isoformat(),
         deadline=deadline.isoformat() if deadline else None,
-        questions=[
-            PublicQuestionOut(
-                id=str(q.id),
-                position=q.position,
-                prompt=q.prompt,
-                options=list(q.options or []),
-                points=q.points,
-            )
-            for q in mcq
-        ],
+        scheduled_at=(
+            ctx.assignment.scheduled_at.isoformat() if ctx.assignment.scheduled_at else None
+        ),
+        max_integrity_violations=settings.exam_integrity_max_violations,
+        sections=section_out,
+        questions=[_public_question(q) for q in mcq],
         coding_questions=[_public_coding_question(q) for q in coding],
     )
 
@@ -359,22 +529,37 @@ async def start_attempt(ctx: ExamTakeCtxDep, db: DbSessionDep) -> AttemptStartOu
     # Idempotent: return the existing in-progress attempt if one is open.
     existing = await _in_progress_attempt(db, ctx)
     if existing is not None:
-        d = _deadline(ctx.exam, existing.started_at)
+        d = _deadline(ctx.exam_round, existing.started_at)
         return AttemptStartOut(
             attempt_id=str(existing.id),
             started_at=existing.started_at.isoformat(),
             deadline=d.isoformat() if d else None,
         )
-    # Block a fresh attempt on a single-shot exam already submitted.
+    # Block a fresh attempt on a single-shot round already submitted.
     if await _has_submitted(db, ctx) and not ctx.exam.allow_retake:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="You have already taken this exam."
+            status_code=status.HTTP_409_CONFLICT, detail="You have already taken this round."
         )
 
     now = datetime.now(tz=UTC)
+    # Scheduled-round join window gates the FIRST start (mirrors interview_take).
+    if ctx.assignment.scheduled_at is not None:
+        sched = ctx.assignment.scheduled_at
+        window_end = sched + timedelta(minutes=settings.exam_join_window_minutes)
+        if now < sched:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"This round opens at {sched.isoformat()}.",
+            )
+        if now > window_end:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="The scheduled join window for this round has closed.",
+            )
+
     max_no = await db.scalar(
         select(func.max(ExamAttempt.attempt_no)).where(
-            ExamAttempt.exam_id == ctx.exam.id,
+            ExamAttempt.round_id == ctx.exam_round.id,
             ExamAttempt.applicant_id == ctx.applicant.id,
             ExamAttempt.company_id == ctx.company_id,
         )
@@ -383,6 +568,7 @@ async def start_attempt(ctx: ExamTakeCtxDep, db: DbSessionDep) -> AttemptStartOu
         id=uuid.uuid4(),
         company_id=ctx.company_id,
         exam_id=ctx.exam.id,
+        round_id=ctx.exam_round.id,
         applicant_id=ctx.applicant.id,
         assignment_id=ctx.assignment.id,
         attempt_no=(int(max_no) + 1) if max_no is not None else 1,
@@ -404,13 +590,13 @@ async def start_attempt(ctx: ExamTakeCtxDep, db: DbSessionDep) -> AttemptStartOu
         existing = await _in_progress_attempt(db, ctx)
         if existing is None:
             raise
-        d = _deadline(ctx.exam, existing.started_at)
+        d = _deadline(ctx.exam_round, existing.started_at)
         return AttemptStartOut(
             attempt_id=str(existing.id),
             started_at=existing.started_at.isoformat(),
             deadline=d.isoformat() if d else None,
         )
-    d = _deadline(ctx.exam, attempt.started_at)
+    d = _deadline(ctx.exam_round, attempt.started_at)
     return AttemptStartOut(
         attempt_id=str(attempt.id),
         started_at=attempt.started_at.isoformat(),
@@ -418,215 +604,111 @@ async def start_attempt(ctx: ExamTakeCtxDep, db: DbSessionDep) -> AttemptStartOu
     )
 
 
-@router.post("/submit", response_model=ExamResultOut)
-async def submit_attempt(body: SubmitIn, ctx: ExamTakeCtxDep, db: DbSessionDep) -> ExamResultOut:
-    # MCQ submit only — a coding exam must use /exam/submit-coding.
-    if ctx.exam.kind != "mcq":
-        raise _NOT_AVAILABLE
-    attempt = await db.scalar(
-        select(ExamAttempt).where(
-            ExamAttempt.id == body.attempt_id,
-            ExamAttempt.exam_id == ctx.exam.id,
+async def _load_attempt(
+    db: AsyncSession, ctx: ExamTakeCtx, attempt_id: uuid.UUID
+) -> ExamAttempt:
+    # FOR UPDATE: serialize concurrent submits of the SAME attempt (a network
+    # retry) so the idempotency check can't be raced into two expensive Piston
+    # grading passes. Single-row PK-scoped lock — no hot-spot.
+    attempt: ExamAttempt | None = await db.scalar(
+        select(ExamAttempt)
+        .where(
+            ExamAttempt.id == attempt_id,
+            ExamAttempt.round_id == ctx.exam_round.id,
             ExamAttempt.applicant_id == ctx.applicant.id,
             ExamAttempt.company_id == ctx.company_id,
             ExamAttempt.deleted_at.is_(None),
         )
+        .with_for_update()
     )
     if attempt is None:
         raise _NOT_AVAILABLE
+    return attempt
 
-    # Idempotent: a finished attempt returns its stored result (no re-grade).
-    if attempt.status in ("submitted", "expired") and attempt.score_percent is not None:
-        return ExamResultOut(
-            attempt_id=str(attempt.id),
-            score_raw=attempt.score_raw or 0,
-            score_max=attempt.score_max or 0,
-            score_percent=attempt.score_percent,
-            passed=bool(attempt.passed),
-            status=attempt.status,
-            submitted_at=(attempt.submitted_at or attempt.started_at).isoformat(),
-        )
 
-    now = datetime.now(tz=UTC)
-    # Server-side time enforcement — the client countdown is advisory only.
-    deadline = _deadline(ctx.exam, attempt.started_at)
-    expired = bool(
-        deadline and now > deadline + timedelta(seconds=settings.exam_submit_grace_seconds)
-    )
-
-    questions = await _live_questions(db, ctx)
-    grade_questions = [
-        GradeQuestion(question_id=str(q.id), correct_index=q.correct_index, points=q.points)
-        for q in questions
-    ]
-    answers = {k: int(v) for k, v in body.answers.items()}
-    result = grade_exam(
-        GradeInput(questions=grade_questions, answers=answers), ctx.exam.pass_threshold
-    )
-
-    attempt.answers = answers
-    # Freeze the answer key + weights so later edits never alter this grade/audit.
-    attempt.graded_snapshot = {
-        str(q.id): {"correct_index": q.correct_index, "points": q.points} for q in questions
-    }
-    attempt.score_raw = result.score_raw
-    attempt.score_max = result.score_max
-    attempt.score_percent = result.score_percent
-    attempt.passed = result.passed
-    attempt.status = "expired" if expired else "submitted"
-    attempt.submitted_at = now
-    attempt.updated_at = now
-
-    # Close the assignment (single-use): the link is consumed.
-    ctx.assignment.status = "completed"
-    ctx.assignment.consumed_at = now
-    ctx.assignment.updated_at = now
-    await db.commit()
-
-    log.info(
-        "exam.submitted",
-        exam_id=str(ctx.exam.id),
-        company_id=str(ctx.company_id),
-        percent=result.score_percent,
-        passed=result.passed,
-        expired=expired,
-    )
+def _stored_result(attempt: ExamAttempt) -> ExamResultOut:
     return ExamResultOut(
         attempt_id=str(attempt.id),
-        score_raw=result.score_raw,
-        score_max=result.score_max,
-        score_percent=result.score_percent,
-        passed=result.passed,
+        score_raw=attempt.score_raw or 0,
+        score_max=attempt.score_max or 0,
+        score_percent=attempt.score_percent or 0,
+        passed=bool(attempt.passed),
         status=attempt.status,
-        submitted_at=now.isoformat(),
+        submitted_at=(attempt.submitted_at or attempt.started_at).isoformat(),
     )
 
 
-# ---------------------------------------------------------------------------
-# Coding round (exams.kind == 'coding') — run samples + submit/grade via Piston
-# ---------------------------------------------------------------------------
-async def _owned_coding_question(
-    db: AsyncSession, ctx: ExamTakeCtx, qid: uuid.UUID
-) -> CodingQuestion | None:
-    return await db.scalar(
-        select(CodingQuestion).where(
-            CodingQuestion.id == qid,
-            CodingQuestion.exam_id == ctx.exam.id,
-            CodingQuestion.company_id == ctx.company_id,
-            CodingQuestion.deleted_at.is_(None),
-        )
-    )
-
-
-@router.post("/run-code", response_model=RunCodeOut)
-async def run_code_samples(body: RunCodeIn, ctx: ExamTakeCtxDep, db: DbSessionDep) -> RunCodeOut:
-    """Candidate 'Run' — execute against the SAMPLE tests only. No score, no save."""
-    if ctx.exam.kind != "coding":
-        raise _NOT_AVAILABLE
-    # Require an open attempt — no anonymous Piston runs before /start (DoS guard).
-    if await _in_progress_attempt(db, ctx) is None:
-        raise _NOT_AVAILABLE
-    q = await _owned_coding_question(db, ctx, body.question_id)
-    if q is None:
-        raise _NOT_AVAILABLE
-    if body.language not in (q.allowed_languages or []):
-        raise HTTPException(status_code=400, detail="Language not allowed for this question.")
-    results = await run_tests(
-        language=body.language,
-        source=body.source,
-        test_cases=list(q.test_cases or []),
-        time_limit_ms=q.time_limit_ms,
-        include_hidden=False,
-    )
-    return RunCodeOut(
-        results=[
-            PublicTestResult(
-                index=r.index,
-                passed=r.passed,
-                stdin=r.stdin,
-                expected_output=r.expected_output,
-                actual_output=r.actual_output,
-                stderr=r.stderr,
-                timed_out=r.timed_out,
-                error=r.error,
-            )
-            for r in results
-        ]
-    )
-
-
-@router.post("/submit-coding", response_model=ExamResultOut)
-async def submit_coding(
-    body: CodingSubmitIn, ctx: ExamTakeCtxDep, db: DbSessionDep
+async def _grade_and_finalize(
+    db: AsyncSession,
+    ctx: ExamTakeCtx,
+    attempt: ExamAttempt,
+    answers: dict[str, int],
+    submissions: dict[str, CodingAnswer],
 ) -> ExamResultOut:
-    """Grade a coding attempt: run each question's source against ALL test cases
-    (Piston) and store a weighted score on the SAME exam_attempts row MCQ uses."""
-    if ctx.exam.kind != "coding":
-        raise _NOT_AVAILABLE
-    attempt = await db.scalar(
-        select(ExamAttempt).where(
-            ExamAttempt.id == body.attempt_id,
-            ExamAttempt.exam_id == ctx.exam.id,
-            ExamAttempt.applicant_id == ctx.applicant.id,
-            ExamAttempt.company_id == ctx.company_id,
-            ExamAttempt.deleted_at.is_(None),
-        )
-    )
-    if attempt is None:
-        raise _NOT_AVAILABLE
-
-    # Idempotent: a finished attempt returns its stored result and NEVER re-grades
-    # — code execution is expensive, so a re-submit must not trigger a second Piston
-    # run even if a prior grade crashed mid-write (score_percent left NULL).
+    """Grade the whole round (all sections), store the result, close the link, and
+    auto-advance to interview when the terminal round is passed. Idempotent: a
+    finished attempt returns its stored result without re-grading (coding execution
+    is expensive — a re-submit must never trigger a second Piston run)."""
     if attempt.status in ("submitted", "expired"):
-        return ExamResultOut(
-            attempt_id=str(attempt.id),
-            score_raw=attempt.score_raw or 0,
-            score_max=attempt.score_max or 0,
-            score_percent=attempt.score_percent or 0,
-            passed=bool(attempt.passed),
-            status=attempt.status,
-            submitted_at=(attempt.submitted_at or attempt.started_at).isoformat(),
-        )
+        return _stored_result(attempt)
 
     now = datetime.now(tz=UTC)
-    deadline = _deadline(ctx.exam, attempt.started_at)
+    deadline = _deadline(ctx.exam_round, attempt.started_at)
     expired = bool(
         deadline and now > deadline + timedelta(seconds=settings.exam_submit_grace_seconds)
     )
 
-    questions = await _live_coding_questions(db, ctx)
-    total_raw = 0
-    total_max = 0
-    snapshot: dict[str, object] = {}
-    sanitized: dict[str, object] = {}
-    for q in questions:
+    sections = await _round_sections(db, ctx)
+    mcq_section_ids = [s.id for s in sections if s.kind == "mcq"]
+    coding_section_ids = [s.id for s in sections if s.kind == "coding"]
+    mcq_questions = await _mcq_for_sections(db, ctx, mcq_section_ids)
+    coding_questions = await _coding_for_sections(db, ctx, coding_section_ids)
+
+    # --- MCQ portion (instant, server-side) ---
+    mcq_answers = {k: int(v) for k, v in answers.items()}
+    mcq_result = grade_exam(
+        GradeInput(
+            questions=[
+                GradeQuestion(question_id=str(q.id), correct_index=q.correct_index, points=q.points)
+                for q in mcq_questions
+            ],
+            answers=mcq_answers,
+        ),
+        ctx.exam_round.pass_threshold,
+    )
+    total_raw = mcq_result.score_raw
+    total_max = mcq_result.score_max
+    mcq_snapshot = {
+        str(q.id): {"correct_index": q.correct_index, "points": q.points}
+        for q in mcq_questions
+    }
+
+    # --- Coding portion (Piston, all test cases incl. hidden) ---
+    coding_snapshot: dict[str, object] = {}
+    coding_sanitized: dict[str, object] = {}
+    for q in coding_questions:
         total_max += q.points
         qid = str(q.id)
-        sub = body.submissions.get(qid)
+        sub = submissions.get(qid)
         if sub is None:
-            snapshot[qid] = {"points": q.points, "submitted": False, "raw": 0, "tests": []}
+            coding_snapshot[qid] = {"points": q.points, "submitted": False, "raw": 0, "tests": []}
             continue
-        sanitized[qid] = {"language": sub.language, "source": sub.source}
+        coding_sanitized[qid] = {"language": sub.language, "source": sub.source}
         if sub.language not in (q.allowed_languages or []):
-            snapshot[qid] = {
+            coding_snapshot[qid] = {
                 "points": q.points, "language": sub.language,
                 "error": "language not allowed", "raw": 0, "tests": [],
             }
             continue
         results = await run_tests(
-            language=sub.language,
-            source=sub.source,
+            language=sub.language, source=sub.source,
             test_cases=list(q.test_cases or []),
-            time_limit_ms=q.time_limit_ms,
-            include_hidden=True,
+            time_limit_ms=q.time_limit_ms, include_hidden=True,
         )
         raw = weighted_raw(results, q.points)
         total_raw += raw
-        snapshot[qid] = {
-            "points": q.points,
-            "language": sub.language,
-            "raw": raw,
+        coding_snapshot[qid] = {
+            "points": q.points, "language": sub.language, "raw": raw,
             "tests": [
                 {
                     "index": r.index, "is_sample": r.is_sample, "weight": r.weight,
@@ -637,13 +719,11 @@ async def submit_coding(
             ],
         }
 
-    # round() to match the MCQ grader (grade_exam), so percent is consistent
-    # across exam kinds for the same raw/max.
     percent = round(100 * total_raw / total_max) if total_max > 0 else 0
-    passed = percent >= ctx.exam.pass_threshold
+    passed = percent >= ctx.exam_round.pass_threshold
 
-    attempt.answers = sanitized
-    attempt.graded_snapshot = snapshot
+    attempt.answers = {"mcq": mcq_answers, "coding": coding_sanitized}
+    attempt.graded_snapshot = {"mcq": mcq_snapshot, "coding": coding_snapshot}
     attempt.score_raw = total_raw
     attempt.score_max = total_max
     attempt.score_percent = percent
@@ -652,25 +732,187 @@ async def submit_coding(
     attempt.submitted_at = now
     attempt.updated_at = now
 
+    # Close the assignment (single-use): the link is consumed.
     ctx.assignment.status = "completed"
     ctx.assignment.consumed_at = now
     ctx.assignment.updated_at = now
-    await db.commit()
 
+    # Auto-advance: passing the terminal round can create a scheduled interview
+    # invite + email the candidate (per-exam opt-in). Best-effort + idempotent.
+    if passed and ctx.exam_round.advances_to_interview and ctx.exam.auto_advance_on_pass:
+        try:
+            await advance_applicant_to_interview(
+                db,
+                company_id=ctx.company_id,
+                applicant=ctx.applicant,
+                created_by_user_id=ctx.exam.created_by_user_id,
+                notify_user_id=ctx.exam.created_by_user_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - never fail a submit on advance error
+            log.warning("exam.auto_advance_failed", exam_id=str(ctx.exam.id), error=str(exc))
+
+    await db.commit()
     log.info(
-        "exam.coding.submitted",
-        exam_id=str(ctx.exam.id),
-        company_id=str(ctx.company_id),
-        percent=percent,
-        passed=passed,
-        expired=expired,
+        "exam.round.submitted",
+        exam_id=str(ctx.exam.id), round_id=str(ctx.exam_round.id),
+        company_id=str(ctx.company_id), percent=percent, passed=passed, expired=expired,
     )
     return ExamResultOut(
-        attempt_id=str(attempt.id),
-        score_raw=total_raw,
-        score_max=total_max,
-        score_percent=percent,
-        passed=passed,
-        status=attempt.status,
+        attempt_id=str(attempt.id), score_raw=total_raw, score_max=total_max,
+        score_percent=percent, passed=passed, status=attempt.status,
         submitted_at=now.isoformat(),
+    )
+
+
+@router.post("/submit", response_model=ExamResultOut)
+async def submit_attempt(body: SubmitIn, ctx: ExamTakeCtxDep, db: DbSessionDep) -> ExamResultOut:
+    """Submit a round (MCQ answers + optional coding submissions)."""
+    attempt = await _load_attempt(db, ctx, body.attempt_id)
+    return await _grade_and_finalize(db, ctx, attempt, body.answers, body.submissions)
+
+
+@router.post("/submit-round", response_model=ExamResultOut)
+async def submit_round(body: SubmitIn, ctx: ExamTakeCtxDep, db: DbSessionDep) -> ExamResultOut:
+    """Explicit round submit (alias of /submit) — the round-aware UI's primary path."""
+    attempt = await _load_attempt(db, ctx, body.attempt_id)
+    return await _grade_and_finalize(db, ctx, attempt, body.answers, body.submissions)
+
+
+@router.post("/submit-coding", response_model=ExamResultOut)
+async def submit_coding(
+    body: CodingSubmitIn, ctx: ExamTakeCtxDep, db: DbSessionDep
+) -> ExamResultOut:
+    """Back-compat coding submit (coding-only rounds). Grades the full round."""
+    attempt = await _load_attempt(db, ctx, body.attempt_id)
+    return await _grade_and_finalize(db, ctx, attempt, body.answers, body.submissions)
+
+
+# ---------------------------------------------------------------------------
+# Coding round — run samples / run custom input (no scoring)
+# ---------------------------------------------------------------------------
+async def _round_coding_question(
+    db: AsyncSession, ctx: ExamTakeCtx, qid: uuid.UUID
+) -> CodingQuestion | None:
+    """A coding question that belongs to one of THIS round's coding sections."""
+    sections = await _round_sections(db, ctx)
+    section_ids = [s.id for s in sections if s.kind == "coding"]
+    if not section_ids:
+        return None
+    q: CodingQuestion | None = await db.scalar(
+        select(CodingQuestion).where(
+            CodingQuestion.id == qid,
+            CodingQuestion.section_id.in_(section_ids),
+            CodingQuestion.company_id == ctx.company_id,
+            CodingQuestion.deleted_at.is_(None),
+        )
+    )
+    return q
+
+
+@router.post("/run-code", response_model=RunCodeOut)
+async def run_code_samples(body: RunCodeIn, ctx: ExamTakeCtxDep, db: DbSessionDep) -> RunCodeOut:
+    """Candidate 'Run' — execute against the SAMPLE tests only. No score, no save."""
+    # Require an open attempt — no anonymous Piston runs before /start (DoS guard).
+    if await _in_progress_attempt(db, ctx) is None:
+        raise _NOT_AVAILABLE
+    q = await _round_coding_question(db, ctx, body.question_id)
+    if q is None:
+        raise _NOT_AVAILABLE
+    if body.language not in (q.allowed_languages or []):
+        raise HTTPException(status_code=400, detail="Language not allowed for this question.")
+    results = await run_tests(
+        language=body.language, source=body.source,
+        test_cases=list(q.test_cases or []), time_limit_ms=q.time_limit_ms,
+        include_hidden=False,
+    )
+    return RunCodeOut(
+        results=[
+            PublicTestResult(
+                index=r.index, passed=r.passed, stdin=r.stdin,
+                expected_output=r.expected_output, actual_output=r.actual_output,
+                stderr=r.stderr, timed_out=r.timed_out, error=r.error,
+            )
+            for r in results
+        ]
+    )
+
+
+@router.post("/run-code-custom", response_model=RunCodeCustomOut)
+async def run_code_custom(
+    body: RunCodeCustomIn, ctx: ExamTakeCtxDep, db: DbSessionDep
+) -> RunCodeCustomOut:
+    """Candidate 'Run with custom input' — ONE execution against their own stdin.
+    No scoring, no persistence; never reads the graded/hidden test cases."""
+    if await _in_progress_attempt(db, ctx) is None:
+        raise _NOT_AVAILABLE
+    q = await _round_coding_question(db, ctx, body.question_id)
+    if q is None:
+        raise _NOT_AVAILABLE
+    if body.language not in (q.allowed_languages or []):
+        raise HTTPException(status_code=400, detail="Language not allowed for this question.")
+    res = await run_code(
+        language=body.language, source=body.source,
+        stdin=body.stdin, time_limit_ms=q.time_limit_ms,
+    )
+    return RunCodeCustomOut(
+        stdout=res.stdout[:20_000], stderr=res.stderr[:20_000],
+        exit_code=res.exit_code, timed_out=res.timed_out, error=res.error,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Proctoring — integrity event ingest (exam analogue of interview integrity)
+# ---------------------------------------------------------------------------
+def _score_from_violations(violations: int) -> int:
+    """Rolling integrity score: 100 minus a flat penalty per violation, floored at 0."""
+    return max(0, 100 - 15 * violations)
+
+
+@router.post("/integrity-event", response_model=IntegrityIngestOut)
+async def ingest_integrity_event(
+    body: IntegrityEventIn, ctx: ExamTakeCtxDep, db: DbSessionDep
+) -> IntegrityIngestOut:
+    """Record one proctoring event (fullscreen-exit / tab-switch / ...) against the
+    open attempt and update its rolling integrity score + summary. Detection is
+    client-side; only the lightweight event reaches us (raw input never leaves the
+    browser). The client decides auto-submit; this is the server-side audit trail."""
+    attempt = await _in_progress_attempt(db, ctx)
+    if attempt is None or attempt.id != body.attempt_id:
+        raise _NOT_AVAILABLE
+    now = datetime.now(tz=UTC)
+    db.add(
+        ExamIntegrityEvent(
+            id=uuid.uuid4(),
+            attempt_id=attempt.id,
+            company_id=ctx.company_id,
+            event_type=body.event_type[:40],
+            started_at=body.started_at or now,
+            ended_at=body.ended_at,
+            event_metadata=body.metadata,
+            created_at=now,
+        )
+    )
+    # Persist the new event so the GROUP BY below counts it, then recompute the
+    # rolling summary from the authoritative persisted set (no manual fold-in —
+    # that would double-count the row we just flushed).
+    await db.flush()
+    counts_rows = (
+        await db.execute(
+            select(ExamIntegrityEvent.event_type, func.count())
+            .where(ExamIntegrityEvent.attempt_id == attempt.id)
+            .group_by(ExamIntegrityEvent.event_type)
+        )
+    ).all()
+    counts: dict[str, int] = {et: int(n) for et, n in counts_rows}
+    violations = sum(n for et, n in counts.items() if et in _VIOLATION_EVENTS)
+    score = _score_from_violations(violations)
+    attempt.proctoring_summary = {"counts": counts, "violations": violations}
+    attempt.integrity_score = score
+    attempt.updated_at = now
+    await db.commit()
+    return IntegrityIngestOut(
+        accepted=True,
+        violation_count=violations,
+        max_violations=settings.exam_integrity_max_violations,
+        integrity_score=score,
     )

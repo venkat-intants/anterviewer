@@ -42,6 +42,8 @@ from app.models import (
     ExamAssignment,
     ExamAttempt,
     ExamQuestion,
+    ExamRound,
+    ExamSection,
 )
 from app.routers.hr_applicants import DbSessionDep, HrCtxDep
 
@@ -62,8 +64,12 @@ class ExamCreateIn(BaseModel):
     pass_threshold: int = Field(default=60, ge=0, le=100)
     time_limit_seconds: int | None = Field(default=None, ge=10, le=86_400)
     allow_retake: bool = False
-    # 'mcq' (default) or 'coding' — selects the question type + grader.
+    # 'mcq' (default) or 'coding' — selects the question type + grader. This also
+    # becomes the kind of the auto-created default section (back-compat).
     kind: str = Field(default="mcq")
+    # When True, passing the terminal round auto-creates a scheduled interview
+    # invite + emails the candidate; when False HR invites manually.
+    auto_advance_on_pass: bool = False
 
     @field_validator("kind")
     @classmethod
@@ -81,6 +87,7 @@ class ExamUpdateIn(BaseModel):
     pass_threshold: int | None = Field(default=None, ge=0, le=100)
     time_limit_seconds: int | None = Field(default=None, ge=10, le=86_400)
     allow_retake: bool | None = None
+    auto_advance_on_pass: bool | None = None
     status: str | None = None
 
     @field_validator("status")
@@ -191,6 +198,10 @@ class ImportQuestionsOut(BaseModel):
 class AssignIn(BaseModel):
     applicant_ids: list[uuid.UUID] = Field(min_length=1, max_length=200)
     ttl_hours: int | None = Field(default=None, ge=1, le=8760)
+    # Optional: assign a SPECIFIC round (defaults to the exam's first round when
+    # omitted — the back-compat single-round path). Optional scheduled start time.
+    round_id: uuid.UUID | None = None
+    scheduled_at: datetime | None = None
 
 
 class QuestionOut(BaseModel):
@@ -214,6 +225,7 @@ class ExamOut(BaseModel):
     allow_retake: bool
     status: str
     kind: str
+    auto_advance_on_pass: bool
     created_at: str
 
 
@@ -234,6 +246,8 @@ class AssignOut(BaseModel):
     magic_link: str  # raw token embedded — returned ONCE, at mint time only
     expires_at: str
     status: str
+    round_id: str | None = None
+    scheduled_at: str | None = None
 
 
 class AssignmentOut(BaseModel):
@@ -271,6 +285,88 @@ async def _get_owned_exam(db: AsyncSession, company_id: uuid.UUID, exam_id: uuid
     if exam is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found.")
     return exam
+
+
+async def _create_default_round_section(
+    db: AsyncSession, exam: Exam, *, kind: str
+) -> tuple[ExamRound, ExamSection]:
+    """Create the exam's default Round 1 + one section (mirrors the migration
+    backfill), so legacy exam-scoped question/assignment flows keep working on a
+    fresh exam. Caller owns the commit. advances_to_interview=True — the single
+    round is terminal until HR adds more."""
+    now = datetime.now(tz=UTC)
+    rnd = ExamRound(
+        id=uuid.uuid4(),
+        exam_id=exam.id,
+        company_id=exam.company_id,
+        round_number=1,
+        title="Round 1",
+        pass_threshold=exam.pass_threshold,
+        time_limit_seconds=exam.time_limit_seconds,
+        advances_to_interview=True,
+        status="draft",
+        position=1,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(rnd)
+    sec = ExamSection(
+        id=uuid.uuid4(),
+        round_id=rnd.id,
+        exam_id=exam.id,
+        company_id=exam.company_id,
+        title="Section 1",
+        kind=kind,
+        time_limit_seconds=None,
+        position=1,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(sec)
+    return rnd, sec
+
+
+async def _default_round(
+    db: AsyncSession, company_id: uuid.UUID, exam_id: uuid.UUID
+) -> ExamRound:
+    """The exam's first live round (back-compat single-round path)."""
+    rnd = await db.scalar(
+        select(ExamRound)
+        .where(
+            ExamRound.exam_id == exam_id,
+            ExamRound.company_id == company_id,
+            ExamRound.deleted_at.is_(None),
+        )
+        .order_by(ExamRound.position.asc())
+        .limit(1)
+    )
+    if rnd is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam has no rounds.")
+    return rnd
+
+
+async def _default_section(
+    db: AsyncSession, company_id: uuid.UUID, exam_id: uuid.UUID, kind: str
+) -> ExamSection:
+    """The exam's first live section of the given kind (back-compat path: legacy
+    exams have exactly one section, of kind == exam.kind)."""
+    sec = await db.scalar(
+        select(ExamSection)
+        .where(
+            ExamSection.exam_id == exam_id,
+            ExamSection.company_id == company_id,
+            ExamSection.kind == kind,
+            ExamSection.deleted_at.is_(None),
+        )
+        .order_by(ExamSection.position.asc())
+        .limit(1)
+    )
+    if sec is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Exam has no {kind} section.",
+        )
+    return sec
 
 
 async def _question_count(db: AsyncSession, exam: Exam) -> int:
@@ -350,6 +446,7 @@ def _exam_out(e: Exam) -> ExamOut:
         allow_retake=e.allow_retake,
         status=e.status,
         kind=e.kind,
+        auto_advance_on_pass=e.auto_advance_on_pass,
         created_at=e.created_at.isoformat(),
     )
 
@@ -368,14 +465,14 @@ def _question_out(q: ExamQuestion) -> QuestionOut:
 async def _bulk_insert_questions(
     db: AsyncSession,
     company_id: uuid.UUID,
-    exam_id: uuid.UUID,
+    section: ExamSection,
     items: list[QuestionIn],
 ) -> list[ExamQuestion]:
-    """Append many already-validated questions at sequential positions. Caller must
-    have checked ownership + the attempt-lock first."""
+    """Append many already-validated questions at sequential positions WITHIN a
+    section. Caller must have checked ownership + the attempt-lock first."""
     max_pos = await db.scalar(
         select(func.max(ExamQuestion.position)).where(
-            ExamQuestion.exam_id == exam_id, ExamQuestion.deleted_at.is_(None)
+            ExamQuestion.section_id == section.id, ExamQuestion.deleted_at.is_(None)
         )
     )
     next_pos = (int(max_pos) + 1) if max_pos is not None else 0
@@ -384,7 +481,8 @@ async def _bulk_insert_questions(
     for offset, item in enumerate(items):
         q = ExamQuestion(
             id=uuid.uuid4(),
-            exam_id=exam_id,
+            exam_id=section.exam_id,
+            section_id=section.id,
             company_id=company_id,
             prompt=item.prompt.strip(),
             options=item.options,
@@ -500,7 +598,8 @@ def _parse_question_rows(
                 )
             )
         except ValidationError as exc:
-            msg = str((exc.errors() or [{}])[0].get("msg", "invalid question"))
+            errs = exc.errors()
+            msg = str(errs[0].get("msg", "invalid question")) if errs else "invalid question"
             errors.append(ImportRowError(row=rownum, message=msg))
     return items, errors
 
@@ -524,10 +623,13 @@ async def create_exam(body: ExamCreateIn, ctx: HrCtxDep, db: DbSessionDep) -> Ex
         allow_retake=body.allow_retake,
         status="draft",
         kind=body.kind,
+        auto_advance_on_pass=body.auto_advance_on_pass,
         created_at=now,
         updated_at=now,
     )
     db.add(exam)
+    await db.flush()  # exam.id available for the default round/section FKs
+    await _create_default_round_section(db, exam, kind=body.kind)
     await db.commit()
     log.info("hr.exam.created", exam_id=str(exam.id), company_id=str(company_id), kind=body.kind)
     return _exam_out(exam)
@@ -593,6 +695,8 @@ async def update_exam(
         exam.time_limit_seconds = body.time_limit_seconds
     if body.allow_retake is not None:
         exam.allow_retake = body.allow_retake
+    if body.auto_advance_on_pass is not None:
+        exam.auto_advance_on_pass = body.auto_advance_on_pass
     if body.status is not None:
         exam.status = body.status
     exam.updated_at = datetime.now(tz=UTC)
@@ -612,16 +716,19 @@ async def add_question(
     _hr_uid, company_id = ctx
     await _get_owned_exam(db, company_id, exam_id)
     await _require_no_attempts(db, company_id, exam_id)
+    # Back-compat: target the exam's default MCQ section.
+    section = await _default_section(db, company_id, exam_id, "mcq")
 
     max_pos = await db.scalar(
         select(func.max(ExamQuestion.position)).where(
-            ExamQuestion.exam_id == exam_id, ExamQuestion.deleted_at.is_(None)
+            ExamQuestion.section_id == section.id, ExamQuestion.deleted_at.is_(None)
         )
     )
     now = datetime.now(tz=UTC)
     q = ExamQuestion(
         id=uuid.uuid4(),
         exam_id=exam_id,
+        section_id=section.id,
         company_id=company_id,
         prompt=body.prompt.strip(),
         options=body.options,
@@ -723,7 +830,8 @@ async def bulk_add_questions(
     _hr_uid, company_id = ctx
     await _get_owned_exam(db, company_id, exam_id)
     await _require_no_attempts(db, company_id, exam_id)
-    created = await _bulk_insert_questions(db, company_id, exam_id, body.questions)
+    section = await _default_section(db, company_id, exam_id, "mcq")
+    created = await _bulk_insert_questions(db, company_id, section, body.questions)
     log.info(
         "hr.exam.questions.bulk_added",
         exam_id=str(exam_id), company_id=str(company_id), count=len(created),
@@ -808,8 +916,9 @@ async def import_questions(
         raise HTTPException(
             status_code=400, detail="No question rows found. Use the template layout."
         )
+    section = await _default_section(db, company_id, exam_id, "mcq")
     created = (
-        await _bulk_insert_questions(db, company_id, exam_id, items) if items else []
+        await _bulk_insert_questions(db, company_id, section, items) if items else []
     )
     log.info(
         "hr.exam.questions.imported",
@@ -865,12 +974,33 @@ async def assign_exam(
     exam_id: uuid.UUID, body: AssignIn, ctx: HrCtxDep, db: DbSessionDep
 ) -> list[AssignOut]:
     hr_uid, company_id = ctx
-    exam = await _get_owned_exam(db, company_id, exam_id)
-    if exam.status != "published":
-        raise HTTPException(status_code=409, detail="Publish the exam before assigning it.")
+    await _get_owned_exam(db, company_id, exam_id)
+
+    # Resolve the target round (specified or the exam's first round). The token
+    # grants exactly ONE round, and the ROUND is the unit that gets published +
+    # scheduled separately — so the publish gate is on the round, not the exam.
+    if body.round_id is not None:
+        rnd = await db.scalar(
+            select(ExamRound).where(
+                ExamRound.id == body.round_id,
+                ExamRound.exam_id == exam_id,
+                ExamRound.company_id == company_id,
+                ExamRound.deleted_at.is_(None),
+            )
+        )
+        if rnd is None:
+            raise HTTPException(status_code=404, detail="Round not found for this exam.")
+    else:
+        rnd = await _default_round(db, company_id, exam_id)
+
+    if rnd.status != "published":
+        raise HTTPException(status_code=409, detail="Publish this round before assigning it.")
+
+    now = datetime.now(tz=UTC)
+    if body.scheduled_at is not None and body.scheduled_at < now:
+        raise HTTPException(status_code=422, detail="scheduled_at cannot be in the past.")
 
     ttl_hours = body.ttl_hours or settings.exam_link_ttl_hours
-    now = datetime.now(tz=UTC)
     expires_at = now + timedelta(hours=ttl_hours)
     base = settings.exam_link_base_url.rstrip("/")
 
@@ -886,11 +1016,12 @@ async def assign_exam(
         if applicant is None:
             continue  # not this company's applicant — silently skip
 
-        # Rotate: revoke any existing active (invited) assignment for this pair so
-        # only one live link exists (the active partial-unique index enforces this).
+        # Rotate: revoke any existing active (invited) assignment for this
+        # (round, applicant) so only one live link exists per round (the active
+        # partial-unique index is now scoped to round_id).
         prior = await db.scalar(
             select(ExamAssignment).where(
-                ExamAssignment.exam_id == exam_id,
+                ExamAssignment.round_id == rnd.id,
                 ExamAssignment.applicant_id == applicant_id,
                 ExamAssignment.company_id == company_id,
                 ExamAssignment.status == "invited",
@@ -907,10 +1038,12 @@ async def assign_exam(
             id=uuid.uuid4(),
             company_id=company_id,
             exam_id=exam_id,
+            round_id=rnd.id,
             applicant_id=applicant_id,
             created_by_user_id=hr_uid,
             token_hash=hash_exam_token(raw_token, settings.exam_link_secret),
             expires_at=expires_at,
+            scheduled_at=body.scheduled_at,
             status="invited",
             created_at=now,
             updated_at=now,
@@ -925,6 +1058,8 @@ async def assign_exam(
                 magic_link=f"{base}/exam#{raw_token}",  # raw token returned ONCE
                 expires_at=expires_at.isoformat(),
                 status=asn.status,
+                round_id=str(rnd.id),
+                scheduled_at=body.scheduled_at.isoformat() if body.scheduled_at else None,
             )
         )
 
@@ -1076,14 +1211,26 @@ async def attempt_breakdown(
     if at is None:
         raise HTTPException(status_code=404, detail="Attempt not found.")
     snapshot: dict[str, Any] = at.graded_snapshot or {}
-    answers: dict[str, int] = {k: int(v) for k, v in (at.answers or {}).items()}
+    raw_answers: dict[str, Any] = at.answers or {}
+    # New (round) attempts nest under 'mcq'/'coding'; legacy flat attempts are
+    # {question_id: meta} with answers {question_id: index}. Detect + normalize.
+    is_nested = bool(snapshot) and set(snapshot.keys()) <= {"mcq", "coding"}
+    if is_nested:
+        mcq_snapshot: dict[str, Any] = snapshot.get("mcq", {}) or {}
+        mcq_answers_src = raw_answers.get("mcq", {}) if isinstance(raw_answers, dict) else {}
+        coding_snapshot: dict[str, Any] = snapshot.get("coding", {}) or {}
+    else:
+        mcq_snapshot = snapshot
+        mcq_answers_src = raw_answers
+        coding_snapshot = {}
+    answers: dict[str, int] = {k: int(v) for k, v in dict(mcq_answers_src).items()}
     questions = [
         GradeQuestion(
             question_id=qid,
             correct_index=int(meta.get("correct_index", -1)),
             points=int(meta.get("points", 1)),
         )
-        for qid, meta in snapshot.items()
+        for qid, meta in mcq_snapshot.items()
     ]
     per_question = grade_breakdown(GradeInput(questions=questions, answers=answers))
     return {
@@ -1091,4 +1238,5 @@ async def attempt_breakdown(
         "score_percent": at.score_percent,
         "passed": at.passed,
         "per_question": per_question,
+        "coding": coding_snapshot,
     }

@@ -38,17 +38,37 @@ export interface PublicCodingQuestion {
   sample_tests: PublicSampleTest[];
 }
 
+/** A section inside a round — kind is 'mcq' or 'coding'. */
+export interface PublicSection {
+  id: string;
+  title: string;
+  kind: 'mcq' | 'coding';
+  position: number;
+  time_limit_seconds: number | null;
+  questions: PublicQuestion[];
+  coding_questions: PublicCodingQuestion[];
+}
+
 export interface TakeExam {
   exam_id: string;
   title: string;
   description: string | null;
-  kind: 'mcq' | 'coding';
+  /** Round-level fields (new). */
+  round_id: string;
+  round_title: string;
+  round_number: number;
+  kind: 'mcq' | 'coding' | 'mixed';
   time_limit_seconds: number | null;
   total_questions: number;
   allow_retake: boolean;
   already_submitted: boolean;
   server_now: string;
   deadline: string | null;
+  scheduled_at: string | null;
+  max_integrity_violations: number;
+  /** Authoritative ordered sections (prefer over the flattened back-compat arrays below). */
+  sections: PublicSection[];
+  /** Back-compat flattened arrays — prefer sections. */
   questions: PublicQuestion[];
   coding_questions: PublicCodingQuestion[];
 }
@@ -88,6 +108,7 @@ export function startExam(token: string): Promise<AttemptStart> {
   });
 }
 
+/** Legacy single-map MCQ submit — kept for back-compat; prefer submitRound. */
 export function submitExam(
   token: string,
   attemptId: string,
@@ -133,7 +154,77 @@ export function runCode(
   });
 }
 
-/** Submit a coding attempt — graded server-side against ALL test cases. */
+/** Run the candidate's code against a CUSTOM stdin — no scoring, no save. */
+export interface CustomRunResult {
+  stdout: string;
+  stderr: string;
+  exit_code: number | null;
+  timed_out: boolean;
+  error: string | null;
+}
+
+export function runCodeCustom(
+  token: string,
+  body: { question_id: string; language: string; source: string; stdin: string },
+): Promise<CustomRunResult> {
+  return clientFetch<CustomRunResult>(`${API_BASE}/exam/run-code-custom`, {
+    method: 'POST',
+    skipAuth: true,
+    headers: tokenHeaders(token),
+    body: JSON.stringify(body),
+  });
+}
+
+/** Unified round submit — sends BOTH MCQ answers and coding submissions. */
+export function submitRound(
+  token: string,
+  attemptId: string,
+  answers: Record<string, number>,
+  submissions: Record<string, CodingAnswer>,
+): Promise<ExamResult> {
+  return clientFetch<ExamResult>(`${API_BASE}/exam/submit-round`, {
+    method: 'POST',
+    skipAuth: true,
+    headers: tokenHeaders(token),
+    body: JSON.stringify({ attempt_id: attemptId, answers, submissions }),
+  });
+}
+
+/** Post a single integrity event for an exam attempt. */
+export interface ExamIntegrityEventBody {
+  attempt_id: string;
+  event_type: string;
+  started_at?: string;
+  ended_at?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ExamIntegrityResult {
+  accepted: boolean;
+  violation_count: number;
+  max_violations: number;
+  integrity_score: number;
+}
+
+export async function sendIntegrityEvent(
+  token: string,
+  body: ExamIntegrityEventBody,
+): Promise<ExamIntegrityResult | null> {
+  try {
+    return await clientFetch<ExamIntegrityResult>(`${API_BASE}/exam/integrity-event`, {
+      method: 'POST',
+      skipAuth: true,
+      headers: tokenHeaders(token),
+      body: JSON.stringify(body),
+    });
+  } catch {
+    // Proctoring must never break the exam flow — swallow errors.
+    return null;
+  }
+}
+
+/** Submit a coding attempt — graded server-side against ALL test cases.
+ * @deprecated Use submitRound instead for mixed/coding rounds. Kept for back-compat. */
 export function submitCoding(
   token: string,
   attemptId: string,

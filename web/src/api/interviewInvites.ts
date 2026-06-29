@@ -1,7 +1,7 @@
 // interviewInvites.ts — HR 'invite to interview' API (HR workflow Phase 3).
 // Authenticated, tenant-scoped server-side by the HR's company.
 
-import { apiGet, apiPost } from './client';
+import { apiGet, apiPost, apiPatch } from './client';
 import type { InviteStatus } from './publicInterview';
 
 export type { InviteStatus };
@@ -88,4 +88,11 @@ export function revokeInvite(inviteId: string): Promise<InterviewInvite> {
 
 export function getInviteResult(inviteId: string): Promise<InterviewOutcome> {
   return apiGet<InterviewOutcome>(`/hr/interviews/${inviteId}/result`);
+}
+
+export function rescheduleInvite(
+  inviteId: string,
+  scheduledAt: string,
+): Promise<InviteResult> {
+  return apiPatch<InviteResult>(`/hr/interviews/${inviteId}`, { scheduled_at: scheduledAt });
 }

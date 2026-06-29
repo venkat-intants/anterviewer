@@ -54,8 +54,10 @@ def test_take_exam_out_never_serializes_secrets() -> None:
     coding = _public_coding_question(_question_with_secrets())
     payload = TakeExamOut(
         exam_id="e", title="t", description=None, kind="coding",
+        round_id="r", round_title="Round 1", round_number=1,
         time_limit_seconds=None, total_questions=1, allow_retake=False,
         already_submitted=False, server_now="now", deadline=None,
+        max_integrity_violations=3,
         questions=[], coding_questions=[coding],
     )
     blob = payload.model_dump_json()

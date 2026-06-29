@@ -3,13 +3,14 @@
 // Tenant-scoped server-side by the HR's company. correct_index is returned here
 // (HR only); the applicant take path lives in publicExam.ts and never sees it.
 
-import { apiGet, apiPost, apiPut, apiDelete, clientFetch, uploadWithProgress } from './client';
+import { apiGet, apiPost, apiPut, apiDelete, apiPatch, clientFetch, uploadWithProgress } from './client';
 import { getToken } from './tokenStore';
 
 // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
 const API_BASE: string = import.meta.env.VITE_API_BASE_URL;
 
 export type ExamStatus = 'draft' | 'published' | 'closed';
+export type RoundStatus = 'draft' | 'published';
 
 export interface ExamQuestion {
   id: string;
@@ -22,6 +23,61 @@ export interface ExamQuestion {
 
 export type ExamKind = 'mcq' | 'coding';
 
+// ── Round / Section / Structure types ────────────────────────────────────────
+
+export interface Section {
+  id: string;
+  round_id: string;
+  title: string;
+  kind: ExamKind;
+  time_limit_seconds: number | null;
+  position: number;
+  question_count: number;
+}
+
+export interface Round {
+  id: string;
+  title: string;
+  round_number: number;
+  pass_threshold: number;
+  time_limit_seconds: number | null;
+  advances_to_interview: boolean;
+  status: RoundStatus;
+  position: number;
+  sections: Section[];
+}
+
+export interface ExamStructure {
+  exam_id: string;
+  rounds: Round[];
+}
+
+export interface RoundCreateInput {
+  title: string;
+  pass_threshold: number;
+  time_limit_seconds: number | null;
+  advances_to_interview: boolean;
+}
+
+export type RoundUpdateInput = Partial<{
+  title: string;
+  pass_threshold: number;
+  time_limit_seconds: number | null;
+  advances_to_interview: boolean;
+  status: RoundStatus;
+}>;
+
+export interface SectionCreateInput {
+  title: string;
+  kind: ExamKind;
+  time_limit_seconds: number | null;
+}
+
+export type SectionUpdateInput = Partial<{
+  title: string;
+  time_limit_seconds: number | null;
+}>;
+
 export interface Exam {
   id: string;
   title: string;
@@ -30,6 +86,7 @@ export interface Exam {
   pass_threshold: number;
   time_limit_seconds: number | null;
   allow_retake: boolean;
+  auto_advance_on_pass: boolean;
   status: ExamStatus;
   kind: ExamKind;
   created_at: string;
@@ -53,6 +110,8 @@ export interface Assignment {
   expires_at: string;
   consumed_at: string | null;
   created_at: string;
+  round_id?: string | null;
+  scheduled_at?: string | null;
 }
 
 export interface AssignResult {
@@ -62,6 +121,8 @@ export interface AssignResult {
   magic_link: string;
   expires_at: string;
   status: string;
+  round_id?: string | null;
+  scheduled_at?: string | null;
 }
 
 export interface AttemptResult {
@@ -84,6 +145,7 @@ export interface ExamCreateInput {
   pass_threshold?: number;
   time_limit_seconds?: number | null;
   allow_retake?: boolean;
+  auto_advance_on_pass?: boolean;
   kind?: ExamKind;
 }
 
@@ -94,6 +156,7 @@ export type ExamUpdateInput = Partial<{
   pass_threshold: number;
   time_limit_seconds: number | null;
   allow_retake: boolean;
+  auto_advance_on_pass: boolean;
   status: ExamStatus;
 }>;
 
@@ -287,6 +350,115 @@ export function deleteCodingQuestion(examId: string, qid: string): Promise<void>
   return apiDelete<void>(`/hr/exams/${examId}/coding-questions/${qid}`);
 }
 
+// ── Rounds ────────────────────────────────────────────────────────────────────
+export function getStructure(examId: string): Promise<ExamStructure> {
+  return apiGet<ExamStructure>(`/hr/exams/${examId}/structure`);
+}
+
+export function createRound(examId: string, input: RoundCreateInput): Promise<Round> {
+  return apiPost<Round>(`/hr/exams/${examId}/rounds`, input);
+}
+
+export function updateRound(
+  examId: string,
+  roundId: string,
+  patch: RoundUpdateInput,
+): Promise<Round> {
+  return apiPatch<Round>(`/hr/exams/${examId}/rounds/${roundId}`, patch);
+}
+
+export function deleteRound(examId: string, roundId: string): Promise<void> {
+  return apiDelete<void>(`/hr/exams/${examId}/rounds/${roundId}`);
+}
+
+export function reorderRounds(examId: string, ids: string[]): Promise<Round[]> {
+  return apiPut<Round[]>(`/hr/exams/${examId}/rounds/order`, { ids });
+}
+
+// ── Sections ──────────────────────────────────────────────────────────────────
+export function createSection(
+  examId: string,
+  roundId: string,
+  input: SectionCreateInput,
+): Promise<Section> {
+  return apiPost<Section>(`/hr/exams/${examId}/rounds/${roundId}/sections`, input);
+}
+
+export function updateSection(
+  examId: string,
+  roundId: string,
+  sectionId: string,
+  patch: SectionUpdateInput,
+): Promise<Section> {
+  return apiPatch<Section>(
+    `/hr/exams/${examId}/rounds/${roundId}/sections/${sectionId}`,
+    patch,
+  );
+}
+
+export function deleteSection(
+  examId: string,
+  roundId: string,
+  sectionId: string,
+): Promise<void> {
+  return apiDelete<void>(`/hr/exams/${examId}/rounds/${roundId}/sections/${sectionId}`);
+}
+
+// ── Section questions (MCQ) ───────────────────────────────────────────────────
+export function listSectionQuestions(
+  examId: string,
+  sectionId: string,
+): Promise<ExamQuestion[]> {
+  return apiGet<ExamQuestion[]>(`/hr/exams/${examId}/sections/${sectionId}/questions`);
+}
+
+export function addSectionQuestion(
+  examId: string,
+  sectionId: string,
+  q: QuestionInput,
+): Promise<ExamQuestion> {
+  return apiPost<ExamQuestion>(`/hr/exams/${examId}/sections/${sectionId}/questions`, q);
+}
+
+// ── Section coding questions ──────────────────────────────────────────────────
+export function listSectionCodingQuestions(
+  examId: string,
+  sectionId: string,
+): Promise<CodingQuestion[]> {
+  return apiGet<CodingQuestion[]>(
+    `/hr/exams/${examId}/sections/${sectionId}/coding-questions`,
+  );
+}
+
+export function addSectionCodingQuestion(
+  examId: string,
+  sectionId: string,
+  q: CodingQuestionInput,
+): Promise<CodingQuestion> {
+  return apiPost<CodingQuestion>(
+    `/hr/exams/${examId}/sections/${sectionId}/coding-questions`,
+    q,
+  );
+}
+
+export function deleteSectionQuestion(
+  examId: string,
+  sectionId: string,
+  qid: string,
+): Promise<void> {
+  return apiDelete<void>(`/hr/exams/${examId}/sections/${sectionId}/questions/${qid}`);
+}
+
+export function deleteSectionCodingQuestion(
+  examId: string,
+  sectionId: string,
+  qid: string,
+): Promise<void> {
+  return apiDelete<void>(
+    `/hr/exams/${examId}/sections/${sectionId}/coding-questions/${qid}`,
+  );
+}
+
 // ── Assignments (magic links) ────────────────────────────────────────────────
 export function listAssignments(examId: string): Promise<Assignment[]> {
   return apiGet<Assignment[]>(`/hr/exams/${examId}/assignments`);
@@ -296,10 +468,14 @@ export function assignExam(
   examId: string,
   applicantIds: string[],
   ttlHours?: number,
+  roundId?: string,
+  scheduledAt?: string,
 ): Promise<AssignResult[]> {
   return apiPost<AssignResult[]>(`/hr/exams/${examId}/assignments`, {
     applicant_ids: applicantIds,
     ttl_hours: ttlHours,
+    ...(roundId !== undefined ? { round_id: roundId } : {}),
+    ...(scheduledAt !== undefined ? { scheduled_at: scheduledAt } : {}),
   });
 }
 

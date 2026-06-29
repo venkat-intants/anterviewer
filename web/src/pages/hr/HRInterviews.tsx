@@ -15,12 +15,16 @@ import {
   Loader2,
   BarChart3,
   Calendar,
+  Pencil,
+  Check,
+  X,
 } from '@/design/components/icons';
 import {
   listEligibleApplicants,
   listInvites,
   createInvite,
   revokeInvite,
+  rescheduleInvite,
   type InterviewInvite,
 } from '@/api/interviewInvites';
 import { toast } from '@/lib/toast';
@@ -103,85 +107,148 @@ function InviteRow({
   inv,
   onRevoke,
   revoking,
+  onReschedule,
+  rescheduling,
 }: {
   inv: InterviewInvite;
   onRevoke: (id: string) => void;
   revoking: boolean;
+  onReschedule: (id: string, iso: string) => void;
+  rescheduling: boolean;
 }) {
   const { label, tone, dot } = statusDisplay(inv.status);
   const initials = initialsOf(inv.applicant_name);
   const gradient = gradientFor(seedFrom(inv.applicant_id));
+  const [editingSched, setEditingSched] = useState(false);
+  const [schedDraft, setSchedDraft] = useState(
+    inv.scheduled_at
+      ? new Date(inv.scheduled_at).toISOString().slice(0, 16)
+      : '',
+  );
+
+  const canReschedule = inv.status === 'invited' || inv.status === 'consumed';
 
   return (
-    <div className="grid grid-cols-[2fr_1.2fr_1.2fr_1fr_0.8fr] items-center gap-3 border-b border-white/[0.04] px-6 py-3.5 last:border-0 hover:bg-white/[0.02] transition-colors">
-      {/* Candidate */}
-      <div className="flex min-w-0 items-center gap-3">
-        <Avatar initials={initials} gradient={gradient} size={34} />
-        <p className="truncate text-[13.5px] font-medium text-white">{inv.applicant_name}</p>
-      </div>
+    <div className="border-b border-white/[0.04] px-6 py-3.5 last:border-0 hover:bg-white/[0.02] transition-colors">
+      <div className="grid grid-cols-[2fr_1.2fr_1.2fr_1fr_0.8fr] items-center gap-3">
+        {/* Candidate */}
+        <div className="flex min-w-0 items-center gap-3">
+          <Avatar initials={initials} gradient={gradient} size={34} />
+          <p className="truncate text-[13.5px] font-medium text-white">{inv.applicant_name}</p>
+        </div>
 
-      {/* Role */}
-      <p className="truncate text-[13px] text-[#b8babf]">{inv.job_title}</p>
+        {/* Role */}
+        <p className="truncate text-[13px] text-[#b8babf]">{inv.job_title}</p>
 
-      {/* When */}
-      <div className="flex items-center gap-1.5 text-[13px] text-[#888b91]">
-        <Calendar size={13} className="shrink-0" aria-hidden="true" />
-        {inv.scheduled_at
-          ? new Date(inv.scheduled_at).toLocaleDateString('en-IN', {
-              day: 'numeric',
-              month: 'short',
-              hour: '2-digit',
-              minute: '2-digit',
-            })
-          : <span className="text-[#5a5f66]">—</span>}
-      </div>
+        {/* When */}
+        <div className="flex items-center gap-1.5 text-[13px] text-[#888b91]">
+          <Calendar size={13} className="shrink-0" aria-hidden="true" />
+          {inv.scheduled_at
+            ? new Date(inv.scheduled_at).toLocaleDateString('en-IN', {
+                day: 'numeric',
+                month: 'short',
+                hour: '2-digit',
+                minute: '2-digit',
+              })
+            : <span className="text-[#5a5f66]">—</span>}
+        </div>
 
-      {/* Status */}
-      <div>
-        <StatusTag tone={tone} dot={dot}>
-          {label}
-        </StatusTag>
-      </div>
+        {/* Status */}
+        <div>
+          <StatusTag tone={tone} dot={dot}>
+            {label}
+          </StatusTag>
+        </div>
 
-      {/* Action */}
-      <div className="flex items-center justify-end gap-2">
-        {inv.composite_score !== null && (
-          <span
-            className="shrink-0 text-center"
-            aria-label={`Score: ${inv.composite_score.toFixed(1)} out of 10`}
-          >
-            <span className="text-[13px] font-semibold text-[#27c93f]">
-              {inv.composite_score.toFixed(1)}
+        {/* Action */}
+        <div className="flex items-center justify-end gap-2">
+          {inv.composite_score !== null && (
+            <span
+              className="shrink-0 text-center"
+              aria-label={`Score: ${inv.composite_score.toFixed(1)} out of 10`}
+            >
+              <span className="text-[13px] font-semibold text-[#27c93f]">
+                {inv.composite_score.toFixed(1)}
+              </span>
+              <span className="text-[10px] text-[#888b91]">/10</span>
             </span>
-            <span className="text-[10px] text-[#888b91]">/10</span>
-          </span>
-        )}
-        {inv.scorecard_id ? (
-          <Link
-            to={`/scorecard/${inv.scorecard_id}`}
-            aria-label={`View scorecard for ${inv.applicant_name}`}
-          >
-            <Pill variant="ghost" className="py-1.5 px-3 gap-1.5 text-[12px]">
-              <BarChart3 size={13} aria-hidden="true" /> Result
-            </Pill>
-          </Link>
-        ) : (
-          <span className="text-[12px] text-[#70757c]">
-            {LANG_LABEL[inv.language] ?? inv.language}
-          </span>
-        )}
-        {inv.status === 'invited' && (
+          )}
+          {inv.scorecard_id ? (
+            <Link
+              to={`/scorecard/${inv.scorecard_id}`}
+              aria-label={`View scorecard for ${inv.applicant_name}`}
+            >
+              <Pill variant="ghost" className="py-1.5 px-3 gap-1.5 text-[12px]">
+                <BarChart3 size={13} aria-hidden="true" /> Result
+              </Pill>
+            </Link>
+          ) : (
+            <span className="text-[12px] text-[#70757c]">
+              {LANG_LABEL[inv.language] ?? inv.language}
+            </span>
+          )}
+          {canReschedule && (
+            <button
+              type="button"
+              aria-label={`Reschedule interview for ${inv.applicant_name}`}
+              className="shrink-0 text-[#888b91] hover:text-[#60a5fa] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+              disabled={rescheduling}
+              onClick={() => setEditingSched((v) => !v)}
+            >
+              <Pencil size={14} aria-hidden="true" />
+            </button>
+          )}
+          {inv.status === 'invited' && (
+            <button
+              type="button"
+              aria-label={`Revoke interview link for ${inv.applicant_name}`}
+              className="shrink-0 text-[#888b91] hover:text-[#e6714f] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+              disabled={revoking}
+              onClick={() => onRevoke(inv.invite_id)}
+            >
+              <Ban size={15} aria-hidden="true" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Reschedule inline form */}
+      {editingSched && (
+        <div className="mt-2 flex items-center gap-2 pl-[2.375rem]">
+          <input
+            type="datetime-local"
+            value={schedDraft}
+            onChange={(e) => setSchedDraft(e.target.value)}
+            className="rounded-[9px] border border-white/[0.1] bg-[rgba(28,29,31,0.6)] px-2.5 py-1.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent)]"
+            aria-label="New scheduled time"
+          />
           <button
             type="button"
-            aria-label={`Revoke interview link for ${inv.applicant_name}`}
-            className="shrink-0 text-[#888b91] hover:text-[#e6714f] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-            disabled={revoking}
-            onClick={() => onRevoke(inv.invite_id)}
+            aria-label="Confirm reschedule"
+            disabled={!schedDraft || rescheduling}
+            className="flex h-7 w-7 items-center justify-center rounded-[8px] border border-[rgba(39,201,63,0.4)] text-[#27c93f] hover:bg-[rgba(39,201,63,0.12)] disabled:opacity-40 transition-colors"
+            onClick={() => {
+              if (!schedDraft) return;
+              onReschedule(inv.invite_id, new Date(schedDraft).toISOString());
+              setEditingSched(false);
+            }}
           >
-            <Ban size={15} aria-hidden="true" />
+            {rescheduling ? (
+              <Loader2 size={13} className="animate-spin" aria-hidden="true" />
+            ) : (
+              <Check size={13} aria-hidden="true" />
+            )}
           </button>
-        )}
-      </div>
+          <button
+            type="button"
+            aria-label="Cancel reschedule"
+            className="flex h-7 w-7 items-center justify-center rounded-[8px] text-[#888b91] hover:text-white transition-colors"
+            onClick={() => setEditingSched(false)}
+          >
+            <X size={13} aria-hidden="true" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -235,6 +302,16 @@ export default function HRInterviews() {
       void qc.invalidateQueries({ queryKey: ['hr', 'interviews'] });
     },
     onError: (e: unknown) => toast.error(e instanceof Error ? e.message : 'Revoke failed'),
+  });
+
+  const rescheduleMut = useMutation({
+    mutationFn: ({ id, scheduledAt }: { id: string; scheduledAt: string }) =>
+      rescheduleInvite(id, scheduledAt),
+    onSuccess: () => {
+      toast.success('Interview rescheduled');
+      void qc.invalidateQueries({ queryKey: ['hr', 'interviews'] });
+    },
+    onError: (e: unknown) => toast.error(e instanceof Error ? e.message : 'Reschedule failed'),
   });
 
   async function copyLink(link: string) {
@@ -436,6 +513,10 @@ export default function HRInterviews() {
                       inv={inv}
                       onRevoke={(id) => revokeMut.mutate(id)}
                       revoking={revokeMut.isPending}
+                      onReschedule={(id, scheduledAt) =>
+                        rescheduleMut.mutate({ id, scheduledAt })
+                      }
+                      rescheduling={rescheduleMut.isPending}
                     />
                   </StaggerItem>
                 ))}
