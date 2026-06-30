@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db_session
 from app.dependencies import require_role
+from app.mailer import enqueue_email
 from app.embedding_client import (
     EmbeddingError,
     embed_one_remote,
@@ -49,8 +50,41 @@ router = APIRouter(prefix="/hr", tags=["hr-applicants"])
 _MAX_RESUME_BYTES = 5 * 1024 * 1024  # 5 MB
 _MAX_BULK_FILES = 25  # per batch; large batches should move to an async queue (Phase 5)
 _VALID_STATUSES = {"new", "shortlisted", "rejected", "interviewed", "hired"}
+# Status transitions that warrant a decision email to the candidate.
+_DECISION_EMAIL_STATUSES = {"shortlisted", "rejected", "hired"}
 
 DbSessionDep = Annotated[AsyncSession, Depends(get_db_session)]
+
+
+async def email_applicant_decision(
+    db: AsyncSession,
+    *,
+    applicant: Applicant,
+    decision: str,
+    company_id: uuid.UUID,
+) -> None:
+    """Stage a branded shortlist/hire/reject email to the candidate (caller commits).
+
+    No-op when the applicant has no email on file or the decision isn't one we
+    notify on. Best-effort: enqueue never raises on a bad recipient. Shared by the
+    applicant status PATCH and the pipeline hire/reject decision endpoint.
+    """
+    if not applicant.email or decision not in _DECISION_EMAIL_STATUSES:
+        return
+    await enqueue_email(
+        db,
+        to=applicant.email,
+        template="decision",
+        lang="en",
+        ctx={
+            "name": applicant.full_name,
+            "job_title": applicant.target_job_title,
+            "decision": decision,
+        },
+        company_id=company_id,
+        related_kind="applicant_decision",
+        related_id=applicant.id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -738,8 +772,14 @@ async def update_applicant_status(
             status_code=400, detail=f"status must be one of {sorted(_VALID_STATUSES)}"
         )
     a = await _get_owned(db, company_id, applicant_id)
+    prev_status = a.status
     a.status = body.status
     a.updated_at = datetime.now(tz=UTC)
+    # Email the candidate on a real shortlist/hire/reject transition (not a re-save).
+    if body.status != prev_status:
+        await email_applicant_decision(
+            db, applicant=a, decision=body.status, company_id=company_id
+        )
     await db.commit()
     return _to_out(a)
 

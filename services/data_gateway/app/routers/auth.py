@@ -41,19 +41,23 @@ import asyncio
 import hmac
 import secrets
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import bcrypt
 import structlog
-from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request, Response, status
 from pydantic import BaseModel, EmailStr, Field
 from shared.auth.base import AuthProvider, User
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth_tokens import hash_token, mint_token, ttl_hours_for
 from app.config import settings
 from app.database import get_db_session
 from app.dependencies import get_auth_provider_dep, get_current_user
+from app.mailer import enqueue_email
+from app.models import AuthToken
 from app.notifications_util import create_notification
 from app.rate_limit import rate_limit
 
@@ -106,6 +110,18 @@ class AuthTokensResponse(BaseModel):
     roles: list[str]
 
 
+class RegisterResponse(BaseModel):
+    """Register result. When ``verification_required`` is True the account was
+    created but NOT signed in (no token/cookies) — the user must confirm their
+    email first. Otherwise it behaves like AuthTokensResponse (auto-login)."""
+
+    verification_required: bool = False
+    access_token: str | None = None
+    expires_in: int | None = None
+    user_id: str
+    roles: list[str] = []
+
+
 class MeResponse(BaseModel):
     user_id: str
     full_name: str
@@ -120,6 +136,9 @@ class MeResponse(BaseModel):
     # HR workflow — true when the account still has its bootstrap password and
     # must reset it before doing anything else (drives the force-change redirect).
     must_change_password: bool = False
+    # Email system — whether the address is confirmed + the login-alert opt-in.
+    email_verified: bool = False
+    notify_login_email: bool = False
     # Editable self-service profile (candidate / HR / admin).
     phone: str | None = None
     preferred_language: str | None = None
@@ -173,6 +192,8 @@ class UserProfileUpdate(BaseModel):
     desired_roles: str | None = Field(default=None, max_length=300)
     official_email: str | None = Field(default=None, max_length=254)
     location: str | None = Field(default=None, max_length=120)
+    # Opt-in for the "new sign-in" email alert (separate — it's a bool, not text).
+    notify_login_email: bool | None = None
 
 
 class OkResponse(BaseModel):
@@ -275,6 +296,39 @@ def _set_auth_cookies(response: Response, refresh_token: str, max_age: int) -> s
 
 
 # ---------------------------------------------------------------------------
+# Internal helpers — single-use auth tokens (email verify / password reset)
+# ---------------------------------------------------------------------------
+async def _mint_auth_token(db: AsyncSession, user_id: uuid.UUID, kind: str) -> str:
+    """Stage a hashed single-use token row and return the RAW token (caller commits).
+
+    Only the HMAC hash is persisted (app.auth_tokens) — the raw token lives only in
+    the emailed URL, mirroring the exam/interview magic-link discipline.
+    """
+    raw = mint_token()
+    now = datetime.now(tz=UTC)
+    db.add(
+        AuthToken(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            kind=kind,
+            token_hash=hash_token(raw, kind),
+            expires_at=now + timedelta(hours=ttl_hours_for(kind)),
+            created_at=now,
+        )
+    )
+    return raw
+
+
+def _verify_email_url(raw_token: str) -> str:
+    # Token in the URL #fragment (kept out of server logs / Referer headers).
+    return f"{settings.app_base_url.rstrip('/')}/verify-email#{raw_token}"
+
+
+def _reset_password_url(raw_token: str) -> str:
+    return f"{settings.app_base_url.rstrip('/')}/reset-password#{raw_token}"
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -282,7 +336,7 @@ def _set_auth_cookies(response: Response, refresh_token: str, max_age: int) -> s
 @router.post(
     "/register",
     status_code=status.HTTP_201_CREATED,
-    response_model=AuthTokensResponse,
+    response_model=RegisterResponse,
     summary="Register a new candidate account",
     dependencies=[rate_limit("auth", settings.rate_limit_login_per_minute)],
 )
@@ -291,15 +345,17 @@ async def register(
     auth: AuthProviderDep,
     response: Response,
     db: DbSessionDep,
-) -> AuthTokensResponse:
-    """Create a new user and return access token + auth cookies.
+) -> RegisterResponse:
+    """Create a new user and (unless email verification is required) sign them in.
 
-    Two cookies are set on the response:
-      - ``refresh_token`` (httpOnly=True) — browser sends automatically.
-      - ``csrf_token``    (httpOnly=False) — JS reads and echoes as X-CSRF-Token.
+    When EMAIL_VERIFICATION_REQUIRED is False (default): two cookies are set
+    (refresh_token httpOnly + csrf_token) and an access token is returned —
+    the user is logged in immediately.
 
-    The refresh token is NOT returned in the JSON body (security hardening:
-    returning it in JSON would make it readable by JS and negate httpOnly).
+    When True: the account is created and a confirmation email is sent, but NO
+    session is established (no cookies, no token). The response carries
+    ``verification_required=True`` so the UI tells the user to confirm their email
+    before signing in.
     """
     try:
         tokens = await auth.register(
@@ -319,24 +375,46 @@ async def register(
             detail=msg,
         ) from exc
 
-    refresh_ttl_seconds = settings.jwt_refresh_expiry_days * 86400
-    _set_auth_cookies(response, tokens.refresh_token, max_age=refresh_ttl_seconds)
-
-    # Seed a welcome notification (best-effort — never block signup on it).
+    # Seed a welcome notification + send the branded welcome/confirmation email
+    # with an email-verification link (best-effort — never block signup on it).
     try:
+        uid = uuid.UUID(tokens.user_id)
         await create_notification(
             db,
-            user_id=uuid.UUID(tokens.user_id),
+            user_id=uid,
             kind="welcome",
             title="Welcome to Anterview",
             body="Upload your resume and start a practice interview to get your first scorecard.",
             link="/dashboard",
         )
+        raw = await _mint_auth_token(db, uid, "email_verify")
+        await enqueue_email(
+            db,
+            to=str(body.email),
+            template="welcome",
+            lang="en",
+            ctx={"name": body.full_name, "verify_url": _verify_email_url(raw)},
+            to_user_id=uid,
+            related_kind="welcome",
+            dedupe_key=f"welcome:{uid}",
+        )
         await db.commit()
-    except Exception:  # noqa: BLE001 — notification must never fail registration
+    except Exception:  # noqa: BLE001 — notification/email must never fail registration
         await db.rollback()
 
-    return AuthTokensResponse(
+    if settings.email_verification_required:
+        # Do NOT establish a session — the user must confirm their email first.
+        log.info("auth.register.verification_required", user_id=tokens.user_id)
+        return RegisterResponse(
+            verification_required=True,
+            user_id=tokens.user_id,
+            roles=tokens.roles,
+        )
+
+    refresh_ttl_seconds = settings.jwt_refresh_expiry_days * 86400
+    _set_auth_cookies(response, tokens.refresh_token, max_age=refresh_ttl_seconds)
+    return RegisterResponse(
+        verification_required=False,
         access_token=tokens.access_token,
         expires_in=tokens.expires_in,
         user_id=tokens.user_id,
@@ -355,6 +433,8 @@ async def login(
     body: LoginBody,
     auth: AuthProviderDep,
     response: Response,
+    request: Request,
+    db: DbSessionDep,
 ) -> AuthTokensResponse:
     """Verify credentials and return access token + auth cookies.
 
@@ -363,6 +443,10 @@ async def login(
       - ``csrf_token``    (httpOnly=False) — JS reads and echoes as X-CSRF-Token.
 
     The refresh token is NOT returned in the JSON body.
+
+    Optionally sends a "new sign-in" alert email — gated by the global
+    EMAIL_LOGIN_ALERTS_ENABLED kill-switch AND the user's own notify_login_email
+    preference (default off, so it's opt-in and never spammy).
     """
     try:
         tokens = await auth.authenticate(email=body.email, password=body.password)
@@ -372,8 +456,13 @@ async def login(
             detail="Invalid email or password.",
         ) from exc
 
+    # Gate unverified self-registered accounts (when verification is mandatory).
+    await _enforce_email_verified(db, tokens.user_id)
+
     refresh_ttl_seconds = settings.jwt_refresh_expiry_days * 86400
     _set_auth_cookies(response, tokens.refresh_token, max_age=refresh_ttl_seconds)
+
+    await _maybe_send_login_alert(db, request, tokens.user_id)
 
     return AuthTokensResponse(
         access_token=tokens.access_token,
@@ -381,6 +470,97 @@ async def login(
         user_id=tokens.user_id,
         roles=tokens.roles,
     )
+
+
+async def _enforce_email_verified(db: AsyncSession, user_id_str: str) -> None:
+    """Block sign-in for an unverified, self-registered local account when
+    EMAIL_VERIFICATION_REQUIRED is on; re-send the confirmation link, then 403.
+
+    EXEMPT (never blocked), so enabling this can't lock anyone out:
+      * the feature is off,
+      * SSO accounts (no password_hash) — they don't use this endpoint anyway,
+      * admin-provisioned accounts still on their bootstrap password
+        (must_change_password=true) — they verify when they set their password,
+      * already-verified accounts (incl. all pre-existing, backfilled accounts).
+    """
+    if not settings.email_verification_required:
+        return
+    uid = uuid.UUID(user_id_str)
+    row = (
+        await db.execute(
+            text(
+                "SELECT email, full_name, preferred_language, email_verified_at, "
+                "password_hash, must_change_password FROM users "
+                "WHERE id = :uid AND deleted_at IS NULL"
+            ),
+            {"uid": uid},
+        )
+    ).fetchone()
+    if row is None:
+        return
+    email, full_name, lang, verified_at, pw_hash, must_change = row
+    if pw_hash is None or must_change or verified_at is not None:
+        return  # exempt — see docstring
+
+    # Blocked. Re-send a fresh confirmation link (best-effort) so the user can act.
+    try:
+        raw = await _mint_auth_token(db, uid, "email_verify")
+        await enqueue_email(
+            db,
+            to=email,
+            template="email_verify",
+            lang=lang or "en",
+            ctx={"name": full_name, "verify_url": _verify_email_url(raw)},
+            to_user_id=uid,
+            related_kind="email_verify",
+        )
+        await db.commit()
+    except Exception:  # noqa: BLE001 — resend is best-effort; still block the login
+        await db.rollback()
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Please confirm your email before signing in. We've just re-sent your confirmation link — check your inbox.",
+    )
+
+
+async def _maybe_send_login_alert(
+    db: AsyncSession, request: Request, user_id_str: str
+) -> None:
+    """Enqueue an opt-in login-alert email (best-effort, never fails login)."""
+    if not settings.email_login_alerts_enabled:
+        return
+    try:
+        uid = uuid.UUID(user_id_str)
+        row = (
+            await db.execute(
+                text(
+                    "SELECT email, full_name, preferred_language, notify_login_email "
+                    "FROM users WHERE id = :uid AND deleted_at IS NULL"
+                ),
+                {"uid": uid},
+            )
+        ).fetchone()
+        if not row or not row[3]:  # no row, or login alerts not opted in
+            return
+        device = (request.headers.get("user-agent") or "Unknown device")[:200]
+        when = datetime.now(tz=UTC).strftime("%d %b %Y, %H:%M UTC")
+        await enqueue_email(
+            db,
+            to=row[0],
+            template="login_alert",
+            lang=row[2] or "en",
+            ctx={
+                "name": row[1],
+                "when": when,
+                "device": device,
+                "reset_url": f"{settings.app_base_url.rstrip('/')}/forgot-password",
+            },
+            to_user_id=uid,
+            related_kind="login",
+        )
+        await db.commit()
+    except Exception:  # noqa: BLE001 — a login alert must never break sign-in
+        await db.rollback()
 
 
 @router.post(
@@ -504,7 +684,8 @@ async def _build_me_response(db: object, user_id_str: str, user: object) -> MeRe
             "SELECT u.linkedin_url, u.github_url, u.resume_s3_key, u.must_change_password,"
             " u.phone, u.preferred_language, u.avatar_url, u.headline, u.bio,"
             " u.employment_status, u.desired_roles, u.official_email, u.location,"
-            " u.company_id, c.name AS company_name"
+            " u.company_id, c.name AS company_name,"
+            " u.email_verified_at, u.notify_login_email"
             " FROM users u LEFT JOIN companies c ON c.id = u.company_id"
             " WHERE u.id = :uid"
         ),
@@ -535,6 +716,8 @@ async def _build_me_response(db: object, user_id_str: str, user: object) -> MeRe
         location=g(12),  # type: ignore[arg-type]
         company_id=str(g(13)) if g(13) else None,
         company_name=g(14),  # type: ignore[arg-type]
+        email_verified=bool(g(15)),
+        notify_login_email=bool(g(16)),
     )
 
 
@@ -599,6 +782,10 @@ async def update_profile(
             detail="Avatar image is too large — please use a smaller picture.",
         )
 
+    # notify_login_email is a bool, handled outside the text-field whitelist loop.
+    if body.notify_login_email is not None:
+        updates["notify_login_email"] = body.notify_login_email
+
     if updates:
         set_clause = ", ".join(f"{col} = :{col}" for col in updates)
         params: dict[str, object | None] = {**updates, "uid": uuid.UUID(current_user.user_id)}
@@ -655,4 +842,191 @@ async def change_password(
     )
     await db.commit()
     log.info("auth.password_changed", user_id=current_user.user_id)
+    return OkResponse()
+
+
+# ---------------------------------------------------------------------------
+# Email verification (signup confirmation flow)
+# ---------------------------------------------------------------------------
+class VerifyEmailBody(BaseModel):
+    token: str = Field(min_length=10, max_length=200)
+
+
+@router.post(
+    "/verify-email",
+    status_code=status.HTTP_200_OK,
+    response_model=OkResponse,
+    summary="Confirm an email address from the signup link",
+)
+async def verify_email(body: VerifyEmailBody, db: DbSessionDep) -> OkResponse:
+    """Mark the account's email as verified given a valid single-use token.
+
+    Idempotent-ish: a consumed/expired token returns 400. The endpoint is public
+    (the user clicks the link from their inbox, possibly before logging in)."""
+    tok = await db.scalar(
+        select(AuthToken).where(
+            AuthToken.token_hash == hash_token(body.token, "email_verify"),
+            AuthToken.kind == "email_verify",
+        )
+    )
+    now = datetime.now(tz=UTC)
+    if tok is None or tok.consumed_at is not None or tok.expires_at <= now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This verification link is invalid or has expired.",
+        )
+    tok.consumed_at = now
+    await db.execute(
+        text(
+            "UPDATE users SET email_verified_at = COALESCE(email_verified_at, :now), "
+            "updated_at = :now WHERE id = :uid"
+        ),
+        {"now": now, "uid": tok.user_id},
+    )
+    await db.commit()
+    log.info("auth.email_verified", user_id=str(tok.user_id))
+    return OkResponse()
+
+
+@router.post(
+    "/resend-verification",
+    status_code=status.HTTP_200_OK,
+    response_model=OkResponse,
+    summary="Resend the email-verification link to the current user",
+    dependencies=[rate_limit("auth", settings.rate_limit_login_per_minute)],
+)
+async def resend_verification(
+    current_user: CurrentUserDep, db: DbSessionDep
+) -> OkResponse:
+    """Re-issue a verification email. No-op (still 200) if already verified."""
+    uid = uuid.UUID(current_user.user_id)
+    row = (
+        await db.execute(
+            text(
+                "SELECT email, full_name, preferred_language, email_verified_at "
+                "FROM users WHERE id = :uid AND deleted_at IS NULL"
+            ),
+            {"uid": uid},
+        )
+    ).fetchone()
+    if row is None or row[3] is not None:  # unknown or already verified
+        return OkResponse()
+    raw = await _mint_auth_token(db, uid, "email_verify")
+    await enqueue_email(
+        db,
+        to=row[0],
+        template="email_verify",
+        lang=row[2] or "en",
+        ctx={"name": row[1], "verify_url": _verify_email_url(raw)},
+        to_user_id=uid,
+        related_kind="email_verify",
+    )
+    await db.commit()
+    log.info("auth.verification_resent", user_id=current_user.user_id)
+    return OkResponse()
+
+
+# ---------------------------------------------------------------------------
+# Forgot / reset password
+# ---------------------------------------------------------------------------
+class ForgotPasswordBody(BaseModel):
+    email: EmailStr
+
+
+@router.post(
+    "/forgot-password",
+    status_code=status.HTTP_200_OK,
+    response_model=OkResponse,
+    summary="Request a password-reset link",
+    dependencies=[rate_limit("forgot_password", settings.rate_limit_login_per_minute)],
+)
+async def forgot_password(body: ForgotPasswordBody, db: DbSessionDep) -> OkResponse:
+    """Email a password-reset link IF a matching local account exists.
+
+    Always returns 200 with the same body regardless of whether the email exists —
+    this prevents account-enumeration. Only local-password accounts (password_hash
+    set) get a link; SSO-only accounts have no password to reset.
+    """
+    row = (
+        await db.execute(
+            text(
+                "SELECT id, full_name, preferred_language, password_hash "
+                "FROM users WHERE lower(email) = lower(:e) "
+                "AND deleted_at IS NULL AND is_active = true"
+            ),
+            {"e": str(body.email)},
+        )
+    ).fetchone()
+    if row is not None and row[3]:  # account exists AND has a local password
+        uid = row[0]
+        raw = await _mint_auth_token(db, uid, "password_reset")
+        await enqueue_email(
+            db,
+            to=str(body.email),
+            template="password_reset",
+            lang=row[2] or "en",
+            ctx={
+                "name": row[1],
+                "reset_url": _reset_password_url(raw),
+                "ttl_hours": settings.password_reset_ttl_hours,
+            },
+            to_user_id=uid,
+            related_kind="password_reset",
+        )
+        await db.commit()
+        log.info("auth.password_reset_requested", user_id=str(uid))
+    return OkResponse()
+
+
+class ResetPasswordBody(BaseModel):
+    token: str = Field(min_length=10, max_length=200)
+    new_password: str = Field(min_length=8, description="New password (min 8 chars)")
+
+
+@router.post(
+    "/reset-password",
+    status_code=status.HTTP_200_OK,
+    response_model=OkResponse,
+    summary="Set a new password from a reset link",
+    dependencies=[rate_limit("reset_password", settings.rate_limit_login_per_minute)],
+)
+async def reset_password(body: ResetPasswordBody, db: DbSessionDep) -> OkResponse:
+    """Consume a valid reset token and set the new password.
+
+    Clears must_change_password and (since holding the link proves email control)
+    marks the email verified if it wasn't already.
+
+    NOTE (deferred, prod-gate): existing refresh-token sessions are NOT revoked
+    here — the auth provider has no "log out all devices" primitive yet (tracked in
+    the refresh() SECURITY TODO). Access tokens expire on their own short TTL.
+    """
+    tok = await db.scalar(
+        select(AuthToken).where(
+            AuthToken.token_hash == hash_token(body.token, "password_reset"),
+            AuthToken.kind == "password_reset",
+        )
+    )
+    now = datetime.now(tz=UTC)
+    if tok is None or tok.consumed_at is not None or tok.expires_at <= now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This reset link is invalid or has expired. Please request a new one.",
+        )
+    rounds: int = settings.password_hash_rounds
+    new_hash = await asyncio.to_thread(
+        lambda: bcrypt.hashpw(
+            body.new_password.encode(), bcrypt.gensalt(rounds=rounds)
+        ).decode()
+    )
+    tok.consumed_at = now
+    await db.execute(
+        text(
+            "UPDATE users SET password_hash = :pw, must_change_password = false, "
+            "email_verified_at = COALESCE(email_verified_at, :now), updated_at = :now "
+            "WHERE id = :uid"
+        ),
+        {"pw": new_hash, "now": now, "uid": tok.user_id},
+    )
+    await db.commit()
+    log.info("auth.password_reset", user_id=str(tok.user_id))
     return OkResponse()

@@ -19,7 +19,7 @@ import { toast } from '@/lib/toast';
 import type { AuthUser } from '@/types/auth';
 import AuthLayout from '@/components/layout/AuthLayout';
 import { Field, Pill } from '@/design/components/primitives';
-import { User, Mail, Lock } from '@/design/components/icons';
+import { User, Mail, Lock, CheckCircle2 } from '@/design/components/icons';
 
 // ── Zod schema ────────────────────────────────────────────────────────────────
 const registerSchema = z.object({
@@ -77,6 +77,9 @@ export default function Register() {
   // The register API does not yet accept a consent param; this checkbox is
   // visual until the backend captures consent (see gap report §Design-only).
   const [agreedToDpdp, setAgreedToDpdp] = useState(false);
+  // When the backend requires email confirmation, registration creates the
+  // account but does NOT log in — we show a "check your inbox" panel instead.
+  const [verifyEmailSent, setVerifyEmailSent] = useState<string | null>(null);
 
   const form = useForm<RegisterFormValues>({
     resolver: zodResolver(registerSchema),
@@ -89,14 +92,21 @@ export default function Register() {
     formState: { errors },
   } = form;
 
-  // ── Mutation: registerUser → getMe → setAuth → /dashboard ────────────────────
+  // ── Mutation: registerUser → (auto-login → /dashboard) | (verify-email panel) ─
   const mutation = useMutation({
     mutationFn: async (values: RegisterFormValues) => {
       const regRes = await registerUser(values);
-      const me = await getMe(regRes.access_token);
-      return { regRes, me };
+      // No token when verification is required — skip the getMe call.
+      const me =
+        regRes.verification_required || !regRes.access_token ? null : await getMe();
+      return { regRes, me, email: values.email };
     },
-    onSuccess: ({ regRes, me }) => {
+    onSuccess: ({ regRes, me, email }) => {
+      if (regRes.verification_required || !me || !regRes.access_token) {
+        // Account created, not signed in — prompt the user to confirm their email.
+        setVerifyEmailSent(email);
+        return;
+      }
       const user: AuthUser = {
         user_id: me.user_id,
         full_name: me.full_name,
@@ -114,6 +124,33 @@ export default function Register() {
 
   function onSubmit(values: RegisterFormValues) {
     mutation.mutate(values);
+  }
+
+  // Email-confirmation gate: account created but sign-in withheld until verified.
+  if (verifyEmailSent) {
+    return (
+      <AuthLayout>
+        <div className="flex flex-col items-center text-center">
+          <span className="inline-flex h-12 w-12 items-center justify-center rounded-[14px] bg-[rgba(39,201,63,0.14)] text-[#27c93f]">
+            <CheckCircle2 className="h-6 w-6" aria-hidden="true" />
+          </span>
+          <h1 className="mt-5 text-[22px] font-semibold tracking-[-0.6px] text-white">
+            Confirm your email
+          </h1>
+          <p className="mt-2 max-w-sm text-[14px] text-[#888b91]">
+            Your account is ready. We sent a confirmation link to{' '}
+            <span className="text-white">{verifyEmailSent}</span>. Click it to verify your
+            email, then sign in.
+          </p>
+          <Link
+            to="/login"
+            className="mt-6 inline-flex items-center justify-center rounded-pill bg-white px-5 py-2.5 text-[14px] font-semibold text-black hover:bg-[#eaeaea]"
+          >
+            Go to sign in
+          </Link>
+        </div>
+      </AuthLayout>
+    );
   }
 
   return (

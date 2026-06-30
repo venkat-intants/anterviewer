@@ -74,6 +74,15 @@ class User(Base):
     official_email: Mapped[str | None] = mapped_column(Text, nullable=True)
     location: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Email system — verification + opt-in login alerts (migration 20260629_0002).
+    # email_verified_at NULL = unverified (non-blocking: login still works).
+    # notify_login_email — per-user opt-in for the "new sign-in" email alert.
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    notify_login_email: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
     # HR workflow (Phase 0) — multi-tenant scoping + forced first-login reset.
     # company_id is NULL for platform_owner / platform users; it is SET for a
     # company super_admin and its hr_managers (they are company-scoped).
@@ -992,4 +1001,109 @@ class Notification(Base):
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
     link: Mapped[str | None] = mapped_column(Text, nullable=True)
     read_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+
+
+# ---------------------------------------------------------------------------
+# Email system (migration 20260629_0002)
+# ---------------------------------------------------------------------------
+
+
+class EmailEvent(Base):
+    """Durable transactional-email outbox + delivery log (one row per email).
+
+    Every send goes through this table: enqueue writes a 'queued' row; the
+    background worker (app.mailer) claims it, hands it to the SMTP relay, and
+    records the outcome. This unifies three concerns the spec requires:
+
+      * reliable delivery — failed sends retry with exponential backoff up to
+        ``max_attempts`` (a flaky relay never silently drops an invite / reset link);
+      * logging — status ∈ queued | sending | sent | failed | cancelled is the
+        audit trail of every email event (sent / failed / pending);
+      * non-blocking — requests only INSERT a row; the actual SMTP I/O happens off
+        the request path in the worker.
+
+    SECURITY/DPDP: ``body_html`` / ``body_text`` may contain a live magic link, so
+    they are NULLED the instant the row is marked 'sent', and the whole row is
+    purged after ``email_retention_days`` by the daily retention cron. The hashed
+    side of every magic link lives in its own table — this row never persists a
+    reusable secret beyond delivery.
+
+    dedupe_key (optional, unique when present) lets a producer make a send
+    idempotent (e.g. one welcome email per registration even on a retry).
+    """
+
+    __tablename__ = "email_events"
+    __table_args__ = (
+        UniqueConstraint("dedupe_key", name="uq_email_events_dedupe_key"),
+        CheckConstraint(
+            "status IN ('queued','sending','sent','failed','cancelled')",
+            name="ck_email_events_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # template key, e.g. 'welcome' | 'password_reset' | 'exam_link' | ...
+    template: Mapped[str] = mapped_column(Text, nullable=False)
+    to_email: Mapped[str] = mapped_column(Text, nullable=False)
+    # The recipient user (NULL for applicants/guests who are not platform users).
+    to_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    # Tenant scoping for the platform-owner email-log view (NULL = platform email).
+    company_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("companies.id", ondelete="SET NULL"), nullable=True
+    )
+    lang: Mapped[str] = mapped_column(Text, default="en", nullable=False)
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    # Rendered bodies — NULLED on successful send (may carry a live magic link).
+    body_html: Mapped[str | None] = mapped_column(Text, nullable=True)
+    body_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, default="queued", nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=6, nullable=False)
+    # When the worker may next attempt this row (backoff). NULL = ASAP.
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Loose provenance link to the originating entity (no FK — cross-kind).
+    related_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
+    related_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    dedupe_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    sent_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class AuthToken(Base):
+    """Single-use, hashed auth token for password reset + email verification.
+
+    Same discipline as exam/interview magic links: the RAW token lives only in the
+    emailed URL; we persist HMAC-SHA256(raw, purpose-secret). A DB read can never
+    recover a working token. kind selects the purpose + which secret/TTL applies.
+
+    kind: 'password_reset' | 'email_verify'.
+    consumed_at: set on first successful use (single-use). A consumed or expired
+    token is rejected by the verify path.
+    """
+
+    __tablename__ = "auth_tokens"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_auth_tokens_token_hash"),
+        CheckConstraint(
+            "kind IN ('password_reset','email_verify')", name="ck_auth_tokens_kind"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))

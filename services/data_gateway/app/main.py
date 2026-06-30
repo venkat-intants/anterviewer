@@ -36,6 +36,7 @@ from app.config import settings
 from app.database import dispose_engine, get_db_session, get_session_factory, init_engine
 from app.dependencies import set_auth_provider
 from app.health import router as health_router
+from app.mailer import purge_old_email_events, start_email_worker, stop_email_worker
 from app.redis_client import close_redis, get_redis, init_redis
 from app.retention import purge_expired_sessions
 from app.routers.admin_hr import router as admin_hr_router
@@ -107,6 +108,15 @@ async def _run_retention_job() -> None:
             exc_type=type(exc).__name__,
             exc_msg=str(exc),
         )
+    # Same cron tick: purge old delivered/failed email_events + expired auth tokens.
+    try:
+        async with factory() as session:
+            deleted = await purge_old_email_events(db=session)
+        log.info("email.retention.purged", rows=deleted)
+    except Exception as exc:  # broad — never let email cleanup kill the scheduler
+        log.error(
+            "email.retention.error", exc_type=type(exc).__name__, exc_msg=str(exc)
+        )
 
 
 @asynccontextmanager
@@ -132,6 +142,9 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
     )
     scheduler.start()
     application.state.retention_scheduler = scheduler
+
+    # --- transactional email outbox worker ---
+    start_email_worker()
 
     # Determine next-run time for the startup log (may be None if no jobs yet).
     next_run_job = scheduler.get_job("retention_purge")
@@ -160,6 +173,7 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
 
     # --- shutdown ---
     scheduler.shutdown(wait=False)
+    await stop_email_worker()
     await dispose_engine()
     await close_redis()
     log.info("service.stop", service=settings.service_name)

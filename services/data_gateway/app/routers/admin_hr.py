@@ -25,7 +25,7 @@ import asyncio
 import json
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import bcrypt
@@ -37,9 +37,11 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth_tokens import hash_token, mint_token, ttl_hours_for
 from app.config import settings
 from app.database import get_db_session
 from app.dependencies import require_role
+from app.mailer import enqueue_email
 
 log = structlog.get_logger(__name__)
 
@@ -210,7 +212,71 @@ async def _create_company_user(
             status_code=status.HTTP_409_CONFLICT,
             detail="An account with this email already exists.",
         ) from exc
+
+    # Best-effort: email the new user a secure "set your password" link (its own
+    # transaction so a mail hiccup never fails account creation). We email a
+    # password-set link rather than the bootstrap password — the user sets their
+    # own password (which also verifies their email).
+    await _send_credentials_email(
+        db, user_id=user_id, email=str(body.email), full_name=body.full_name,
+        role=role, company_id=company_id,
+    )
     return user_id, now
+
+
+# Human-readable role labels for the account-created email.
+_ROLE_LABELS = {"super_admin": "company admin", "hr_manager": "HR manager"}
+
+
+async def _send_credentials_email(
+    db: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    email: str,
+    full_name: str,
+    role: str,
+    company_id: uuid.UUID,
+) -> None:
+    """Mint a password-set link + enqueue the credentials email (best-effort)."""
+    try:
+        now = datetime.now(tz=UTC)
+        raw = mint_token()
+        await db.execute(
+            text(
+                "INSERT INTO auth_tokens (id, user_id, kind, token_hash, expires_at, created_at) "
+                "VALUES (:id, :uid, 'password_reset', :th, :exp, :now)"
+            ),
+            {
+                "id": uuid.uuid4(),
+                "uid": user_id,
+                "th": hash_token(raw, "password_reset"),
+                "exp": now + timedelta(hours=ttl_hours_for("password_reset")),
+                "now": now,
+            },
+        )
+        company_name = await db.scalar(
+            text("SELECT name FROM companies WHERE id = :cid"), {"cid": company_id}
+        )
+        await enqueue_email(
+            db,
+            to=email,
+            template="hr_credentials",
+            lang="en",
+            ctx={
+                "name": full_name,
+                "role_label": _ROLE_LABELS.get(role, "team member"),
+                "company": company_name,
+                "set_url": f"{settings.app_base_url.rstrip('/')}/reset-password#{raw}",
+                "login_url": settings.app_base_url,
+            },
+            to_user_id=user_id,
+            company_id=company_id,
+            related_kind="account_created",
+        )
+        await db.commit()
+    except Exception:  # noqa: BLE001 — credential email must never fail account creation
+        await db.rollback()
+        log.warning("admin_hr.credentials_email_failed", user_id=str(user_id))
 
 
 async def _soft_delete_user(db: AsyncSession, user_id: uuid.UUID) -> None:
@@ -765,4 +831,89 @@ async def toggle_feature_flag(
     return FeatureFlagOut(
         key=row[0], label=row[1], description=row[2], enabled=row[3],
         updated_at=row[4].isoformat() if row[4] else None,
+    )
+
+
+# ===========================================================================
+# PLATFORM OWNER — email delivery log (observability)
+# ===========================================================================
+
+
+class EmailEventOut(BaseModel):
+    id: str
+    template: str
+    to_email: str  # masked (DPDP) — local part redacted
+    status: str  # queued | sending | sent | failed | cancelled
+    attempts: int
+    subject: str
+    last_error: str | None
+    created_at: str
+    sent_at: str | None
+
+
+class EmailEventSummary(BaseModel):
+    queued: int
+    sent: int
+    failed: int
+
+
+def _mask_email(addr: str) -> str:
+    """Redact the local part for the admin log: 'a***@example.com'."""
+    if not addr or "@" not in addr:
+        return "***"
+    local, _, domain = addr.partition("@")
+    head = local[0] if local else ""
+    return f"{head}***@{domain}"
+
+
+@router.get("/email-events", response_model=list[EmailEventOut])
+async def list_email_events(
+    current_user: PlatformOwnerDep,
+    db: DbSessionDep,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    status_filter: Annotated[str | None, Query(alias="status")] = None,
+) -> list[EmailEventOut]:
+    """Recent transactional-email delivery log (platform_owner only).
+
+    Backs an ops view of every email's lifecycle (sent / failed / pending). The
+    recipient address is masked — the log is for delivery health, not PII export.
+    """
+    sql = (
+        "SELECT id, template, to_email, status, attempts, subject, last_error, "
+        "created_at, sent_at FROM email_events "
+    )
+    params: dict[str, object] = {"lim": limit}
+    if status_filter:
+        sql += "WHERE status = :st "
+        params["st"] = status_filter
+    sql += "ORDER BY created_at DESC LIMIT :lim"
+    rows = (await db.execute(text(sql), params)).fetchall()
+    return [
+        EmailEventOut(
+            id=str(r[0]), template=r[1], to_email=_mask_email(r[2]), status=r[3],
+            attempts=int(r[4]), subject=r[5], last_error=r[6],
+            created_at=r[7].isoformat(), sent_at=r[8].isoformat() if r[8] else None,
+        )
+        for r in rows
+    ]
+
+
+@router.get("/email-events/summary", response_model=EmailEventSummary)
+async def email_events_summary(
+    current_user: PlatformOwnerDep, db: DbSessionDep
+) -> EmailEventSummary:
+    """Counts by lifecycle bucket for the platform dashboard."""
+    row = (
+        await db.execute(
+            text(
+                "SELECT "
+                " count(*) FILTER (WHERE status IN ('queued','sending')) AS queued, "
+                " count(*) FILTER (WHERE status = 'sent') AS sent, "
+                " count(*) FILTER (WHERE status = 'failed') AS failed "
+                "FROM email_events"
+            )
+        )
+    ).fetchone()
+    return EmailEventSummary(
+        queued=int(row[0]), sent=int(row[1]), failed=int(row[2])
     )

@@ -1,14 +1,18 @@
-"""Transactional email sender (best-effort, SMTP).
+"""Low-level SMTP transport.
 
-Sends candidate-facing emails (exam links, interview invites + schedules) via the
-SMTP relay configured in settings (`smtp_*` / `email_from`). In the demo tier this
-is Resend used as an SMTP relay (see .env.example); in local dev it points at a
-catch-all like MailHog (localhost:1025).
+Hands a single message to the configured SMTP relay (`smtp_*` / `email_from`). In
+the demo tier this is Resend as an SMTP relay (see .env.example); local dev points
+at a catch-all like Mailpit (localhost:1025); production is AWS SES Mumbai.
 
-Uses the stdlib ``smtplib`` run in a worker thread (``asyncio.to_thread``) so we
-add no new dependency and never block the event loop. Sending is BEST-EFFORT: any
-failure is logged and swallowed (returns False) so a flaky mail relay can never
-fail an HR action or a candidate's exam submission.
+Uses stdlib ``smtplib`` run in a worker thread (``asyncio.to_thread``) so we add no
+new dependency and never block the event loop.
+
+Two entry points:
+  * ``deliver_smtp`` — RAISES on failure. This is what the outbox worker
+    (app.mailer) calls so it can record the error and schedule a retry.
+  * ``send_email`` — legacy BEST-EFFORT wrapper (returns bool, never raises).
+    New code should enqueue via ``app.mailer.enqueue_email`` instead, which gives
+    durable retry + a delivery log. Kept for back-compat.
 """
 
 from __future__ import annotations
@@ -41,28 +45,43 @@ def _send_sync(msg: EmailMessage) -> None:
         smtp.send_message(msg)
 
 
-async def send_email(
-    *, to: str, subject: str, html: str, text: str | None = None
-) -> bool:
-    """Send one email. Returns True on success, False (logged) on any failure.
-
-    Never raises — callers treat email as best-effort and must not fail their
-    request if delivery fails.
-    """
-    if not to or "@" not in to:
-        log.warning("email.skip_invalid_recipient", to=to)
-        return False
-
+def _build_message(to: str, subject: str, html: str, text: str | None) -> EmailMessage:
     msg = EmailMessage()
     msg["From"] = formataddr((settings.email_from_name, settings.email_from))
     msg["To"] = to
     msg["Subject"] = subject
+    if settings.email_reply_to:
+        msg["Reply-To"] = settings.email_reply_to
     # Plain-text fallback first, then the HTML alternative.
     msg.set_content(text or _strip_html(html))
     msg.add_alternative(html, subtype="html")
+    return msg
 
+
+async def deliver_smtp(
+    *, to: str, subject: str, html: str, text: str | None = None
+) -> None:
+    """Send one email, RAISING on any failure (recipient/transport).
+
+    The outbox worker relies on the raised exception to mark the row failed and
+    schedule a retry. ``ValueError`` for an obviously invalid recipient (never
+    retriable); ``smtplib``/OS errors propagate as-is (retriable).
+    """
+    if not to or "@" not in to:
+        raise ValueError(f"invalid recipient: {to!r}")
+    msg = _build_message(to, subject, html, text)
+    await asyncio.to_thread(_send_sync, msg)
+
+
+async def send_email(
+    *, to: str, subject: str, html: str, text: str | None = None
+) -> bool:
+    """Best-effort send (returns True/False, never raises). Legacy shim.
+
+    Prefer ``app.mailer.enqueue_email`` for durable retry + a delivery log.
+    """
     try:
-        await asyncio.to_thread(_send_sync, msg)
+        await deliver_smtp(to=to, subject=subject, html=html, text=text)
         log.info("email.sent", to=to, subject=subject)
         return True
     except Exception as exc:  # noqa: BLE001 - smtplib raises many types; best-effort

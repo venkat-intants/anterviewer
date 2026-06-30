@@ -43,8 +43,10 @@ export async function register(request: RegisterRequest): Promise<RegisterRespon
     return mockAuthResponse;
   }
   const res = await apiPost<RegisterResponse>('/auth/register', request, { skipAuth: true });
-  // Same as login: populate the store before any follow-up authenticated call.
-  setToken(res.access_token);
+  // Populate the store before any follow-up authenticated call — but ONLY when the
+  // server signed us in. When email verification is required there's no token (the
+  // user must confirm their email first), so we leave the store empty.
+  if (res.access_token) setToken(res.access_token);
   return res;
 }
 
@@ -85,4 +87,51 @@ export async function changePassword(newPassword: string): Promise<{ ok: boolean
     return { ok: true };
   }
   return apiPost<{ ok: boolean }>('/auth/change-password', { new_password: newPassword });
+}
+
+/**
+ * Request a password-reset link. Always resolves ok — the backend returns the
+ * same response whether or not the email exists (anti-enumeration).
+ */
+export async function forgotPassword(email: string): Promise<{ ok: boolean }> {
+  if (USE_MOCK) {
+    await simulateDelay(400);
+    return { ok: true };
+  }
+  // skipAuth: public endpoint, no Bearer token.
+  return apiPost<{ ok: boolean }>('/auth/forgot-password', { email }, { skipAuth: true });
+}
+
+/** Set a new password from a reset-link token (public). */
+export async function resetPassword(
+  token: string,
+  newPassword: string,
+): Promise<{ ok: boolean }> {
+  if (USE_MOCK) {
+    await simulateDelay(400);
+    return { ok: true };
+  }
+  return apiPost<{ ok: boolean }>(
+    '/auth/reset-password',
+    { token, new_password: newPassword },
+    { skipAuth: true },
+  );
+}
+
+/** Confirm an email address from the signup link token (public). */
+export async function verifyEmail(token: string): Promise<{ ok: boolean }> {
+  if (USE_MOCK) {
+    await simulateDelay(400);
+    return { ok: true };
+  }
+  return apiPost<{ ok: boolean }>('/auth/verify-email', { token }, { skipAuth: true });
+}
+
+/** Re-send the email-verification link to the signed-in user. */
+export async function resendVerification(): Promise<{ ok: boolean }> {
+  if (USE_MOCK) {
+    await simulateDelay(300);
+    return { ok: true };
+  }
+  return apiPost<{ ok: boolean }>('/auth/resend-verification', {});
 }

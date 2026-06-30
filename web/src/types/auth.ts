@@ -9,8 +9,11 @@ export interface LoginResponse {
 }
 
 export interface RegisterResponse {
-  access_token: string;
-  expires_in: number;
+  /** True when the account was created but NOT signed in — email must be confirmed first. */
+  verification_required?: boolean;
+  /** Present only when auto-logged-in (verification not required). */
+  access_token?: string | null;
+  expires_in?: number | null;
   user_id: string;
   roles: string[];
 }
@@ -23,6 +26,10 @@ export interface MeResponse {
   has_resume: boolean;
   /** HR workflow — true when the account still has its bootstrap password. */
   must_change_password?: boolean;
+  /** Email system — whether the address has been confirmed. */
+  email_verified?: boolean;
+  /** Email system — opt-in for the "new sign-in" alert email. */
+  notify_login_email?: boolean;
   // Editable self-service profile (candidate / HR / admin).
   linkedin_url?: string | null;
   github_url?: string | null;

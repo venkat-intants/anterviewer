@@ -33,6 +33,7 @@ from app.routers.hr_applicants import (
     HrCtxDep,
     _get_owned,
     _to_out,
+    email_applicant_decision,
 )
 
 log = structlog.get_logger(__name__)
@@ -360,6 +361,12 @@ async def decide_applicant(
             event_ts=now,
         )
     )
+    # Email the candidate their hire/reject decision (staged on this transaction →
+    # atomic with the decision + audit row, then delivered by the outbox worker).
+    if body.decision != prev:
+        await email_applicant_decision(
+            db, applicant=a, decision=body.decision, company_id=company_id
+        )
     await db.commit()
     log.info(
         "hr.applicant.decided",

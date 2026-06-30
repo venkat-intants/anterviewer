@@ -35,6 +35,7 @@ from app.config import settings
 from app.exam_ai_client import ExamGenerationError, generate_exam_questions_remote
 from app.exam_grading import GradeInput, GradeQuestion, grade_breakdown
 from app.exam_link import hash_exam_token, mint_exam_token
+from app.mailer import enqueue_email
 from app.models import (
     Applicant,
     CodingQuestion,
@@ -974,7 +975,7 @@ async def assign_exam(
     exam_id: uuid.UUID, body: AssignIn, ctx: HrCtxDep, db: DbSessionDep
 ) -> list[AssignOut]:
     hr_uid, company_id = ctx
-    await _get_owned_exam(db, company_id, exam_id)
+    exam = await _get_owned_exam(db, company_id, exam_id)
 
     # Resolve the target round (specified or the exam's first round). The token
     # grants exactly ONE round, and the ROUND is the unit that gets published +
@@ -1050,12 +1051,35 @@ async def assign_exam(
         )
         db.add(asn)
         await db.flush()
+        magic_link = f"{base}/exam#{raw_token}"  # raw token returned ONCE
+        # Email the candidate their exam link (staged on this transaction →
+        # atomic with the assignment, then delivered by the outbox worker). HR
+        # still gets the link in the response to share manually if needed.
+        await enqueue_email(
+            db,
+            to=applicant.email,
+            template="exam_link",
+            lang="en",
+            ctx={
+                "name": applicant.full_name,
+                "exam_title": exam.title,
+                "exam_url": magic_link,
+                "when": (
+                    body.scheduled_at.strftime("%d %b %Y, %H:%M UTC")
+                    if body.scheduled_at else None
+                ),
+                "expires": expires_at.strftime("%d %b %Y, %H:%M UTC"),
+            },
+            company_id=company_id,
+            related_kind="exam_assignment",
+            related_id=asn.id,
+        )
         out.append(
             AssignOut(
                 assignment_id=str(asn.id),
                 applicant_id=str(applicant_id),
                 applicant_name=applicant.full_name,
-                magic_link=f"{base}/exam#{raw_token}",  # raw token returned ONCE
+                magic_link=magic_link,
                 expires_at=expires_at.isoformat(),
                 status=asn.status,
                 round_id=str(rnd.id),

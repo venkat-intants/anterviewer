@@ -29,6 +29,8 @@ import {
   Video,
   Bell,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Search,
   Plus,
   User,
@@ -51,6 +53,9 @@ import ThemeToggle from '@/components/ThemeToggle';
 // The interview-language localStorage key (separate concern from UI language)
 const INTERVIEW_LANGUAGE_KEY = 'intants:interview-language';
 const SIDEBAR_W = 256;
+const SIDEBAR_COLLAPSED_W = 72;
+// Persisted collapse preference (desktop only; the mobile drawer is unaffected).
+const SIDEBAR_COLLAPSED_KEY = 'intants:sidebar-collapsed';
 
 // ── Role label helper ─────────────────────────────────────────────────────────
 
@@ -142,7 +147,15 @@ const SUPER_NAV: NavItem[] = [
 
 // ── Sidebar nav link (vertical) ───────────────────────────────────────────────
 
-function SideNavLink({ item, onNavigate }: { item: NavItem; onNavigate?: () => void }) {
+function SideNavLink({
+  item,
+  onNavigate,
+  collapsed = false,
+}: {
+  item: NavItem;
+  onNavigate?: () => void;
+  collapsed?: boolean;
+}) {
   const { t } = useTranslation();
   const label = item.labelKey ? t(item.labelKey) : item.label;
   return (
@@ -150,9 +163,13 @@ function SideNavLink({ item, onNavigate }: { item: NavItem; onNavigate?: () => v
       to={item.to}
       end={item.to === '/hr'}
       onClick={onNavigate}
+      // When collapsed the label is hidden, so expose it as a tooltip + a11y name.
+      title={collapsed ? label : undefined}
+      aria-label={collapsed ? label : undefined}
       className={({ isActive }) =>
         cn(
-          'flex items-center gap-3 rounded-[10px] px-3 py-2 text-[13.5px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]',
+          'flex items-center gap-3 rounded-[10px] py-2 text-[13.5px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]',
+          collapsed ? 'justify-center px-0' : 'px-3',
           isActive
             ? 'bg-[rgba(var(--accent-rgb),0.14)] text-white'
             : 'text-[#888b91] hover:bg-white/[0.04] hover:text-white',
@@ -160,12 +177,20 @@ function SideNavLink({ item, onNavigate }: { item: NavItem; onNavigate?: () => v
       }
     >
       {item.icon}
-      <span className="truncate">{label}</span>
+      {!collapsed && <span className="truncate">{label}</span>}
     </NavLink>
   );
 }
 
-function NavSectionLabel({ children }: { children: React.ReactNode }) {
+function NavSectionLabel({
+  children,
+  collapsed = false,
+}: {
+  children: React.ReactNode;
+  collapsed?: boolean;
+}) {
+  // Collapsed: a thin divider keeps the visual grouping without the text label.
+  if (collapsed) return <div className="mx-3 my-2 h-px bg-white/[0.06]" aria-hidden="true" />;
   return (
     <p className="px-3 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-[1.2px] text-[#5a5f66]">
       {children}
@@ -175,7 +200,13 @@ function NavSectionLabel({ children }: { children: React.ReactNode }) {
 
 // ── Sidebar footer user menu (opens upward) ───────────────────────────────────
 
-function SidebarUser({ onNavigate }: { onNavigate?: () => void }) {
+function SidebarUser({
+  onNavigate,
+  collapsed = false,
+}: {
+  onNavigate?: () => void;
+  collapsed?: boolean;
+}) {
   const { t } = useTranslation();
   const { user, clearAuth } = useAuth();
   const navigate = useNavigate();
@@ -202,17 +233,25 @@ function SidebarUser({ onNavigate }: { onNavigate?: () => void }) {
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={t('nav.userMenu')}
-        className="flex w-full items-center gap-2.5 rounded-[12px] px-2 py-2 text-left hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+        aria-label={collapsed ? displayName : t('nav.userMenu')}
+        title={collapsed ? displayName : undefined}
+        className={cn(
+          'flex w-full items-center rounded-[12px] py-2 text-left hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]',
+          collapsed ? 'justify-center px-0' : 'gap-2.5 px-2',
+        )}
       >
         <span className="flex h-9 w-9 flex-none items-center justify-center rounded-full bg-[linear-gradient(135deg,var(--accent),#a887dc)] text-[13px] font-semibold text-white">
           {getInitials(displayName)}
         </span>
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-[13px] font-semibold text-white">{displayName}</span>
-          <span className="block truncate text-[11px] text-[#70757c]">{roleLabel}</span>
-        </span>
-        <ChevronDown size={14} aria-hidden="true" className="flex-none text-[#70757c]" />
+        {!collapsed && (
+          <>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[13px] font-semibold text-white">{displayName}</span>
+              <span className="block truncate text-[11px] text-[#70757c]">{roleLabel}</span>
+            </span>
+            <ChevronDown size={14} aria-hidden="true" className="flex-none text-[#70757c]" />
+          </>
+        )}
       </button>
 
       {open && (
@@ -220,7 +259,10 @@ function SidebarUser({ onNavigate }: { onNavigate?: () => void }) {
           <div className="fixed inset-0 z-30" aria-hidden="true" onClick={() => setOpen(false)} />
           <div
             role="menu"
-            className="absolute bottom-[calc(100%-4px)] left-3 right-3 z-40 overflow-hidden rounded-[12px] border border-white/[0.1] bg-[#0f0f10] p-1 shadow-2xl"
+            className={cn(
+              'absolute bottom-[calc(100%-4px)] z-40 overflow-hidden rounded-[12px] border border-white/[0.1] bg-[#0f0f10] p-1 shadow-2xl',
+              collapsed ? 'left-2 w-56' : 'left-3 right-3',
+            )}
           >
             <Link
               to="/profile"
@@ -265,7 +307,15 @@ function SidebarUser({ onNavigate }: { onNavigate?: () => void }) {
 
 // ── Sidebar content (brand + nav + user) ──────────────────────────────────────
 
-function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+function SidebarContent({
+  onNavigate,
+  collapsed = false,
+  onToggle,
+}: {
+  onNavigate?: () => void;
+  collapsed?: boolean;
+  onToggle?: () => void;
+}) {
   const { user } = useAuth();
   const roles = user?.roles ?? [];
   const roleLabel = getRoleLabel(roles);
@@ -274,76 +324,119 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 
   return (
     <div className="flex h-full flex-col">
-      {/* Brand */}
-      <Link
-        to="/dashboard"
-        onClick={onNavigate}
-        className="flex items-center gap-2.5 px-5 py-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-        aria-label="Anterview"
+      {/* Brand + collapse toggle (desktop) */}
+      <div
+        className={cn(
+          'flex px-3 py-5',
+          collapsed ? 'flex-col items-center gap-3' : 'items-center gap-2.5',
+        )}
       >
-        <span className="flex h-9 w-9 flex-none items-center justify-center rounded-[10px] bg-[linear-gradient(135deg,#112d72,#a887dc)] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.2)]">
-          <span className="h-2.5 w-2.5 rounded-full bg-white" aria-hidden="true" />
-        </span>
-        <span className="flex flex-col leading-tight">
-          <span className="text-[15px] font-semibold tracking-[-0.4px] text-white">Anterview</span>
-          {!candidateOnly && (
-            <span
-              className="text-[10px] font-semibold uppercase tracking-[1.2px]"
-              style={{ color: accent }}
-            >
-              {roleLabel}
+        <Link
+          to="/dashboard"
+          onClick={onNavigate}
+          className="flex items-center gap-2.5 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+          aria-label="Anterview"
+        >
+          <span className="flex h-9 w-9 flex-none items-center justify-center rounded-[10px] bg-[linear-gradient(135deg,#112d72,#a887dc)] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.2)]">
+            <span className="h-2.5 w-2.5 rounded-full bg-white" aria-hidden="true" />
+          </span>
+          {!collapsed && (
+            <span className="flex flex-col leading-tight">
+              <span className="text-[15px] font-semibold tracking-[-0.4px] text-white">Anterview</span>
+              {!candidateOnly && (
+                <span
+                  className="text-[10px] font-semibold uppercase tracking-[1.2px]"
+                  style={{ color: accent }}
+                >
+                  {roleLabel}
+                </span>
+              )}
             </span>
           )}
-        </span>
-      </Link>
+        </Link>
+        {/* Collapse/expand control — desktop only (the mobile drawer omits onToggle). */}
+        {onToggle && (
+          <button
+            type="button"
+            onClick={onToggle}
+            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            className={cn(
+              // Distinctive glass control: rounded square, inner highlight, and an
+              // accent-tinted glow ring on hover (Signal-Blue design language).
+              'group hidden h-8 w-8 flex-none items-center justify-center rounded-[10px]',
+              'border border-white/10 bg-white/[0.05] text-[#b8babf]',
+              'shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] transition-all duration-200',
+              'hover:border-[rgba(var(--accent-rgb),0.55)] hover:bg-[rgba(var(--accent-rgb),0.16)] hover:text-white',
+              'hover:shadow-[0_0_0_3px_rgba(var(--accent-rgb),0.12),0_6px_16px_-4px_rgba(var(--accent-rgb),0.45)]',
+              'active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] lg:inline-flex',
+              !collapsed && 'ml-auto',
+            )}
+          >
+            {collapsed ? (
+              <ChevronRight
+                size={16}
+                aria-hidden="true"
+                className="transition-transform duration-200 group-hover:translate-x-0.5"
+              />
+            ) : (
+              <ChevronLeft
+                size={16}
+                aria-hidden="true"
+                className="transition-transform duration-200 group-hover:-translate-x-0.5"
+              />
+            )}
+          </button>
+        )}
+      </div>
 
       {/* Nav */}
       <nav aria-label="Primary" className="flex-1 space-y-5 overflow-y-auto px-3 py-2">
         <div className="space-y-1">
           {CANDIDATE_NAV.map((item) => (
-            <SideNavLink key={item.to} item={item} onNavigate={onNavigate} />
+            <SideNavLink key={item.to} item={item} onNavigate={onNavigate} collapsed={collapsed} />
           ))}
         </div>
 
         {roles.includes('hr_manager') && (
           <div className="space-y-1">
-            <NavSectionLabel>Hiring</NavSectionLabel>
+            <NavSectionLabel collapsed={collapsed}>Hiring</NavSectionLabel>
             {HR_NAV.map((item) => (
-              <SideNavLink key={item.to} item={item} onNavigate={onNavigate} />
+              <SideNavLink key={item.to} item={item} onNavigate={onNavigate} collapsed={collapsed} />
             ))}
           </div>
         )}
 
         {roles.includes('admin') && (
           <div className="space-y-1">
-            <NavSectionLabel>Admin</NavSectionLabel>
+            <NavSectionLabel collapsed={collapsed}>Admin</NavSectionLabel>
             {ADMIN_NAV.map((item) => (
-              <SideNavLink key={item.to} item={item} onNavigate={onNavigate} />
+              <SideNavLink key={item.to} item={item} onNavigate={onNavigate} collapsed={collapsed} />
             ))}
           </div>
         )}
 
         {roles.includes('platform_owner') && (
           <div className="space-y-1">
-            <NavSectionLabel>Platform</NavSectionLabel>
+            <NavSectionLabel collapsed={collapsed}>Platform</NavSectionLabel>
             {PLATFORM_NAV.map((item) => (
-              <SideNavLink key={item.to} item={item} onNavigate={onNavigate} />
+              <SideNavLink key={item.to} item={item} onNavigate={onNavigate} collapsed={collapsed} />
             ))}
           </div>
         )}
 
         {roles.includes('super_admin') && (
           <div className="space-y-1">
-            <NavSectionLabel>Company</NavSectionLabel>
+            <NavSectionLabel collapsed={collapsed}>Company</NavSectionLabel>
             {SUPER_NAV.map((item) => (
-              <SideNavLink key={item.to} item={item} onNavigate={onNavigate} />
+              <SideNavLink key={item.to} item={item} onNavigate={onNavigate} collapsed={collapsed} />
             ))}
           </div>
         )}
       </nav>
 
-      {/* Candidate "ready to practice" promo (design) */}
-      {candidateOnly && (
+      {/* Candidate "ready to practice" promo (design) — hidden when collapsed */}
+      {candidateOnly && !collapsed && (
         <div className="px-3 pb-2">
           <div className="rounded-[16px] border border-[rgba(var(--accent-rgb),0.25)] bg-[linear-gradient(160deg,#001b33,#030719)] p-4">
             <p className="text-[13px] font-semibold text-white">Ready to practice?</p>
@@ -361,7 +454,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         </div>
       )}
 
-      <SidebarUser onNavigate={onNavigate} />
+      <SidebarUser onNavigate={onNavigate} collapsed={collapsed} />
     </div>
   );
 }
@@ -583,21 +676,38 @@ export default function AppShell({ children }: AppShellProps) {
 
   const location = useLocation();
 
+  // Desktop sidebar collapse — persisted so it sticks across reloads/navigation.
+  const [collapsed, setCollapsed] = useState(
+    () => localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1',
+  );
+  const toggleSidebar = () => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? '1' : '0');
+      return next;
+    });
+  };
+
   return (
     <div className="relative min-h-screen bg-black text-white">
       <AuroraBackground />
 
-      {/* Desktop fixed sidebar */}
+      {/* Desktop fixed sidebar (collapsible to an icon rail) */}
       <aside
-        className="fixed inset-y-0 left-0 z-40 hidden border-r border-white/[0.06] bg-black/40 backdrop-blur-xl lg:block"
-        style={{ width: SIDEBAR_W }}
+        className="fixed inset-y-0 left-0 z-40 hidden border-r border-white/[0.06] bg-black/40 backdrop-blur-xl transition-[width] duration-200 lg:block"
+        style={{ width: collapsed ? SIDEBAR_COLLAPSED_W : SIDEBAR_W }}
         aria-label="Sidebar"
       >
-        <SidebarContent />
+        <SidebarContent collapsed={collapsed} onToggle={toggleSidebar} />
       </aside>
 
       {/* Content column (offset by the sidebar on lg+) */}
-      <div className="relative z-10 lg:pl-[256px]">
+      <div
+        className={cn(
+          'relative z-10 transition-[padding] duration-200',
+          collapsed ? 'lg:pl-[72px]' : 'lg:pl-[256px]',
+        )}
+      >
         <TopBar />
         <main className="w-full px-4 py-8 sm:px-6 lg:px-8">
           <AnimatePresence mode="wait">

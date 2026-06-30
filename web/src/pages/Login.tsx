@@ -208,7 +208,7 @@ export default function Login() {
         {/* Forgot password link */}
         <div className="flex justify-end">
           <Link
-            to="/change-password"
+            to="/forgot-password"
             className="text-[12.5px] text-[#60a5fa] hover:underline focus-visible:outline-none focus-visible:underline underline-offset-4"
           >
             {t('auth.forgotPassword')}

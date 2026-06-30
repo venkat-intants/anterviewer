@@ -12,7 +12,6 @@ Cross-company ids return 404.
 
 from __future__ import annotations
 
-import html as html_lib
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
@@ -24,8 +23,8 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.email_util import send_email
 from app.interview_link import hash_interview_token, mint_interview_token
+from app.mailer import enqueue_email, notify
 from app.models import Applicant, InterviewInvite, Job, Scorecard
 from app.notifications_util import create_notification
 from app.routers.hr_applicants import DbSessionDep, HrCtxDep, _get_owned
@@ -196,40 +195,42 @@ async def _resolve_job(
     )
 
 
-def _interview_email(
-    *, applicant_name: str, job_title: str, magic_link: str | None, scheduled_at: datetime | None
-) -> tuple[str, str]:
-    """Build the candidate interview-invite email (subject, HTML body).
+async def _email_interview_invite(
+    db: AsyncSession,
+    *,
+    applicant: Applicant,
+    job_title: str,
+    magic_link: str | None,
+    scheduled_at: datetime | None,
+    language: str,
+    company_id: uuid.UUID,
+    invite_id: uuid.UUID | None = None,
+    rescheduled: bool = False,
+) -> None:
+    """Stage the branded candidate interview-invite email on ``db`` (caller commits).
 
-    All DB-sourced values (name, job title) are HTML-escaped — a candidate name or
-    job title can contain markup (resume-scraped / HR-entered) and must not inject
-    into the outbound email. ``magic_link=None`` renders a "use your original link"
-    instruction (reschedule path — the link is not re-minted)."""
-    name = html_lib.escape(applicant_name or "there")
-    title = html_lib.escape(job_title or "the role")
-    when = (
-        f"<p>Your interview is scheduled for "
-        f"<strong>{scheduled_at.strftime('%d %b %Y, %H:%M UTC')}</strong>.</p>"
-        if scheduled_at
-        else "<p>You can start the interview any time before the link expires.</p>"
+    Values are escaped inside the template renderer (a candidate name / job title
+    can contain markup). ``magic_link=None`` renders the "use your original link"
+    copy (reschedule path — the link is not re-minted)."""
+    if not applicant.email:
+        return
+    when = scheduled_at.strftime("%d %b %Y, %H:%M UTC") if scheduled_at else None
+    await enqueue_email(
+        db,
+        to=applicant.email,
+        template="interview_invite",
+        lang=language,
+        ctx={
+            "name": applicant.full_name,
+            "job_title": job_title or "the role",
+            "interview_url": magic_link,
+            "when": when,
+            "rescheduled": rescheduled,
+        },
+        company_id=company_id,
+        related_kind="interview_invite",
+        related_id=invite_id,
     )
-    if magic_link:
-        link_attr = html_lib.escape(magic_link, quote=True)
-        link_text = html_lib.escape(magic_link)
-        cta = (
-            f'<p><a href="{link_attr}">Click here to join your interview</a></p>'
-            f"<p>If the link does not work, copy this URL into your browser:<br>{link_text}</p>"
-        )
-    else:
-        cta = "<p>Please use the interview link from your original invitation email.</p>"
-    subject = f"Your AI interview for {job_title or 'the role'}"
-    html = (
-        f"<p>Hi {name},</p>"
-        f"<p>You've been invited to an AI voice interview for <strong>{title}</strong>.</p>"
-        f"{when}{cta}"
-        f"<p>Good luck!<br>— {html_lib.escape(settings.email_from_name)}</p>"
-    )
-    return subject, html
 
 
 async def advance_applicant_to_interview(
@@ -298,12 +299,13 @@ async def advance_applicant_to_interview(
         )
     base = settings.interview_link_base_url.rstrip("/")
     magic_link = f"{base}/interview-invite#{raw_token}"
-    if applicant.email:
-        subject, html = _interview_email(
-            applicant_name=applicant.full_name, job_title=job.title,
-            magic_link=magic_link, scheduled_at=scheduled_at,
-        )
-        await send_email(to=applicant.email, subject=subject, html=html)
+    # Stage on the same transaction the caller commits → the candidate email is
+    # sent iff the invite persists (atomic), then delivered by the outbox worker.
+    await _email_interview_invite(
+        db, applicant=applicant, job_title=job.title, magic_link=magic_link,
+        scheduled_at=scheduled_at, language=language, company_id=company_id,
+        invite_id=invite.id,
+    )
     log.info(
         "hr.interview.auto_advanced",
         invite_id=str(invite.id), company_id=str(company_id), applicant_id=str(applicant.id),
@@ -417,18 +419,18 @@ async def create_invite(body: InviteCreateIn, ctx: HrCtxDep, db: DbSessionDep) -
         body=f"{applicant.full_name} · {job.title}",
         link="/hr/interviews",
     )
-    await db.commit()
 
     base = settings.interview_link_base_url.rstrip("/")
     magic_link = f"{base}/interview-invite#{raw_token}"
-    # Email the candidate the link + schedule (best-effort; HR still gets the link
-    # in the response to copy manually if email delivery is off/unconfigured).
-    if applicant.email:
-        subject, html = _interview_email(
-            applicant_name=applicant.full_name, job_title=job.title,
-            magic_link=magic_link, scheduled_at=invite.scheduled_at,
-        )
-        await send_email(to=applicant.email, subject=subject, html=html)
+    # Stage the candidate email on this same transaction (atomic with the invite);
+    # the outbox worker delivers it. HR still gets the link in the response to copy
+    # manually if needed.
+    await _email_interview_invite(
+        db, applicant=applicant, job_title=job.title, magic_link=magic_link,
+        scheduled_at=invite.scheduled_at, language=body.language, company_id=company_id,
+        invite_id=invite.id,
+    )
+    await db.commit()
     log.info("hr.interview.invited", invite_id=str(invite.id), company_id=str(company_id))
     return InviteResult(
         invite_id=str(invite.id),
@@ -468,18 +470,18 @@ async def reschedule_invite(
         )
     inv.scheduled_at = body.scheduled_at
     inv.updated_at = datetime.now(tz=UTC)
-    await db.commit()
 
     applicant = await db.scalar(select(Applicant).where(Applicant.id == inv.applicant_id))
     job_title = await db.scalar(select(Job.title).where(Job.id == inv.job_id)) or "the role"
-    if applicant is not None and applicant.email:
-        # magic_link is NOT re-minted on reschedule — render the "use your original
-        # link" instruction rather than a bogus href.
-        subject, html = _interview_email(
-            applicant_name=applicant.full_name, job_title=job_title,
-            magic_link=None, scheduled_at=inv.scheduled_at,
+    if applicant is not None:
+        # magic_link is NOT re-minted on reschedule — the template renders the "use
+        # your original link" copy. Staged on this transaction, then worker-delivered.
+        await _email_interview_invite(
+            db, applicant=applicant, job_title=job_title, magic_link=None,
+            scheduled_at=inv.scheduled_at, language=inv.language, company_id=company_id,
+            invite_id=inv.id, rescheduled=True,
         )
-        await send_email(to=applicant.email, subject=f"[Rescheduled] {subject}", html=html)
+    await db.commit()
     log.info("hr.interview.rescheduled", invite_id=str(inv.id), company_id=str(company_id))
     return InviteResult(
         invite_id=str(inv.id),
@@ -527,14 +529,17 @@ async def list_invites(
             inv.status = "completed"
             inv.updated_at = now
             dirty = True
-            # Notify the inviting HR that the interview finished + is scored.
-            await create_notification(
+            # Notify the inviting HR that the interview finished + is scored —
+            # in the app feed AND by email (kept consistent via notify()).
+            await notify(
                 db,
                 user_id=inv.created_by_user_id,
                 kind="interview_completed",
                 title="Interview completed",
                 body=f"{name} finished their interview — scorecard ready",
                 link="/hr/interviews",
+                email=True,
+                company_id=company_id,
             )
         # A non-completed invite past its expiry is effectively dead (redeem
         # already 404s it) — surface it as 'expired' instead of a stale

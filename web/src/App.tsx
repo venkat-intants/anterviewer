@@ -17,6 +17,9 @@ import { useAuth } from './context/AuthContext';
 const Landing = lazy(() => import('./pages/Landing'));
 const Login = lazy(() => import('./pages/Login'));
 const Register = lazy(() => import('./pages/Register'));
+const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
+const ResetPassword = lazy(() => import('./pages/ResetPassword'));
+const VerifyEmail = lazy(() => import('./pages/VerifyEmail'));
 const GoogleCallback = lazy(() => import('./pages/GoogleCallback'));
 const NotFound = lazy(() => import('./pages/NotFound'));
 // Public applicant exam-taking page (magic-link, no login).
@@ -97,6 +100,10 @@ export default function App() {
           <Route path="/" element={<Landing />} />
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
+          {/* Public email-flow pages — token (when used) in the URL #fragment */}
+          <Route path="/forgot-password" element={<ForgotPassword />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
+          <Route path="/verify-email" element={<VerifyEmail />} />
           <Route path="/auth/google/callback" element={<GoogleCallback />} />
           {/* Public applicant exam — magic-link token in the URL #fragment */}
           <Route path="/exam" element={<PublicExam />} />

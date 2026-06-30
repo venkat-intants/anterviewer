@@ -64,6 +64,51 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = False
     email_from: str = "noreply@intants.com"
     email_from_name: str = "Intants AI Interview"
+    # Optional Reply-To shown to recipients (e.g. support@intants.com). Blank = none.
+    email_reply_to: str = ""
+
+    # --- Transactional email outbox / worker (production email system) ---
+    # Every outbound email is persisted to email_events (durable outbox + audit
+    # log of sent/failed). A background worker drains queued/failed-retriable rows
+    # with exponential backoff so a flaky relay never drops an invite or reset link
+    # and never blocks a request. Set EMAIL_OUTBOX_ENABLED=false to disable the
+    # worker (rows still queue; useful in tests / one-off scripts).
+    email_outbox_enabled: bool = True
+    # Worker poll cadence. Small enough that password-reset links feel instant.
+    email_poll_interval_seconds: int = 5
+    # Rows claimed per drain tick (bounds burst send rate against the relay).
+    email_batch_size: int = 20
+    # Give up (status='failed', no further retry) after this many attempts.
+    email_max_attempts: int = 6
+    # Daily purge horizon for delivered/failed rows (the rendered body — which may
+    # carry a live magic link — is nulled on success immediately; this drops the
+    # whole audit row later). DPDP-aligned; runs on the existing retention cron.
+    email_retention_days: int = 30
+    # Global kill-switch for the optional per-user login-notification email. When
+    # false, no login alerts are sent regardless of the per-user preference.
+    email_login_alerts_enabled: bool = True
+    # Public frontend base URL for auth links (verify email, reset password). The
+    # candidate magic-link bases (exam_link_base_url / interview_link_base_url) are
+    # kept separate so they can point at a different host if ever needed.
+    app_base_url: str = "http://localhost:5173"
+
+    # --- Auth email tokens (password reset + email verification) ---
+    # SEPARATE from jwt_secret / exam_link_secret / interview_link_secret. Left
+    # blank by default: when blank, a namespaced secret is DERIVED from jwt_secret
+    # (see app.auth_tokens) so the feature works out-of-the-box without a new
+    # required env var, while still never reusing jwt_secret verbatim. Set these
+    # explicitly in production for independent rotation.
+    password_reset_secret: str = ""
+    password_reset_ttl_hours: int = 1
+    email_verify_secret: str = ""
+    # 7 days — verification window.
+    email_verify_ttl_hours: int = 168
+    # When True, email verification is MANDATORY: self-registered accounts are not
+    # auto-logged-in and cannot sign in until they confirm their email. Existing
+    # accounts and admin-provisioned accounts (still on their bootstrap password)
+    # are exempt so enabling this never locks anyone out. Default False (the smooth,
+    # non-blocking flow).
+    email_verification_required: bool = False
 
     rate_limit_login_per_minute: int = 5
     rate_limit_api_per_minute: int = 60
