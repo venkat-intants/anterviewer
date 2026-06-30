@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config import settings
-from app.piston_client import ExecResult, run_code
+from app.execution import ExecResult, run_code
 
 
 def normalize_output(text: str) -> str:

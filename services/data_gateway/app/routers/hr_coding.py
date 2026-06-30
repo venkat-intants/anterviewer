@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import CodingQuestion, Exam
-from app.piston_client import SUPPORTED_LANGUAGES
+from app.execution import SUPPORTED_LANGUAGES
 from app.routers.hr_applicants import DbSessionDep, HrCtxDep
 from app.routers.hr_exams import _default_section, _get_owned_exam, _require_no_attempts
 

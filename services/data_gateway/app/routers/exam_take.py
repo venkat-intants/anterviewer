@@ -50,7 +50,7 @@ from app.models import (
     ExamRound,
     ExamSection,
 )
-from app.piston_client import run_code
+from app.execution import run_code
 from app.routers.hr_applicants import DbSessionDep
 from app.routers.hr_interviews import advance_applicant_to_interview
 

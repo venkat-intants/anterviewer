@@ -138,10 +138,16 @@ class Settings(BaseSettings):
     # server-side via /exam/integrity-event.
     exam_integrity_max_violations: int = 3
 
-    # --- Coding round — sandboxed code execution (HR workflow Phase 2) ---
-    # Swappable: 'piston' (free public API now; self-host in-region for India
-    # residency + the L1 cost cap later — same env, different PISTON_API_URL).
-    execution_provider: str = "piston"
+    # --- Coding round — code execution (HR workflow Phase 2) ---
+    # Swappable provider:
+    #   'jdoodle' (default) — hosted API, NO VM needed; free tier ~200 runs/day.
+    #   'piston'            — self-hosted sandbox; needs a VM (set PISTON_API_URL).
+    execution_provider: str = "jdoodle"
+    # JDoodle hosted execution (get free credentials at https://www.jdoodle.com/).
+    jdoodle_client_id: str = ""
+    jdoodle_client_secret: str = ""
+    jdoodle_api_url: str = "https://api.jdoodle.com/v1"
+    # Piston (only used when execution_provider='piston').
     piston_api_url: str = "https://emkc.org/api/v2/piston"
     # Per-run wall-clock cap (ms) passed to the runner; also our own client timeout.
     code_run_timeout_ms: int = 5000
