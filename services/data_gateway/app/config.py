@@ -4,6 +4,8 @@ import structlog
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from shared.security import assert_strong_secrets
+
 log = structlog.get_logger(__name__)
 
 
@@ -304,6 +306,22 @@ class Settings(BaseSettings):
                 "Plain-HTTP cookies are not acceptable in production or staging. "
                 "Set AUTH_COOKIE_SECURE=true in your environment configuration."
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_secret_strength(self) -> "Settings":
+        """Fail fast in production/staging if any critical secret is still a weak
+        placeholder — a known JWT_SECRET forges tokens and a known CONSENT_IP_SALT
+        defeats DPDP IP-hashing. No-op in development/test."""
+        assert_strong_secrets(
+            self.app_env,
+            {
+                "JWT_SECRET": self.jwt_secret,
+                "CONSENT_IP_SALT": self.consent_ip_salt,
+                "EXAM_LINK_SECRET": self.exam_link_secret,
+                "INTERVIEW_LINK_SECRET": self.interview_link_secret,
+            },
+        )
         return self
 
     cors_allowed_origins: str = "http://localhost:5173"

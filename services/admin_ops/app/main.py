@@ -10,6 +10,8 @@ import structlog
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from shared.observability.sentry import init_sentry
+
 from app.admin_auth import verify_admin_role
 from app.config import settings
 from app.database import dispose_engine, init_engine
@@ -25,6 +27,11 @@ structlog.configure(
     wrapper_class=structlog.make_filtering_bound_logger(
         getattr(logging, settings.log_level.upper(), logging.INFO)
     ),
+)
+
+# Optional Sentry error tracking — no-op unless SENTRY_DSN is set (DPDP-safe scrub).
+init_sentry(
+    settings.sentry_dsn, environment=settings.app_env, service_name=settings.service_name
 )
 
 log = structlog.get_logger(__name__)

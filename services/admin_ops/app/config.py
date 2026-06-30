@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from shared.security import assert_strong_secrets
 
 
 class Settings(BaseSettings):
@@ -37,6 +40,13 @@ class Settings(BaseSettings):
     interview_core_url: str = "http://localhost:8001"
     data_gateway_url: str = "http://localhost:8002"
     feedback_billing_url: str = "http://localhost:8003"
+
+    @model_validator(mode="after")
+    def validate_secret_strength(self) -> "Settings":
+        """Fail fast in production/staging if JWT_SECRET is a weak placeholder
+        (must match data_gateway's). No-op in development/test."""
+        assert_strong_secrets(self.app_env, {"JWT_SECRET": self.jwt_secret})
+        return self
 
     @property
     def cors_origins_list(self) -> list[str]:

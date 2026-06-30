@@ -1,5 +1,7 @@
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from shared.security import assert_strong_secrets
 
 
 class Settings(BaseSettings):
@@ -175,6 +177,13 @@ class Settings(BaseSettings):
                     f"CORS origin {origin!r} must start with http:// or https://"
                 )
         return v
+
+    @model_validator(mode="after")
+    def validate_secret_strength(self) -> "Settings":
+        """Fail fast in production/staging if JWT_SECRET is a weak placeholder
+        (must match data_gateway's). No-op in development/test."""
+        assert_strong_secrets(self.app_env, {"JWT_SECRET": self.jwt_secret})
+        return self
 
     @property
     def cors_origins_list(self) -> list[str]:
