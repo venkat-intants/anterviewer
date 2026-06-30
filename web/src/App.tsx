@@ -57,6 +57,7 @@ const Applicants = lazy(() => import('./pages/hr/Applicants'));
 const Exams = lazy(() => import('./pages/hr/Exams'));
 const ExamEditor = lazy(() => import('./pages/hr/ExamEditor'));
 const ExamResults = lazy(() => import('./pages/hr/ExamResults'));
+const ExamAttemptDetail = lazy(() => import('./pages/hr/ExamAttemptDetail'));
 const HRInterviews = lazy(() => import('./pages/hr/HRInterviews'));
 const HRPipeline = lazy(() => import('./pages/hr/HRPipeline'));
 const HRAnalyticsPage = lazy(() =>
@@ -166,6 +167,10 @@ export default function App() {
               <Route path="/hr/exams" element={<Exams />} />
               <Route path="/hr/exams/:examId" element={<ExamEditor />} />
               <Route path="/hr/exams/:examId/results" element={<ExamResults />} />
+              <Route
+                path="/hr/exams/:examId/attempts/:attemptId"
+                element={<ExamAttemptDetail />}
+              />
               <Route path="/hr/interviews" element={<HRInterviews />} />
               <Route path="/hr/pipeline" element={<HRPipeline />} />
               <Route path="/hr/analytics" element={<HRAnalyticsPage />} />

@@ -487,3 +487,33 @@ export function revokeAssignment(examId: string, aid: string): Promise<Assignmen
 export function listAttempts(examId: string): Promise<AttemptResult[]> {
   return apiGet<AttemptResult[]>(`/hr/exams/${examId}/attempts`);
 }
+
+/** One graded coding question, from the frozen graded_snapshot (HR-only). */
+export interface CodingResult {
+  points: number;
+  raw?: number;
+  language?: string;
+  submitted?: boolean;
+  error?: string;
+  tests?: unknown[];
+}
+
+/**
+ * HR-only per-question breakdown for a single attempt.
+ * `per_question` maps an MCQ question_id → whether it was answered correctly.
+ * `coding` maps a coding question_id → its graded result.
+ */
+export interface AttemptBreakdown {
+  attempt_id: string;
+  score_percent: number | null;
+  passed: boolean | null;
+  per_question: Record<string, boolean>;
+  coding: Record<string, CodingResult>;
+}
+
+export function getAttemptBreakdown(
+  examId: string,
+  attemptId: string,
+): Promise<AttemptBreakdown> {
+  return apiGet<AttemptBreakdown>(`/hr/exams/${examId}/attempts/${attemptId}/breakdown`);
+}

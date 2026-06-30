@@ -219,7 +219,7 @@ export default function ExamResults() {
             <Stagger className="flex flex-col">
               {list.map((a) => (
                 <StaggerItem key={a.attempt_id}>
-                  <AttemptRow a={a} />
+                  <AttemptRow a={a} examId={examId} />
                 </StaggerItem>
               ))}
             </Stagger>
@@ -231,7 +231,7 @@ export default function ExamResults() {
 }
 
 // ── Attempt row ───────────────────────────────────────────────────────────────
-function AttemptRow({ a }: { a: AttemptResult }) {
+function AttemptRow({ a, examId }: { a: AttemptResult; examId: string }) {
   const inProgress = a.status === 'in_progress' || a.submitted_at === null;
 
   return (
@@ -278,7 +278,7 @@ function AttemptRow({ a }: { a: AttemptResult }) {
 
       {/* Action */}
       <div>
-        <Link to={`/scorecard/${a.attempt_id}`}>
+        <Link to={`/hr/exams/${examId}/attempts/${a.attempt_id}`}>
           <Pill variant="ghost" className="py-1.5 text-[12px]">
             <Eye size={13} aria-hidden="true" /> View
           </Pill>
