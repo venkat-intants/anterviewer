@@ -91,9 +91,17 @@ def _fallback_link(intro: str, url: str) -> str:
     )
 
 
-def _layout(inner_html: str, *, preheader: str = "") -> str:
-    """Wrap a template's inner HTML in the shared branded, responsive shell."""
-    brand = _esc(_brand())
+def _layout(inner_html: str, *, preheader: str = "", brand: str | None = None) -> str:
+    """Wrap a template's inner HTML in the shared branded, responsive shell.
+
+    ``brand`` overrides the wordmark + footer with a tenant company name (e.g.
+    "Google", "CDPR"); when it differs from the platform brand a small
+    "Powered by <platform>" line is added to the footer for honest attribution.
+    None falls back to the platform brand.
+    """
+    platform = _brand()
+    org = (brand or "").strip() or platform
+    brand = _esc(org)
     pre = (
         f'<div style="display:none;max-height:0;overflow:hidden;opacity:0;">'
         f"{_esc(preheader)}</div>"
@@ -101,6 +109,11 @@ def _layout(inner_html: str, *, preheader: str = "") -> str:
         else ""
     )
     year_brand = brand
+    powered_by = (
+        f'<p style="margin:6px 0 0;">Powered by {_esc(platform)}.</p>'
+        if org != platform
+        else ""
+    )
     return (
         "<!DOCTYPE html>"
         '<html lang="en"><head><meta charset="utf-8">'
@@ -130,6 +143,7 @@ def _layout(inner_html: str, *, preheader: str = "") -> str:
         f'Arial,sans-serif;line-height:1.5;">'
         f"<p style=\"margin:0 0 4px;\">This is an automated message from {year_brand}.</p>"
         f'<p style="margin:0;">If you did not expect this email you can safely ignore it.</p>'
+        f"{powered_by}"
         f"</td></tr>"
         f"</table></td></tr></table></body></html>"
     )
@@ -321,15 +335,29 @@ def _t_exam_link(lang: str, ctx: dict) -> tuple[str, str, str, str]:
     exam_url = ctx["exam_url"]
     when = ctx.get("when")  # pre-formatted schedule string or None
     expires = ctx.get("expires")  # pre-formatted expiry string or None
+    # Company name (the HR's tenant) — names the inviting organisation in the
+    # subject + body. Empty for non-tenant sends (falls back to generic copy).
+    org = (ctx.get("brand") or "").strip()
+    orge = _esc(org)
+    ttle = _esc(exam_title)
     loc = _loc(lang, {
         "en": {
-            "subject": f"Your exam: {exam_title}" if exam_title else "Your exam invitation",
-            "pre": "You've been invited to take an exam.",
+            "subject": (
+                (f"{org} · Your assessment: {exam_title}" if exam_title
+                 else f"{org} · Your assessment invitation") if org
+                else (f"Your exam: {exam_title}" if exam_title else "Your exam invitation")
+            ),
+            "pre": (
+                f"{org} has invited you to take an assessment." if org
+                else "You've been invited to take an exam."
+            ),
             "lead": (
-                f"You've been invited to take the assessment "
-                f"<strong>{_esc(exam_title)}</strong>."
-                if exam_title
-                else "You've been invited to take an online assessment."
+                ((f"<strong>{orge}</strong> has invited you to take the assessment "
+                  f"<strong>{ttle}</strong>.") if exam_title
+                 else f"<strong>{orge}</strong> has invited you to take an online assessment.")
+                if org else
+                ((f"You've been invited to take the assessment <strong>{ttle}</strong>.")
+                 if exam_title else "You've been invited to take an online assessment.")
             ),
             "cta": "Start the exam",
             "fallback": "Or paste this link into your browser:",
@@ -338,12 +366,22 @@ def _t_exam_link(lang: str, ctx: dict) -> tuple[str, str, str, str]:
             "outro": "All the best!",
         },
         "hi": {
-            "subject": f"आपकी परीक्षा: {exam_title}" if exam_title else "आपका परीक्षा निमंत्रण",
-            "pre": "आपको एक परीक्षा देने के लिए आमंत्रित किया गया है।",
+            "subject": (
+                (f"{org} · आपकी परीक्षा: {exam_title}" if exam_title
+                 else f"{org} · आपका परीक्षा निमंत्रण") if org
+                else (f"आपकी परीक्षा: {exam_title}" if exam_title else "आपका परीक्षा निमंत्रण")
+            ),
+            "pre": (
+                f"{org} ने आपको एक मूल्यांकन देने के लिए आमंत्रित किया है।" if org
+                else "आपको एक परीक्षा देने के लिए आमंत्रित किया गया है।"
+            ),
             "lead": (
-                f"आपको <strong>{_esc(exam_title)}</strong> मूल्यांकन देने के लिए आमंत्रित किया गया है।"
-                if exam_title
-                else "आपको एक ऑनलाइन मूल्यांकन देने के लिए आमंत्रित किया गया है।"
+                ((f"<strong>{orge}</strong> ने आपको <strong>{ttle}</strong> मूल्यांकन देने के लिए आमंत्रित किया है।")
+                 if exam_title
+                 else f"<strong>{orge}</strong> ने आपको एक ऑनलाइन मूल्यांकन देने के लिए आमंत्रित किया है।")
+                if org else
+                ((f"आपको <strong>{ttle}</strong> मूल्यांकन देने के लिए आमंत्रित किया गया है।")
+                 if exam_title else "आपको एक ऑनलाइन मूल्यांकन देने के लिए आमंत्रित किया गया है।")
             ),
             "cta": "परीक्षा शुरू करें",
             "fallback": "या यह लिंक अपने ब्राउज़र में पेस्ट करें:",
@@ -352,12 +390,22 @@ def _t_exam_link(lang: str, ctx: dict) -> tuple[str, str, str, str]:
             "outro": "शुभकामनाएँ!",
         },
         "te": {
-            "subject": f"మీ పరీక్ష: {exam_title}" if exam_title else "మీ పరీక్ష ఆహ్వానం",
-            "pre": "మీరు ఒక పరీక్ష రాయడానికి ఆహ్వానించబడ్డారు.",
+            "subject": (
+                (f"{org} · మీ పరీక్ష: {exam_title}" if exam_title
+                 else f"{org} · మీ పరీక్ష ఆహ్వానం") if org
+                else (f"మీ పరీక్ష: {exam_title}" if exam_title else "మీ పరీక్ష ఆహ్వానం")
+            ),
+            "pre": (
+                f"{org} మిమ్మల్ని ఒక మూల్యాంకనం రాయడానికి ఆహ్వానించింది." if org
+                else "మీరు ఒక పరీక్ష రాయడానికి ఆహ్వానించబడ్డారు."
+            ),
             "lead": (
-                f"మీరు <strong>{_esc(exam_title)}</strong> మూల్యాంకనం రాయడానికి ఆహ్వానించబడ్డారు."
-                if exam_title
-                else "మీరు ఒక ఆన్‌లైన్ మూల్యాంకనం రాయడానికి ఆహ్వానించబడ్డారు."
+                ((f"<strong>{orge}</strong> మిమ్మల్ని <strong>{ttle}</strong> మూల్యాంకనం రాయడానికి ఆహ్వానించింది.")
+                 if exam_title
+                 else f"<strong>{orge}</strong> మిమ్మల్ని ఒక ఆన్‌లైన్ మూల్యాంకనం రాయడానికి ఆహ్వానించింది.")
+                if org else
+                ((f"మీరు <strong>{ttle}</strong> మూల్యాంకనం రాయడానికి ఆహ్వానించబడ్డారు.")
+                 if exam_title else "మీరు ఒక ఆన్‌లైన్ మూల్యాంకనం రాయడానికి ఆహ్వానించబడ్డారు.")
             ),
             "cta": "పరీక్షను ప్రారంభించండి",
             "fallback": "లేదా ఈ లింక్‌ను మీ బ్రౌజర్‌లో పేస్ట్ చేయండి:",
@@ -390,11 +438,21 @@ def _t_interview_invite(lang: str, ctx: dict) -> tuple[str, str, str, str]:
     interview_url = ctx.get("interview_url")  # None on reschedule
     when = ctx.get("when")
     rescheduled = ctx.get("rescheduled", False)
+    # Company name (the HR's tenant) — names the inviting organisation.
+    org = (ctx.get("brand") or "").strip()
+    orge = _esc(org)
+    jt = _esc(job_title)
     loc = _loc(lang, {
         "en": {
-            "subject": f"Your AI interview for {job_title}",
-            "pre": "You've been invited to an AI voice interview.",
-            "lead": f"You've been invited to an AI voice interview for <strong>{_esc(job_title)}</strong>.",
+            "subject": (f"Your {org} interview for {job_title}" if org
+                        else f"Your AI interview for {job_title}"),
+            "pre": (f"{org} has invited you to an AI voice interview." if org
+                    else "You've been invited to an AI voice interview."),
+            "lead": (
+                f"<strong>{orge}</strong> has invited you to an AI voice interview for "
+                f"<strong>{jt}</strong>." if org
+                else f"You've been invited to an AI voice interview for <strong>{jt}</strong>."
+            ),
             "sched": "Your interview is scheduled for:",
             "anytime": "You can start the interview any time before the link expires.",
             "cta": "Join my interview",
@@ -404,9 +462,15 @@ def _t_interview_invite(lang: str, ctx: dict) -> tuple[str, str, str, str]:
             "resched": "Your interview has been rescheduled.",
         },
         "hi": {
-            "subject": f"{job_title} के लिए आपका एआई इंटरव्यू",
-            "pre": "आपको एआई वॉयस इंटरव्यू के लिए आमंत्रित किया गया है।",
-            "lead": f"आपको <strong>{_esc(job_title)}</strong> के लिए एआई वॉयस इंटरव्यू हेतु आमंत्रित किया गया है।",
+            "subject": (f"{job_title} के लिए {org} का एआई इंटरव्यू" if org
+                        else f"{job_title} के लिए आपका एआई इंटरव्यू"),
+            "pre": (f"{org} ने आपको एआई वॉयस इंटरव्यू के लिए आमंत्रित किया है।" if org
+                    else "आपको एआई वॉयस इंटरव्यू के लिए आमंत्रित किया गया है।"),
+            "lead": (
+                f"<strong>{orge}</strong> ने आपको <strong>{jt}</strong> के लिए एआई वॉयस इंटरव्यू हेतु आमंत्रित किया है।"
+                if org
+                else f"आपको <strong>{jt}</strong> के लिए एआई वॉयस इंटरव्यू हेतु आमंत्रित किया गया है।"
+            ),
             "sched": "आपका इंटरव्यू निर्धारित है:",
             "anytime": "आप लिंक समाप्त होने से पहले कभी भी इंटरव्यू शुरू कर सकते हैं।",
             "cta": "इंटरव्यू में शामिल हों",
@@ -416,9 +480,15 @@ def _t_interview_invite(lang: str, ctx: dict) -> tuple[str, str, str, str]:
             "resched": "आपका इंटरव्यू पुनर्निर्धारित कर दिया गया है।",
         },
         "te": {
-            "subject": f"{job_title} కోసం మీ AI ఇంటర్వ్యూ",
-            "pre": "మీరు AI వాయిస్ ఇంటర్వ్యూకి ఆహ్వానించబడ్డారు.",
-            "lead": f"మీరు <strong>{_esc(job_title)}</strong> కోసం AI వాయిస్ ఇంటర్వ్యూకి ఆహ్వానించబడ్డారు.",
+            "subject": (f"{job_title} కోసం {org} AI ఇంటర్వ్యూ" if org
+                        else f"{job_title} కోసం మీ AI ఇంటర్వ్యూ"),
+            "pre": (f"{org} మిమ్మల్ని AI వాయిస్ ఇంటర్వ్యూకి ఆహ్వానించింది." if org
+                    else "మీరు AI వాయిస్ ఇంటర్వ్యూకి ఆహ్వానించబడ్డారు."),
+            "lead": (
+                f"<strong>{orge}</strong> మిమ్మల్ని <strong>{jt}</strong> కోసం AI వాయిస్ ఇంటర్వ్యూకి ఆహ్వానించింది."
+                if org
+                else f"మీరు <strong>{jt}</strong> కోసం AI వాయిస్ ఇంటర్వ్యూకి ఆహ్వానించబడ్డారు."
+            ),
             "sched": "మీ ఇంటర్వ్యూ షెడ్యూల్ చేయబడింది:",
             "anytime": "లింక్ గడువు ముగియకముందు మీరు ఎప్పుడైనా ఇంటర్వ్యూను ప్రారంభించవచ్చు.",
             "cta": "నా ఇంటర్వ్యూలో చేరండి",
@@ -564,13 +634,17 @@ def _t_decision(lang: str, ctx: dict) -> tuple[str, str, str, str]:
     }
     row = copy.get(decision, copy["rejected"])
     loc = row.get(lang, row["en"])
+    # Prefix the subject with the inviting company so the inbox line is branded
+    # too; the wordmark + sender name already carry the company via the layout.
+    org = (ctx.get("brand") or "").strip()
+    subject = f"{org} · {loc['subject']}" if org else loc["subject"]
     inner = _p(_greeting(lang, name)) + _p(loc["lead"]) + _p(loc["body"]) + _p(loc["outro"])
     text = "\n".join([
         _greeting(lang, name), "",
         loc["lead"].replace("<strong>", "").replace("</strong>", ""),
         loc["body"], "", loc["outro"],
     ])
-    return loc["subject"], inner, text, loc["subject"]
+    return subject, inner, text, subject
 
 
 def _t_generic(lang: str, ctx: dict) -> tuple[str, str, str, str]:
@@ -619,5 +693,6 @@ def render(template: str, lang: str, ctx: dict) -> RenderedEmail:
     builder = _BUILDERS.get(template, _t_generic)
     norm = _norm_lang(lang)
     subject, inner, text, preheader = builder(norm, ctx)
-    html = _layout(inner, preheader=preheader)
+    # ctx["brand"] (a tenant company name) overrides the wordmark + footer.
+    html = _layout(inner, preheader=preheader, brand=ctx.get("brand"))
     return RenderedEmail(subject=subject, html=html, text=text)

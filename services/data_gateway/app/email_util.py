@@ -45,9 +45,16 @@ def _send_sync(msg: EmailMessage) -> None:
         smtp.send_message(msg)
 
 
-def _build_message(to: str, subject: str, html: str, text: str | None) -> EmailMessage:
+def _build_message(
+    to: str, subject: str, html: str, text: str | None, from_name: str | None = None
+) -> EmailMessage:
     msg = EmailMessage()
-    msg["From"] = formataddr((settings.email_from_name, settings.email_from))
+    # The envelope address is fixed (the single authenticated SMTP relay account),
+    # but the DISPLAY NAME is per-email: company-scoped invites show the company
+    # (e.g. "Google", "CDPR") so the candidate's inbox reads as that company, not
+    # the generic platform brand. Falls back to the platform brand when unset.
+    display = (from_name or "").strip() or settings.email_from_name
+    msg["From"] = formataddr((display, settings.email_from))
     msg["To"] = to
     msg["Subject"] = subject
     if settings.email_reply_to:
@@ -59,17 +66,20 @@ def _build_message(to: str, subject: str, html: str, text: str | None) -> EmailM
 
 
 async def deliver_smtp(
-    *, to: str, subject: str, html: str, text: str | None = None
+    *, to: str, subject: str, html: str, text: str | None = None, from_name: str | None = None
 ) -> None:
     """Send one email, RAISING on any failure (recipient/transport).
 
     The outbox worker relies on the raised exception to mark the row failed and
     schedule a retry. ``ValueError`` for an obviously invalid recipient (never
     retriable); ``smtplib``/OS errors propagate as-is (retriable).
+
+    ``from_name`` overrides the sender display name (company-branded invites);
+    None falls back to the platform brand.
     """
     if not to or "@" not in to:
         raise ValueError(f"invalid recipient: {to!r}")
-    msg = _build_message(to, subject, html, text)
+    msg = _build_message(to, subject, html, text, from_name=from_name)
     await asyncio.to_thread(_send_sync, msg)
 
 

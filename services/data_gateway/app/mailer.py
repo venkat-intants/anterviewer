@@ -36,7 +36,7 @@ from app import email_templates
 from app.config import settings
 from app.database import get_session_factory
 from app.email_util import deliver_smtp
-from app.models import EmailEvent
+from app.models import Company, EmailEvent
 from app.notifications_util import create_notification
 
 log = structlog.get_logger(__name__)
@@ -91,7 +91,20 @@ async def enqueue_email(
             log.info("email.enqueue.deduped", template=template, dedupe_key=dedupe_key)
             return None
 
-    rendered = email_templates.render(template, lang, ctx)
+    # Company-branding: when this email belongs to a tenant company, resolve the
+    # company's display name and inject it as ``brand`` so the rendered subject,
+    # body copy, and wordmark read as that company (e.g. "Google", "CDPR") rather
+    # than the generic platform brand. The caller may pre-set ctx["brand"] to
+    # override. Best-effort — a lookup miss just leaves the platform brand.
+    render_ctx = ctx
+    if company_id is not None and "brand" not in ctx:
+        company_name = await db.scalar(
+            select(Company.name).where(Company.id == company_id)
+        )
+        if company_name:
+            render_ctx = {**ctx, "brand": company_name}
+
+    rendered = email_templates.render(template, lang, render_ctx)
     now = datetime.now(tz=UTC)
     ev = EmailEvent(
         id=uuid.uuid4(),
@@ -212,11 +225,16 @@ async def _claim_batch(db: AsyncSession) -> list[tuple]:
         ),
         {"ids": list(ids)},
     )
+    # LEFT JOIN companies so the sender DISPLAY NAME can be the tenant company
+    # (company-branded invites). Platform emails (company_id NULL) get NULL here
+    # and fall back to the platform brand in the relay.
     rows = (
         await db.execute(
             text(
-                "SELECT id, to_email, subject, body_html, body_text, attempts, max_attempts "
-                "FROM email_events WHERE id = ANY(:ids)"
+                "SELECT e.id, e.to_email, e.subject, e.body_html, e.body_text, "
+                "e.attempts, e.max_attempts, c.name AS from_name "
+                "FROM email_events e LEFT JOIN companies c ON c.id = e.company_id "
+                "WHERE e.id = ANY(:ids)"
             ),
             {"ids": list(ids)},
         )
@@ -259,11 +277,12 @@ async def _drain(factory: async_sessionmaker[AsyncSession]) -> int:
         batch = await _claim_batch(db)
     if not batch:
         return 0
-    for row_id, to_email, subject, body_html, body_text, attempts, max_attempts in batch:
+    for row_id, to_email, subject, body_html, body_text, attempts, max_attempts, from_name in batch:
         async with factory() as db:
             try:
                 await deliver_smtp(
-                    to=to_email, subject=subject, html=body_html or "", text=body_text
+                    to=to_email, subject=subject, html=body_html or "", text=body_text,
+                    from_name=from_name,
                 )
                 await _record_sent(db, row_id)
                 await db.commit()
