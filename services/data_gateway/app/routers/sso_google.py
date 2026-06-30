@@ -35,6 +35,7 @@ PII note: user email and name from Google are NEVER written to logs.
 
 from __future__ import annotations
 
+import json
 import secrets
 import uuid
 from datetime import UTC, datetime
@@ -43,10 +44,15 @@ from urllib.parse import urlencode
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
-from shared.auth.jwt import issue_access_token
+from shared.auth.jwt import (
+    generate_refresh_token,
+    hash_refresh_token,
+    issue_access_token,
+)
+from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -54,6 +60,15 @@ from app.config import settings
 from app.database import get_db_session
 from app.models import User
 from app.redis_client import get_redis
+
+# Reuse the canonical, tested DPDP helpers (PII-safe IP/UA hashing with the
+# trusted-proxy gate) so a Google-signin consent row is recorded identically to
+# the POST /consent endpoint — single source of truth for the anti-spoofing logic.
+from app.routers.consent import (
+    _extract_client_ip,
+    _extract_user_agent,
+    _hash_value,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -129,6 +144,43 @@ def _state_redis_key(state_token: str) -> str:
     return f"{_STATE_KEY_PREFIX}{state_token}"
 
 
+# Redis key prefix for refresh tokens — must match shared.auth.local._RT_PREFIX
+# (the /auth/refresh endpoint reads tokens written under this prefix).
+_RT_PREFIX = "refresh:"
+
+
+def _set_session_cookies(response: Response, raw_refresh: str) -> str:
+    """Set the httpOnly refresh + JS-readable CSRF cookies on *response*.
+
+    Mirrors ``app.routers.auth._set_auth_cookies`` so a Google session persists
+    beyond the 15-minute access token and is silently refreshed via /auth/refresh
+    exactly like a local-password session. Returns the CSRF token (for logging).
+    """
+    max_age = settings.jwt_refresh_expiry_days * 86400
+    csrf_token = secrets.token_urlsafe(32)
+    response.set_cookie(
+        key=settings.auth_refresh_cookie_name,
+        value=raw_refresh,
+        httponly=True,
+        secure=settings.auth_cookie_secure,
+        samesite=settings.auth_cookie_samesite,
+        domain=settings.auth_cookie_domain,
+        path=settings.auth_cookie_path,
+        max_age=max_age,
+    )
+    response.set_cookie(
+        key=settings.auth_csrf_cookie_name,
+        value=csrf_token,
+        httponly=False,  # JS must read + echo it as X-CSRF-Token on refresh.
+        secure=settings.auth_cookie_secure,
+        samesite=settings.auth_cookie_samesite,
+        domain=settings.auth_cookie_domain,
+        path=settings.auth_cookie_path,
+        max_age=max_age,
+    )
+    return csrf_token
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -153,6 +205,14 @@ async def initiate(
         str,
         Query(description="URL to redirect the user to after successful authentication"),
     ] = "",
+    consent: Annotated[
+        bool,
+        Query(description="True when the candidate ticked the DPDP consent box before sign-in"),
+    ] = False,
+    consent_version: Annotated[
+        int,
+        Query(ge=1, description="Version of the consent text the candidate agreed to"),
+    ] = 1,
 ) -> RedirectResponse:
     """Begin the Google OAuth 2.0 authorization-code flow.
 
@@ -173,14 +233,24 @@ async def initiate(
 
     state = secrets.token_urlsafe(32)
 
+    # Carry the candidate's consent intent (and return_url) in the state payload so
+    # the callback — which sees the candidate's real browser IP — records the DPDP
+    # consent row atomically with account creation. JSON so it stays parseable.
+    state_payload = json.dumps(
+        {
+            "return_url": return_url or "",
+            "consent": bool(consent),
+            "consent_version": int(consent_version),
+        }
+    )
     await redis.set(
         _state_redis_key(state),
-        return_url or "",
+        state_payload,
         ex=_STATE_TTL_SECONDS,
     )
 
     authorize_url = _build_authorize_url(state)
-    log.info("google.sso.initiate", state_prefix=state[:8])
+    log.info("google.sso.initiate", state_prefix=state[:8], consent=bool(consent))
     return RedirectResponse(url=authorize_url, status_code=status.HTTP_302_FOUND)
 
 
@@ -202,6 +272,8 @@ async def callback(
     state: Annotated[str, Query(description="CSRF state token")],
     db: DbSessionDep,
     redis: RedisDep,
+    request: Request,
+    response: Response,
 ) -> SsoTokenResponse:
     """Complete the Google OAuth 2.0 flow and create/update the Intants user.
 
@@ -240,6 +312,20 @@ async def callback(
         )
     # Atomically delete so the state token cannot be replayed.
     await redis.delete(state_key)
+
+    # Recover the candidate's consent intent from the state payload (JSON written
+    # by initiate). Tolerate a legacy plain-string state (return_url only) — in
+    # that case no consent was captured, so none is recorded here and the
+    # candidate hits the standard consent gate before any interview.
+    consent_requested = False
+    consent_version = 1
+    try:
+        parsed_state = json.loads(stored_value)
+        if isinstance(parsed_state, dict):
+            consent_requested = bool(parsed_state.get("consent", False))
+            consent_version = int(parsed_state.get("consent_version", 1))
+    except (ValueError, TypeError):
+        pass
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as http:
@@ -326,6 +412,35 @@ async def callback(
         ) from exc
 
     # ------------------------------------------------------------------
+    # Candidate-only gate (BEFORE any write or session mint).
+    #
+    # Google sign-in is for CANDIDATES only — HR/admin accounts are provisioned
+    # internally and sign in with a password. If this Google email already maps to
+    # an account holding any privileged role, refuse: issuing a session here would
+    # let /auth/refresh re-derive that account's full privileged roles from the DB
+    # (the candidate access token lasts 15 min, but refresh reads live roles),
+    # silently escalating past the candidate-only boundary. Reject outright so no
+    # access token, refresh token, or cookie is ever issued to a privileged email.
+    # ------------------------------------------------------------------
+    privileged_row = await db.execute(
+        text(
+            "SELECT 1 FROM users u "
+            "JOIN user_roles ur ON ur.user_id = u.id "
+            "JOIN roles r ON r.id = ur.role_id "
+            "WHERE u.email = :email AND u.deleted_at IS NULL "
+            "AND r.name IN ('hr_manager', 'super_admin', 'platform_owner', 'admin') "
+            "LIMIT 1"
+        ),
+        {"email": email},
+    )
+    if privileged_row.fetchone() is not None:
+        log.warning("google.sso.callback.privileged_account_rejected")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="GOOGLE_SIGNIN_CANDIDATES_ONLY",
+        )
+
+    # ------------------------------------------------------------------
     # Step 5: Upsert user in DB
     #
     # NOTE: The ``users`` table does not yet have a ``google_id`` column.
@@ -375,6 +490,59 @@ async def callback(
             detail="INTERNAL_ERROR",
         )
     final_user_id: uuid.UUID = row[0]
+
+    # Grant the 'candidate' role in the DB. The JWT below hardcodes ['candidate'],
+    # but /auth/me and token refresh read roles from user_roles — without this row
+    # a Google user would appear role-less after the access token expires. Google
+    # sign-in is CANDIDATE-ONLY: the WHERE NOT EXISTS guard means an existing
+    # HR/admin account (same email) is never granted candidate, and ON CONFLICT
+    # keeps repeat logins idempotent.
+    await db.execute(
+        text(
+            "INSERT INTO user_roles (user_id, role_id) "
+            "SELECT :uid, (SELECT id FROM roles WHERE name = 'candidate') "
+            "WHERE NOT EXISTS ("
+            "  SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
+            "  WHERE ur.user_id = :uid "
+            "  AND r.name IN ('hr_manager', 'super_admin', 'platform_owner', 'admin')"
+            ") ON CONFLICT DO NOTHING"
+        ),
+        {"uid": final_user_id},
+    )
+
+    # DPDP §7: record the candidate's consent ATOMICALLY with the PII-storing
+    # user upsert when they ticked the consent box before sign-in. Same ledger
+    # taxonomy + idempotency + evidence shape as POST /consent and the interview
+    # invite flow (interview_voice_recording / interview). IP + User-Agent are
+    # sha256-hashed with the server salt — raw PII is never stored or logged.
+    if consent_requested:
+        evidence = {
+            "source": "google_sso",
+            "version": consent_version,
+            "ip_hash": _hash_value(_extract_client_ip(request)),
+            "user_agent_hash": _hash_value(_extract_user_agent(request)),
+            "consented_at_iso": now_utc.isoformat(),
+        }
+        await db.execute(
+            text(
+                "INSERT INTO dpdp_consent_ledger "
+                "(id, user_id, consent_type, granted, granted_at, purpose, evidence) "
+                "SELECT :id, :uid, 'interview_voice_recording', TRUE, :now, 'interview', "
+                "CAST(:ev AS jsonb) "
+                "WHERE NOT EXISTS ("
+                "  SELECT 1 FROM dpdp_consent_ledger WHERE user_id = :uid "
+                "  AND consent_type = 'interview_voice_recording' AND purpose = 'interview' "
+                "  AND granted = TRUE AND revoked_at IS NULL"
+                ") ON CONFLICT DO NOTHING"
+            ),
+            {
+                "id": uuid.uuid4(),
+                "uid": final_user_id,
+                "now": now_utc,
+                "ev": json.dumps(evidence),
+            },
+        )
+
     await db.commit()
 
     log.info(
@@ -384,7 +552,7 @@ async def callback(
     )
 
     # ------------------------------------------------------------------
-    # Step 6: Issue Intants JWT
+    # Step 6: Issue Intants JWT (candidate-only)
     # ------------------------------------------------------------------
     intants_jwt = issue_access_token(
         user_id=str(final_user_id),
@@ -394,6 +562,21 @@ async def callback(
         issuer=settings.jwt_issuer,
         audience=settings.jwt_audience,
     )
+
+    # ------------------------------------------------------------------
+    # Step 7: Mint a refresh token + set auth cookies so the Google session
+    # persists past the 15-min access token (silently refreshed via /auth/refresh,
+    # exactly like local login). sso.ts sends this exchange with
+    # credentials:'include' so the Set-Cookie headers are stored by the browser.
+    # ------------------------------------------------------------------
+    raw_refresh = generate_refresh_token()
+    refresh_ttl = settings.jwt_refresh_expiry_days * 86400
+    await redis.set(
+        _RT_PREFIX + hash_refresh_token(raw_refresh),
+        str(final_user_id),
+        ex=refresh_ttl,
+    )
+    _set_session_cookies(response, raw_refresh)
 
     return SsoTokenResponse(
         access_token=intants_jwt,

@@ -73,9 +73,10 @@ export default function Register() {
   const navigate = useNavigate();
   const { setAuth } = useAuth();
 
-  // DPDP consent — presentation gate on submit button only.
-  // The register API does not yet accept a consent param; this checkbox is
-  // visual until the backend captures consent (see gap report §Design-only).
+  // DPDP consent (DPDP §7) — gates BOTH sign-up paths. For Google SSO the
+  // consent signal is threaded through initiate → callback, which records the
+  // ledger row atomically with account creation. The local register API does
+  // not yet capture it server-side, so the checkbox still gates that submit.
   const [agreedToDpdp, setAgreedToDpdp] = useState(false);
   // When the backend requires email confirmation, registration creates the
   // account but does NOT log in — we show a "check your inbox" panel instead.
@@ -176,13 +177,30 @@ export default function Register() {
       </h1>
       <p className="mt-1.5 text-[14px] text-[#888b91]">{t('auth.startJourney')}</p>
 
+      {/* DPDP consent — gates BOTH sign-up methods (Google SSO + the form). */}
+      <label className="mt-8 flex cursor-pointer items-start gap-2.5 text-[12.5px] text-[#888b91]">
+        <input
+          type="checkbox"
+          checked={agreedToDpdp}
+          onChange={(e) => { setAgreedToDpdp(e.target.checked); }}
+          className="mt-0.5 h-4 w-4 flex-none cursor-pointer accent-[var(--accent)]"
+          aria-label="I agree to the Terms and DPDP-compliant Privacy Policy"
+        />
+        <span>
+          I agree to the Terms and the DPDP-compliant Privacy Policy, including
+          interview recording for scoring.
+        </span>
+      </label>
+
       {/* SSO buttons */}
-      <div className="mt-8 flex flex-col gap-2.5">
-        {/* Google — real handler (signUpWithGoogle → googleLoginUrl) */}
+      <div className="mt-4 flex flex-col gap-2.5">
+        {/* Google — gated on DPDP consent; passes the consent signal through. */}
         <button
           type="button"
-          className={`${ssoBase} bg-white text-black hover:bg-[#eaeaea]`}
-          onClick={() => { window.location.assign(googleLoginUrl()); }}
+          disabled={!agreedToDpdp}
+          aria-disabled={!agreedToDpdp}
+          className={`${ssoBase} bg-white text-black hover:bg-[#eaeaea] disabled:cursor-not-allowed disabled:opacity-50`}
+          onClick={() => { window.location.assign(googleLoginUrl('/dashboard', agreedToDpdp, 1)); }}
         >
           <GoogleBadge />
           {t('auth.signUpWithGoogle')}
@@ -263,25 +281,7 @@ export default function Register() {
           )}
         </div>
 
-        {/* DPDP consent checkbox — presentation gate only.
-            The API does not yet capture a consent param; this visually
-            gates the submit button until the user acknowledges DPDP terms.
-            See gap report §Register / Design-only. */}
-        <label className="flex cursor-pointer items-start gap-2.5 text-[12.5px] text-[#888b91]">
-          <input
-            type="checkbox"
-            checked={agreedToDpdp}
-            onChange={(e) => { setAgreedToDpdp(e.target.checked); }}
-            className="mt-0.5 h-4 w-4 flex-none cursor-pointer accent-[var(--accent)]"
-            aria-label="I agree to the Terms and DPDP-compliant Privacy Policy"
-          />
-          <span>
-            I agree to the Terms and the DPDP-compliant Privacy Policy, including
-            interview recording for scoring.
-          </span>
-        </label>
-
-        {/* Submit — gated by DPDP consent checkbox (presentation) */}
+        {/* Submit — gated by the DPDP consent checkbox shown above the SSO buttons */}
         <Pill
           type="submit"
           disabled={mutation.isPending || !agreedToDpdp}

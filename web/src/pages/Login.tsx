@@ -3,6 +3,7 @@
 // Logic: RHF + zodResolver, login()→getMe()→setAuth, role-aware redirect,
 //        must_change_password guard, isPending/aria-busy, toast errors, all t() keys.
 
+import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -62,6 +63,11 @@ export default function Login() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { setAuth } = useAuth();
+
+  // DPDP consent — gates the account-creating Google sign-in (DPDP §7). Signing
+  // in with Google can create a new candidate account, so we capture consent
+  // here and pass it through; the password form below is for existing accounts.
+  const [agreedToDpdp, setAgreedToDpdp] = useState(false);
 
   const form = useForm<LoginFormValues>({
     resolver: zodResolver(loginSchema),
@@ -135,13 +141,30 @@ export default function Login() {
       </h1>
       <p className="mt-1.5 text-[14px] text-[#888b91]">{t('auth.signInSubtitle')}</p>
 
+      {/* DPDP consent — gates the account-creating Google sign-in (DPDP §7). */}
+      <label className="mt-8 flex cursor-pointer items-start gap-2.5 text-[12.5px] text-[#888b91]">
+        <input
+          type="checkbox"
+          checked={agreedToDpdp}
+          onChange={(e) => { setAgreedToDpdp(e.target.checked); }}
+          className="mt-0.5 h-4 w-4 flex-none cursor-pointer accent-[var(--accent)]"
+          aria-label="I agree to the Terms and DPDP-compliant Privacy Policy"
+        />
+        <span>
+          I agree to the Terms and the DPDP-compliant Privacy Policy, including
+          interview recording for scoring.
+        </span>
+      </label>
+
       {/* SSO buttons */}
-      <div className="mt-8 flex flex-col gap-2.5">
-        {/* Google — real handler */}
+      <div className="mt-4 flex flex-col gap-2.5">
+        {/* Google — gated on DPDP consent; passes the consent signal through. */}
         <button
           type="button"
-          className={`${ssoBase} bg-white text-black hover:bg-[#eaeaea]`}
-          onClick={() => { window.location.assign(googleLoginUrl()); }}
+          disabled={!agreedToDpdp}
+          aria-disabled={!agreedToDpdp}
+          className={`${ssoBase} bg-white text-black hover:bg-[#eaeaea] disabled:cursor-not-allowed disabled:opacity-50`}
+          onClick={() => { window.location.assign(googleLoginUrl('/dashboard', agreedToDpdp, 1)); }}
         >
           <GoogleBadge />
           {t('auth.signInWithGoogle')}

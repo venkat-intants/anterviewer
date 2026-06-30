@@ -16,6 +16,7 @@ Test matrix (6 integration + 1 unit-level URL test):
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -55,7 +56,7 @@ _test_app.include_router(google_router)
 # Shared settings dict — Google provider fully configured
 # ---------------------------------------------------------------------------
 
-_GOOGLE_SETTINGS: dict[str, str] = {
+_GOOGLE_SETTINGS: dict[str, Any] = {
     "auth_provider": "google",
     "google_oauth_client_id": _FAKE_CLIENT_ID,
     "google_oauth_client_secret": _FAKE_CLIENT_SECRET,
@@ -64,6 +65,15 @@ _GOOGLE_SETTINGS: dict[str, str] = {
     "jwt_algorithm": "HS256",
     "jwt_issuer": "intants-data-gateway",
     "jwt_audience": "intants-services",
+    # Session-cookie + refresh-token fields the callback now reads to persist the
+    # Google session like local login.
+    "jwt_refresh_expiry_days": 7,
+    "auth_refresh_cookie_name": "refresh_token",
+    "auth_csrf_cookie_name": "csrf_token",
+    "auth_cookie_secure": False,
+    "auth_cookie_samesite": "lax",
+    "auth_cookie_domain": None,
+    "auth_cookie_path": "/",
 }
 
 
@@ -98,10 +108,21 @@ class _FakeResult:
 class _FakeDbSession:
     """In-memory fake for AsyncSession — records execute/commit calls."""
 
-    def __init__(self, return_user_id: uuid.UUID = _FAKE_USER_UUID) -> None:
+    def __init__(
+        self, return_user_id: uuid.UUID = _FAKE_USER_UUID, privileged: bool = False
+    ) -> None:
         self._user_id = return_user_id
+        self._privileged = privileged  # simulate an existing HR/admin account
+        self.executed: list[str] = []  # str() of every statement run (for assertions)
 
-    async def execute(self, stmt: Any) -> _FakeResult:  # noqa: ARG002
+    async def execute(self, stmt: Any, params: Any = None) -> _FakeResult:  # noqa: ARG002
+        sql = str(stmt)
+        self.executed.append(sql)
+        # The only SELECT the SSO callback runs is the candidate-only privileged-role
+        # probe. Return a row only when simulating a privileged account; all other
+        # statements (upsert RETURNING, role/consent INSERTs) yield the user_id row.
+        if sql.lstrip().upper().startswith("SELECT"):
+            return _FakeResult((1,) if self._privileged else None)
         return _FakeResult((self._user_id,))
 
     async def commit(self) -> None:
@@ -114,11 +135,17 @@ class _FakeDbSession:
         pass
 
 
-def _override_db(user_id: uuid.UUID = _FAKE_USER_UUID) -> Any:
-    """Return an async generator that yields a _FakeDbSession."""
+def _override_db(
+    user_id: uuid.UUID = _FAKE_USER_UUID, session: _FakeDbSession | None = None
+) -> Any:
+    """Return an async generator that yields a _FakeDbSession.
+
+    Pass ``session`` to inspect the statements the handler ran after the request.
+    """
+    sess = session or _FakeDbSession(return_user_id=user_id)
 
     async def _dep() -> Any:
-        yield _FakeDbSession(return_user_id=user_id)
+        yield sess
 
     return _dep
 
@@ -317,6 +344,139 @@ async def test_callback_valid_code_returns_jwt(client: AsyncClient) -> None:
 
     # State key must have been consumed (deleted from Redis)
     assert await fake_redis.get(f"oauth:google:state:{_FAKE_STATE}") is None
+
+    # Session cookies must be set so the Google session persists past the access
+    # token (httpOnly refresh_token + JS-readable csrf_token), like local login.
+    assert "refresh_token" in resp.cookies
+    assert "csrf_token" in resp.cookies
+    # A refresh token must have been stored in Redis under the refresh: prefix.
+    assert any(k.startswith("refresh:") for k in fake_redis._store)
+
+    # Cookie ATTRIBUTES must match local login (httpx hides these on resp.cookies,
+    # so parse the raw Set-Cookie headers — same approach as the auth-endpoint tests).
+    set_cookie_headers = [v for k, v in resp.headers.multi_items() if k.lower() == "set-cookie"]
+    refresh_header = next(h for h in set_cookie_headers if h.startswith("refresh_token="))
+    csrf_header = next(h for h in set_cookie_headers if h.startswith("csrf_token="))
+    assert "httponly" in refresh_header.lower()      # refresh cookie: XSS-safe
+    assert "httponly" not in csrf_header.lower()      # csrf cookie: JS must read it
+    assert "samesite=lax" in refresh_header.lower()
+    assert "secure" not in refresh_header.lower()     # auth_cookie_secure=False in test settings
+
+
+# ---------------------------------------------------------------------------
+# 4b. test_callback_with_consent_records_dpdp_ledger
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_callback_with_consent_records_dpdp_ledger(client: AsyncClient) -> None:
+    """When the state carries consent=true, the callback inserts a DPDP consent row
+    (interview_voice_recording / interview) atomically with the user upsert."""
+    fake_redis = _FakeRedis()
+    # State payload as written by initiate when the candidate ticked the box.
+    await fake_redis.set(
+        f"oauth:google:state:{_FAKE_STATE}",
+        json.dumps({"return_url": "/dashboard", "consent": True, "consent_version": 1}),
+    )
+
+    fake_token_resp = MagicMock()
+    fake_token_resp.status_code = 200
+    fake_token_resp.json.return_value = {"access_token": "google-access-token-xyz"}
+
+    fake_userinfo_resp = MagicMock()
+    fake_userinfo_resp.status_code = 200
+    fake_userinfo_resp.json.return_value = {
+        "sub": _FAKE_GOOGLE_SUB,
+        "email": "consenting.user@gmail.com",
+        "name": "Consenting User",
+    }
+
+    mock_http_instance = AsyncMock()
+    mock_http_instance.post = AsyncMock(return_value=fake_token_resp)
+    mock_http_instance.get = AsyncMock(return_value=fake_userinfo_resp)
+    mock_http_instance.__aenter__ = AsyncMock(return_value=mock_http_instance)
+    mock_http_instance.__aexit__ = AsyncMock(return_value=None)
+
+    sess = _FakeDbSession()
+    _test_app.dependency_overrides[get_db_session] = _override_db(session=sess)
+    _test_app.dependency_overrides[get_redis] = _make_redis_override(fake_redis)
+    try:
+        with (
+            _patch_settings(),
+            patch("app.routers.sso_google.httpx.AsyncClient", return_value=mock_http_instance),
+        ):
+            resp = await client.get(
+                _CALLBACK_URL,
+                params={"code": "auth-code-from-google", "state": _FAKE_STATE},
+            )
+    finally:
+        _test_app.dependency_overrides.clear()
+
+    assert resp.status_code == 200, resp.text
+    # The consent ledger INSERT must have been issued in the same handler.
+    assert any("dpdp_consent_ledger" in s for s in sess.executed), sess.executed
+    # And the candidate role grant (every Google sign-in is candidate-only).
+    assert any("user_roles" in s for s in sess.executed)
+
+
+# ---------------------------------------------------------------------------
+# 4c. test_callback_rejects_privileged_account (candidate-only guarantee)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_privileged_account(client: AsyncClient) -> None:
+    """Google sign-in is candidate-only: an email mapping to an account that holds
+    a privileged role (hr_manager/super_admin/platform_owner/admin) is rejected with
+    403 and NO session (no access token, no refresh token, no cookies) is issued —
+    closing the refresh-escalation path."""
+    fake_redis = _FakeRedis()
+    await fake_redis.set(
+        f"oauth:google:state:{_FAKE_STATE}",
+        json.dumps({"return_url": "/dashboard", "consent": True, "consent_version": 1}),
+    )
+
+    fake_token_resp = MagicMock()
+    fake_token_resp.status_code = 200
+    fake_token_resp.json.return_value = {"access_token": "google-access-token-xyz"}
+
+    fake_userinfo_resp = MagicMock()
+    fake_userinfo_resp.status_code = 200
+    fake_userinfo_resp.json.return_value = {
+        "sub": _FAKE_GOOGLE_SUB,
+        "email": "hr.manager@company.com",
+        "name": "HR Manager",
+    }
+
+    mock_http_instance = AsyncMock()
+    mock_http_instance.post = AsyncMock(return_value=fake_token_resp)
+    mock_http_instance.get = AsyncMock(return_value=fake_userinfo_resp)
+    mock_http_instance.__aenter__ = AsyncMock(return_value=mock_http_instance)
+    mock_http_instance.__aexit__ = AsyncMock(return_value=None)
+
+    # privileged=True → the candidate-only probe finds an existing privileged role.
+    sess = _FakeDbSession(privileged=True)
+    _test_app.dependency_overrides[get_db_session] = _override_db(session=sess)
+    _test_app.dependency_overrides[get_redis] = _make_redis_override(fake_redis)
+    try:
+        with (
+            _patch_settings(),
+            patch("app.routers.sso_google.httpx.AsyncClient", return_value=mock_http_instance),
+        ):
+            resp = await client.get(
+                _CALLBACK_URL,
+                params={"code": "auth-code-from-google", "state": _FAKE_STATE},
+            )
+    finally:
+        _test_app.dependency_overrides.clear()
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == "GOOGLE_SIGNIN_CANDIDATES_ONLY"
+    # No session artifacts for a rejected privileged account.
+    assert "refresh_token" not in resp.cookies
+    assert not any(k.startswith("refresh:") for k in fake_redis._store)
+    # Rejected before any write (no upsert / role / consent INSERT ran).
+    assert not any("INSERT" in s.upper() for s in sess.executed)
 
 
 # ---------------------------------------------------------------------------

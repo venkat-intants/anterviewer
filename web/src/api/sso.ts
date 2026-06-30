@@ -22,8 +22,18 @@ export interface SsoTokenResponse {
  * URL that starts the Google OAuth flow. Navigate the whole page to it
  * (window.location) — the backend replies 302 → accounts.google.com.
  */
-export function googleLoginUrl(returnUrl = '/dashboard'): string {
+export function googleLoginUrl(
+  returnUrl = '/dashboard',
+  consent = false,
+  consentVersion = 1,
+): string {
   const params = new URLSearchParams({ return_url: returnUrl });
+  // When the candidate ticked the DPDP consent box, pass it through so the
+  // backend records the consent row atomically with account creation (DPDP §7).
+  if (consent) {
+    params.set('consent', '1');
+    params.set('consent_version', String(consentVersion));
+  }
   return `${API_BASE}/auth/sso/google/initiate?${params.toString()}`;
 }
 
@@ -33,7 +43,12 @@ export function googleLoginUrl(returnUrl = '/dashboard'): string {
  */
 export async function completeGoogleLogin(code: string, state: string): Promise<SsoTokenResponse> {
   const params = new URLSearchParams({ code, state });
-  const response = await fetch(`${API_BASE}/auth/sso/google/callback?${params.toString()}`);
+  // credentials:'include' so the httpOnly refresh_token + csrf_token cookies the
+  // callback sets are stored — lets the Google session be silently refreshed via
+  // /auth/refresh, like local login (otherwise the session dies after ~15 min).
+  const response = await fetch(`${API_BASE}/auth/sso/google/callback?${params.toString()}`, {
+    credentials: 'include',
+  });
 
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as {
