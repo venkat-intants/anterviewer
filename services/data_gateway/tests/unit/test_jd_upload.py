@@ -66,7 +66,8 @@ async def test_jd_upload_happy_path() -> None:
 
     with (
         patch("app.routers.jd.upload_file", new=AsyncMock(return_value=expected_key)),
-        patch("app.routers.jd._extract_pdf_text", return_value=extracted_text),
+        # _extract_pdf_text is now async (asyncio.to_thread wrapper) — use AsyncMock.
+        patch("app.routers.jd._extract_pdf_text", new=AsyncMock(return_value=extracted_text)),
     ):
         response = await upload_jd_document(
             job_id=job_id, file=mock_file, current_user=mock_user, db=mock_db

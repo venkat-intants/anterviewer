@@ -103,10 +103,33 @@
     }
 
     # ------------------------------------------------------------------
-    # Catch-all health probe (used by load-balancer / uptime monitors)
+    # Catch-all health probe (used by uptime monitors / Cloudflare health-
+    # check). Proxies to data_gateway so the response reflects a real
+    # upstream — a 200 means at least one backend service is reachable.
+    # If data_gateway is down Caddy will surface a 502, which is correct.
     # ------------------------------------------------------------------
     handle /health {
-        respond "OK" 200
+        reverse_proxy data_gateway:8002 {
+            rewrite /health/live
+            # Fail fast: we only want a quick liveness answer, not a
+            # deep dependency check.
+            transport http {
+                dial_timeout 5s
+                response_header_timeout 5s
+            }
+        }
+    }
+
+    # ------------------------------------------------------------------
+    # /metrics — internal Prometheus scrape paths on every service.
+    # These MUST NOT be reachable from the public internet: a scrape
+    # endpoint leaks cardinality labels (user-ids, session-ids) and
+    # runtime internals. Block unconditionally at the proxy layer; your
+    # Prometheus scraper must reach the services directly on the Docker
+    # network (e.g. http://data_gateway:8002/metrics), not through Caddy.
+    # ------------------------------------------------------------------
+    handle /metrics* {
+        respond "Forbidden" 403
     }
 
     # ------------------------------------------------------------------

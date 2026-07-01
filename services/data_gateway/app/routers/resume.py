@@ -26,6 +26,7 @@ Authz: all endpoints enforce that the resume.user_id equals the JWT sub.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import uuid
 from datetime import UTC, datetime
@@ -124,8 +125,16 @@ class DeleteResumeResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _extract_pdf_text(raw: bytes) -> str:
-    """Extract plain text from a PDF byte payload using pypdf.
+_PDF_PARSE_TIMEOUT_SECONDS: float = 30.0  # crafted PDFs must not hang the event loop
+
+
+def _extract_pdf_text_sync(raw: bytes) -> str:
+    """Extract plain text from a PDF byte payload using pypdf (synchronous).
+
+    This function is CPU-bound and must be called via asyncio.to_thread to avoid
+    blocking the event loop.  CVE-2025-62707 fixed by pypdf>=6.1.1 — still kept
+    off the event loop via to_thread + a hard wall-clock timeout so a pathologically
+    large or malformed PDF cannot DoS the service.
 
     Returns an empty string for scanned PDFs with no text layer — never raises.
     """
@@ -136,6 +145,18 @@ def _extract_pdf_text(raw: bytes) -> str:
         if extracted:
             pages.append(extracted)
     return "\n".join(pages)
+
+
+async def _extract_pdf_text(raw: bytes) -> str:
+    """Async wrapper: runs pypdf parsing in a thread with a hard timeout.
+
+    Raises asyncio.TimeoutError when the PDF takes longer than
+    _PDF_PARSE_TIMEOUT_SECONDS — the caller should surface a 400.
+    """
+    return await asyncio.wait_for(
+        asyncio.to_thread(_extract_pdf_text_sync, raw),
+        timeout=_PDF_PARSE_TIMEOUT_SECONDS,
+    )
 
 
 async def _presign_url(s3_key: str) -> str | None:
@@ -307,15 +328,22 @@ async def _do_upload(
             detail="Resume must be under 5 MB.",
         )
 
-    # --- 3. text extraction ---
-    # pypdf can raise on encrypted/corrupt PDFs. Surface a clean 400 instead of
-    # letting it bubble up as an unhandled 500 — an unhandled error is emitted
-    # by Starlette's outermost ServerErrorMiddleware, which sits OUTSIDE the CORS
-    # middleware, so the browser would receive a header-less cross-origin
-    # response and report a misleading "Network error — could not reach server"
-    # rather than the real cause.
+    # --- 3. text extraction (off the event loop — CVE-2025-62707 + DoS guard) ---
+    # pypdf is synchronous and CPU-bound. Running it via asyncio.to_thread with a
+    # hard timeout prevents a crafted PDF from blocking the event loop and DoS-ing
+    # the service.  CVE-2025-62707 is fixed in pypdf>=6.1.1 (pinned in
+    # requirements.txt); the to_thread wrapper is defence-in-depth.
     try:
-        text_content = _extract_pdf_text(raw)
+        text_content = await _extract_pdf_text(raw)
+    except TimeoutError as exc:
+        log.warning(
+            "resume.upload.pdf_parse_timeout",
+            timeout_seconds=_PDF_PARSE_TIMEOUT_SECONDS,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The PDF took too long to process. Please try a simpler file.",
+        ) from exc
     except Exception as exc:
         log.warning(
             "resume.upload.pdf_parse_failed",

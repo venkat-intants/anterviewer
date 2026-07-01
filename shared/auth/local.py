@@ -2,6 +2,31 @@
 
 bcrypt is CPU-bound (sync). All bcrypt calls are wrapped in asyncio.to_thread()
 to avoid blocking the event loop.
+
+## logout_all TOCTOU fix (2026-07-01)
+
+The previous implementation set the access-token epoch AFTER purging refresh
+tokens.  A concurrent POST /auth/refresh that ran between the session-set purge
+and the epoch write could mint a brand-new access+refresh pair whose iat was
+older than the (not-yet-written) epoch, allowing the tokens to survive revocation.
+
+Fix — two-part atomic defence:
+
+1. ``logout_all`` sets the epoch BEFORE touching the session set, so any
+   concurrent ``refresh()`` that executes after the epoch write will see the
+   epoch and can compare it against the session's creation timestamp.
+
+2. Each refresh-token Redis value now stores ``<user_id>:<created_at_unix>``
+   instead of plain ``<user_id>``.  ``refresh()`` parses ``created_at`` and
+   checks: if an epoch exists AND ``created_at <= epoch``, the session
+   predates the revocation and the request is rejected *before* new tokens
+   are issued.  This closes the window even when logout_all completes between
+   the Redis GET and the Redis DELETE in refresh().
+
+Redis error handling policy (unchanged):
+- Epoch READ errors in refresh() → fail-open (token allowed through).
+  A Redis outage must not lock users out.
+- Epoch WRITE errors in logout_all → logged as WARNING (best-effort, as before).
 """
 
 from __future__ import annotations
@@ -44,6 +69,9 @@ _SESSIONS_PREFIX = "user_sessions:"
 # for the user *immediately*, rather than waiting out the 15-minute TTL.
 # Imported by data_gateway's get_current_user — keep the name stable.
 USER_TOKEN_EPOCH_PREFIX = "auth_epoch:"
+
+# Separator used inside the Redis refresh-token value: "<user_id>:<created_at_unix>"
+_RT_VALUE_SEP = ":"
 
 # ---------------------------------------------------------------------------
 # Timing-oracle mitigation (Security finding: HIGH — user enumeration)
@@ -89,7 +117,12 @@ class LocalAuthProvider(AuthProvider):
         user_id: str,
         roles: list[str],
     ) -> AuthTokens:
-        """Issue access + refresh token pair, store refresh token in Redis."""
+        """Issue access + refresh token pair, store refresh token in Redis.
+
+        The Redis value format is ``<user_id>:<created_at_unix>`` so that
+        ``refresh()`` can compare the session's creation time against the
+        per-user revocation epoch set by ``logout_all``.
+        """
         access = issue_access_token(
             user_id=user_id,
             roles=roles,
@@ -101,7 +134,10 @@ class LocalAuthProvider(AuthProvider):
         raw_refresh = generate_refresh_token()
         refresh_key = _RT_PREFIX + hash_refresh_token(raw_refresh)
         ttl_seconds = self._settings.jwt_refresh_expiry_days * 86400
-        await self._redis.setex(refresh_key, ttl_seconds, user_id)
+        created_at = int(datetime.now(tz=UTC).timestamp())
+        # Store "<user_id>:<created_at>" so refresh() can do epoch comparison.
+        redis_value = f"{user_id}{_RT_VALUE_SEP}{created_at}"
+        await self._redis.setex(refresh_key, ttl_seconds, redis_value)
         await self._track_session(user_id, refresh_key, ttl_seconds)
 
         log.debug("auth.tokens_issued", user_id=user_id, roles=roles)
@@ -135,6 +171,56 @@ class LocalAuthProvider(AuthProvider):
             await self._redis.srem(_SESSIONS_PREFIX + user_id, refresh_key)
         except Exception:  # noqa: BLE001 — stale members are harmless (they expire)
             log.warning("auth.session_index.untrack_failed", user_id=user_id)
+
+    @staticmethod
+    def _parse_rt_value(raw: str) -> tuple[str, int | None]:
+        """Parse a refresh-token Redis value into ``(user_id, created_at_unix)``.
+
+        Supports both the legacy format (plain ``user_id`` string — no separator)
+        and the current format (``user_id:created_at_unix``).  Legacy tokens that
+        lack a creation timestamp return ``None`` for ``created_at``, which causes
+        the epoch check to be skipped (fail-open for rollout compatibility).
+        """
+        sep_index = raw.find(_RT_VALUE_SEP)
+        if sep_index == -1:
+            # Legacy format — no creation timestamp.
+            return raw, None
+        user_id_part = raw[:sep_index]
+        ts_part = raw[sep_index + len(_RT_VALUE_SEP):]
+        try:
+            created_at = int(ts_part)
+        except ValueError:
+            # Malformed — treat as legacy.
+            return user_id_part, None
+        return user_id_part, created_at
+
+    async def _is_session_revoked_by_epoch(
+        self, user_id: str, created_at: int | None
+    ) -> bool:
+        """Return True if *created_at* predates the user's revocation epoch.
+
+        Fail-open on Redis errors: a Redis outage must not lock valid users out.
+        When ``created_at`` is ``None`` (legacy token without timestamp) the check
+        is skipped and returns False — the old access-token epoch check at
+        get_current_user time still applies.
+        """
+        if created_at is None:
+            return False
+        try:
+            epoch_raw: str | None = await self._redis.get(
+                USER_TOKEN_EPOCH_PREFIX + user_id
+            )
+        except Exception:  # noqa: BLE001 — fail-open: Redis errors must not block reads
+            log.warning("auth.refresh.epoch_read_failed", user_id=user_id)
+            return False
+        if epoch_raw is None:
+            return False
+        try:
+            epoch = int(epoch_raw)
+        except ValueError:
+            return False
+        # Revoked if the session was created at or before the logout_all epoch.
+        return created_at <= epoch
 
     async def _get_roles_for_user(self, session: AsyncSession, user_id: str) -> list[str]:
         result = await session.execute(
@@ -243,15 +329,41 @@ class LocalAuthProvider(AuthProvider):
         return await self._issue_tokens(user_id_str, roles)
 
     async def refresh(self, refresh_token: str) -> AuthTokens:
-        """Validate refresh token, rotate it, return new token pair."""
-        key = _RT_PREFIX + hash_refresh_token(refresh_token)
-        user_id_raw: str | None = await self._redis.get(key)
+        """Validate refresh token, rotate it, return new token pair.
 
-        if user_id_raw is None:
+        Race-safety against logout_all (TOCTOU fix):
+        After reading the stored value, we check the per-user epoch BEFORE
+        issuing new tokens.  Because logout_all now writes the epoch BEFORE
+        purging sessions, any token that existed prior to the logout_all call
+        will have a ``created_at`` timestamp that is <= the epoch, and is
+        therefore rejected here regardless of whether logout_all has finished
+        deleting it from Redis yet.
+        """
+        key = _RT_PREFIX + hash_refresh_token(refresh_token)
+        raw_value: str | None = await self._redis.get(key)
+
+        if raw_value is None:
             log.warning("auth.refresh.invalid_token")
             raise ValueError("invalid or expired refresh token")
 
-        user_id = str(user_id_raw)
+        user_id, created_at = self._parse_rt_value(str(raw_value))
+
+        # Epoch check: reject sessions that predate a logout_all call.
+        # This is the primary guard against the TOCTOU race: even if logout_all
+        # hasn't deleted this specific key yet (it set the epoch first), we refuse
+        # to mint new tokens for a pre-revocation session.
+        if await self._is_session_revoked_by_epoch(user_id, created_at):
+            log.warning(
+                "auth.refresh.rejected_by_epoch",
+                user_id=user_id,
+                session_created_at=created_at,
+            )
+            # Best-effort cleanup: remove the stale key that logout_all may not
+            # have deleted yet (e.g., it was added by a concurrent _issue_tokens
+            # call that completed after logout_all read smembers).
+            await self._redis.delete(key)
+            await self._untrack_session(user_id, key)
+            raise ValueError("invalid or expired refresh token")
 
         # Rotate: delete old token immediately + drop it from the session index
         # (the new token is re-added by _issue_tokens below).
@@ -287,7 +399,8 @@ class LocalAuthProvider(AuthProvider):
                     # Token already expired or revoked — treat as no-op.
                     log.info("auth.logout.token_not_found", user_id=current_user_id)
                     return
-                stored_uid = str(stored_raw)
+                # Parse new "<user_id>:<created_at>" format; ignore created_at here.
+                stored_uid, _ = self._parse_rt_value(str(stored_raw))
                 if stored_uid != current_user_id:
                     log.warning(
                         "auth.logout.cross_user_rejected",
@@ -306,6 +419,23 @@ class LocalAuthProvider(AuthProvider):
     async def logout_all(self, user_id: str) -> int:
         """Revoke every session for *user_id*: all refresh tokens + all access tokens.
 
+        ## Ordering guarantee (TOCTOU fix)
+
+        The epoch is written FIRST, before the session-set is read or any
+        refresh keys are deleted.  This ensures that a concurrent ``refresh()``
+        call — which reads the stored epoch after it validates the incoming
+        token — will always see the epoch and reject a pre-revocation session.
+
+        Execution order:
+          1. Write ``auth_epoch:<uid>`` = now  ← must be first
+          2. Read ``user_sessions:<uid>`` (smembers)
+          3. Delete every refresh-token key in the set
+          4. Delete the session-index key itself
+
+        If the epoch write fails (Redis error) we still attempt the session
+        purge — a partial revocation (refresh tokens gone, access tokens
+        still alive for up to 15 min) is better than no revocation.
+
         Refresh tokens: every key in the ``user_sessions:<uid>`` index is deleted
         (no Redis SCAN needed), then the index itself is dropped.
 
@@ -318,6 +448,19 @@ class LocalAuthProvider(AuthProvider):
         Redis errors are logged, never raised, so a logout-all attempt cannot
         itself 500.
         """
+        epoch = int(datetime.now(tz=UTC).timestamp())
+
+        # Step 1 — write epoch FIRST so concurrent refresh() calls see it.
+        try:
+            await self._redis.setex(
+                USER_TOKEN_EPOCH_PREFIX + user_id,
+                ACCESS_TOKEN_TTL_SECONDS + 60,  # outlive the access-token window
+                epoch,
+            )
+        except Exception:  # noqa: BLE001 — epoch bump is best-effort
+            log.warning("auth.logout_all.epoch_set_failed", user_id=user_id)
+
+        # Step 2-4 — purge all refresh tokens (best-effort).
         revoked = 0
         sess_key = _SESSIONS_PREFIX + user_id
         try:
@@ -331,16 +474,6 @@ class LocalAuthProvider(AuthProvider):
             await self._redis.delete(sess_key)
         except Exception:  # noqa: BLE001 — refresh purge is best-effort
             log.warning("auth.logout_all.refresh_purge_failed", user_id=user_id)
-
-        try:
-            epoch = int(datetime.now(tz=UTC).timestamp())
-            await self._redis.setex(
-                USER_TOKEN_EPOCH_PREFIX + user_id,
-                ACCESS_TOKEN_TTL_SECONDS + 60,  # outlive the access-token window
-                epoch,
-            )
-        except Exception:  # noqa: BLE001 — epoch bump is best-effort
-            log.warning("auth.logout_all.epoch_set_failed", user_id=user_id)
 
         log.info("auth.logout_all", user_id=user_id, sessions_revoked=revoked)
         return revoked

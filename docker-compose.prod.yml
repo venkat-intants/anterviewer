@@ -147,6 +147,30 @@ services:
       <<: *common-env
       FEEDBACK_BILLING_URL: http://feedback_billing:8003
     command: ["python", "-m", "app.worker.interview_worker", "start"]
+    healthcheck:
+      # The worker has no HTTP port. Instead it writes its current timestamp
+      # into /tmp/interview_worker_heartbeat every ~15 s. This check confirms
+      # the file exists and was written within the last 60 s. If the worker
+      # hangs or crashes (without writing the heartbeat) Docker will detect it
+      # as unhealthy after 3 retries (90 s) and restart the container.
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - |
+          import os, sys, time
+          hb = '/tmp/interview_worker_heartbeat'
+          try:
+              age = time.time() - os.stat(hb).st_mtime
+              sys.exit(0 if age < 60 else 1)
+          except FileNotFoundError:
+              sys.exit(1)
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Give the worker time to connect to LiveKit and write the first heartbeat
+      # before the health check starts firing.
+      start_period: 60s
     restart: unless-stopped
     # Graceful drain of LIVE interviews on redeploy/restart: must be >= the
     # worker's WORKER_DRAIN_TIMEOUT_SECONDS (default 120s) so livekit-agents can

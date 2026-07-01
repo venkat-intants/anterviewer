@@ -21,6 +21,8 @@ Service lifecycle (managed by the ``lifespan`` async context manager):
 from __future__ import annotations
 
 import logging
+import re
+import time
 from collections.abc import AsyncGenerator, MutableMapping
 from contextlib import asynccontextmanager
 from typing import Any
@@ -28,8 +30,14 @@ from typing import Any
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    Counter,
+    Histogram,
+    generate_latest,
+)
 from shared.auth.factory import get_auth_provider
 from shared.observability.sentry import init_sentry
 
@@ -93,6 +101,29 @@ structlog.configure(
 # Optional Sentry error tracking — no-op unless SENTRY_DSN is set (DPDP-safe scrub).
 init_sentry(
     settings.sentry_dsn, environment=settings.app_env, service_name=settings.service_name
+)
+
+# ---------------------------------------------------------------------------
+# Prometheus metrics — /metrics endpoint (CROSS-CUTTING fix 5a)
+#
+# We use prometheus_client directly (no instrumentator) to avoid introducing
+# a starlette version conflict.  Two core metrics are defined:
+#   - http_requests_total  (Counter, labelled method/path/status)
+#   - http_request_duration_seconds (Histogram, labelled method/path)
+# Additional service-specific metrics can be added here.
+# ---------------------------------------------------------------------------
+
+_http_requests_total = Counter(
+    "http_requests_total",
+    "Total HTTP requests received",
+    ["method", "path", "status_code"],
+)
+
+_http_request_duration_seconds = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request latency in seconds",
+    ["method", "path"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
 )
 
 log = structlog.get_logger(__name__)
@@ -192,6 +223,37 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+# ---------------------------------------------------------------------------
+# Prometheus scrape middleware — records request count + latency per route.
+# Placed BEFORE CORSMiddleware so it captures all requests including OPTIONS.
+# The /metrics endpoint itself is excluded from its own counters to avoid
+# inflating noise in the scrape-cycle data.
+# ---------------------------------------------------------------------------
+@app.middleware("http")
+async def _prometheus_middleware(request: Request, call_next: Any) -> Response:
+    path = request.url.path
+    method = request.method
+    start = time.perf_counter()
+    response: Response = await call_next(request)
+    duration = time.perf_counter() - start
+    # Normalise high-cardinality UUIDs in paths to avoid metric explosion.
+    # Simple heuristic: replace UUID-like path segments with {id}.
+    normalised = re.sub(
+        r"/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        "/{id}",
+        path,
+    )
+    if normalised != "/metrics":
+        _http_requests_total.labels(
+            method=method,
+            path=normalised,
+            status_code=str(response.status_code),
+        ).inc()
+        _http_request_duration_seconds.labels(method=method, path=normalised).observe(duration)
+    return response
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
@@ -236,3 +298,22 @@ async def root() -> dict[str, str]:
         "env": settings.app_env,
         "version": "0.1.0",
     }
+
+
+@app.get(
+    "/metrics",
+    include_in_schema=False,  # not part of the public API contract
+    summary="Prometheus metrics scrape endpoint",
+)
+async def metrics() -> Response:
+    """Expose Prometheus metrics for scraping by a collector (e.g. VictoriaMetrics,
+    Prometheus server, or Railway's built-in metrics plugin).
+
+    Returns text/plain in the standard Prometheus exposition format.
+    The endpoint is excluded from OpenAPI docs (include_in_schema=False) since
+    it is an ops endpoint, not part of the service's REST API.
+    """
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )

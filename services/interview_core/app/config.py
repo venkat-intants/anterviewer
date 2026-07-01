@@ -1,6 +1,5 @@
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 from shared.security import assert_strong_secrets
 
 
@@ -107,6 +106,19 @@ class Settings(BaseSettings):
     # (status update + transcript persist + scoring). MUST be <= the worker's
     # compose stop_grace_period, else Docker SIGKILLs before the drain finishes.
     worker_drain_timeout_seconds: int = 120
+
+    # Admission control: cap concurrent interview jobs to prevent OOM on the VM.
+    # The LiveKit load_threshold (0.0–1.0) gates when the worker stops accepting
+    # new jobs.  The max_concurrent_jobs ceiling is an additional application-level
+    # guard enforced inside request_fnc; 0 = no cap (not recommended for prod).
+    # Recommended for a 2-vCPU / 4 GB VM (Oracle Free Tier): 10–15 jobs.
+    worker_load_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
+    worker_max_concurrent_jobs: int = Field(default=15, ge=0)
+
+    # Heartbeat: path written by the asyncio liveness task in the worker process.
+    # The deploy cluster's Docker compose healthcheck reads this file's mtime.
+    worker_heartbeat_path: str = "/tmp/interview_worker_heartbeat"
+    worker_heartbeat_interval_seconds: int = Field(default=15, ge=5)
 
     # AVATAR_PROVIDER selects the real-time avatar renderer injected into the
     # LiveKit worker. Valid values:

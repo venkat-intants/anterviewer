@@ -12,6 +12,7 @@ to post-MVP role-based access control).
 
 from __future__ import annotations
 
+import asyncio
 import io
 import uuid
 from typing import Annotated
@@ -136,11 +137,22 @@ async def upload_jd_document(
             detail=f"Job {job_id} not found.",
         )
 
-    # --- 4. text extraction ---
-    # pypdf can raise on encrypted/corrupt PDFs — surface a clean 400 instead of
-    # an unhandled, CORS-less 500.
+    # --- 4. text extraction (off the event loop — CVE-2025-62707 + DoS guard) ---
+    # pypdf is synchronous and CPU-bound. Running it via asyncio.to_thread with a
+    # hard timeout prevents a crafted PDF from blocking the event loop.
+    # CVE-2025-62707 is fixed in pypdf>=6.1.1 (pinned in requirements.txt);
+    # the to_thread wrapper is defence-in-depth.
     try:
-        text_content = _extract_pdf_text(raw)
+        text_content = await _extract_pdf_text(raw)
+    except TimeoutError as exc:
+        log.warning(
+            "jd.upload.pdf_parse_timeout",
+            timeout_seconds=_PDF_PARSE_TIMEOUT_SECONDS,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The PDF took too long to process. Please try a simpler file.",
+        ) from exc
     except Exception as exc:
         log.warning("jd.upload.pdf_parse_failed", error_type=type(exc).__name__)
         raise HTTPException(
@@ -221,13 +233,16 @@ async def upload_jd_document(
 
 
 # ---------------------------------------------------------------------------
-# Internal helper
+# Internal helpers — PDF extraction (off event loop, CVE-2025-62707 guard)
 # ---------------------------------------------------------------------------
 
+_PDF_PARSE_TIMEOUT_SECONDS: float = 30.0  # crafted PDFs must not hang the event loop
 
-def _extract_pdf_text(raw: bytes) -> str:
-    """Extract plain text from a PDF byte payload using pypdf.
 
+def _extract_pdf_text_sync(raw: bytes) -> str:
+    """Extract plain text from a PDF byte payload using pypdf (synchronous).
+
+    Must be called via asyncio.to_thread.  CVE-2025-62707 fixed by pypdf>=6.1.1.
     Returns an empty string for scanned PDFs with no text layer — never raises.
     """
     reader = PdfReader(io.BytesIO(raw))
@@ -237,3 +252,15 @@ def _extract_pdf_text(raw: bytes) -> str:
         if extracted:
             pages.append(extracted)
     return "\n".join(pages)
+
+
+async def _extract_pdf_text(raw: bytes) -> str:
+    """Async wrapper: runs pypdf parsing in a thread with a hard timeout.
+
+    Raises asyncio.TimeoutError when the PDF takes longer than
+    _PDF_PARSE_TIMEOUT_SECONDS — callers surface a 400.
+    """
+    return await asyncio.wait_for(
+        asyncio.to_thread(_extract_pdf_text_sync, raw),
+        timeout=_PDF_PARSE_TIMEOUT_SECONDS,
+    )

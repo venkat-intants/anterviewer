@@ -1,12 +1,12 @@
 # Deploy on Oracle Cloud (Full Backend) — Simple Guide
 
-This puts the **whole backend** (5 Docker containers) on **one free Oracle Cloud
+This puts the **whole backend** (6 Docker containers) on **one free Oracle Cloud
 VM**. The **website** goes on **Vercel** (separate, free). The database stays on
 **Neon**. Coding exams run via **JDoodle** (a hosted API — no extra container).
 Coding exams, MCQ exams, and interviews all work.
 
 You will use 2 files that are already in this repo:
-- `docker-compose.prod.yml` — defines the 5 containers
+- `docker-compose.prod.yml` — defines the 6 containers (Caddy + 4 FastAPI services + interview worker)
 - `scripts/oracle-setup.sh` — sets everything up with one command
 
 ---
@@ -17,14 +17,18 @@ You will use 2 files that are already in this repo:
 - Your code on **GitHub** (the VM will download it).
 - Your `services/*/.env` files ready (they hold your keys — they are NOT on GitHub).
 - Your **Vercel** website link, e.g. `https://your-app.vercel.app`.
+- A **domain name** (or subdomain) whose DNS A-record points to this VM's public IP,
+  e.g. `api.yourdomain.com`. Caddy uses this domain to get a free TLS certificate from
+  Let's Encrypt. **Without a real domain the stack cannot serve HTTPS and will not start.**
+  Point the A-record before running the setup script and verify with `nslookup api.yourdomain.com`.
 - **JDoodle credentials** (free, for coding exams): `services/data_gateway/.env` must have
   `EXECUTION_PROVIDER=jdoodle`, `JDOODLE_CLIENT_ID=...`, `JDOODLE_CLIENT_SECRET=...`
   (get them free at https://www.jdoodle.com/).
 
 > **Good news — no ARM headaches.** Because coding exams use JDoodle (a hosted
-> API call), there is **no Piston and no privileged container** to run. The 5
-> backend services are plain Python and run perfectly on Oracle's free **ARM** VM
-> with no special setup.
+> API call), there is **no Piston and no privileged container** to run. All 6
+> backend containers are plain Python + Caddy and run perfectly on Oracle's free
+> **ARM** VM with no special setup.
 
 ---
 
@@ -94,31 +98,69 @@ scp -i your-key.key services/admin_ops/.env         ubuntu@<VM-IP>:~/anterviewer
 
 ```bash
 cd ~/anterviewer
-sudo PUBLIC_WEB_ORIGIN=https://your-app.vercel.app ./scripts/oracle-setup.sh
+sudo \
+  PUBLIC_WEB_ORIGIN=https://your-app.vercel.app \
+  PUBLIC_API_DOMAIN=api.yourdomain.com \
+  ./scripts/oracle-setup.sh
 ```
 
-This installs Docker, opens the firewall, builds the images (first build takes a
-few minutes), starts all 5 containers, and sets up the database tables.
+Both variables are **required**:
+- `PUBLIC_WEB_ORIGIN` — your Vercel frontend URL (used for CORS, cookie domain, email links).
+- `PUBLIC_API_DOMAIN` — the domain or subdomain whose DNS A-record points to this VM.
+  Caddy uses it to automatically obtain a Let's Encrypt TLS certificate via ACME.
+  The script will exit with a clear error if this is missing or if `deploy.env` already
+  exists but does not contain it.
+
+The script installs Docker, opens the firewall (ports 80 + 443 only), builds the 6 images
+(first build takes several minutes), starts all containers, and runs the database migrations.
 
 ## Step 6 — Check it's alive
 
+First check that all containers are healthy (give them ~60 s to start):
+
 ```bash
-curl http://localhost:8002/health/live     # should print {"status":"alive"}
+docker compose --env-file deploy.env -f docker-compose.prod.yml ps
 ```
-Do the same for 8001, 8003, 8004. To watch logs: `docker compose --env-file deploy.env -f docker-compose.prod.yml logs -f`.
+
+All services should show `healthy`. Then verify the public TLS endpoint:
+
+```bash
+curl https://api.yourdomain.com/health     # should print {"status":"alive"}
+```
+
+This goes through Caddy and TLS — exactly what the browser (and Vercel) will use.
+If you want to check internal service health directly (bypassing Caddy), use `exec`:
+
+```bash
+C="docker compose --env-file deploy.env -f docker-compose.prod.yml"
+$C exec -T data_gateway     python -c "import urllib.request; urllib.request.urlopen('http://localhost:8002/health/live', timeout=5)"
+$C exec -T interview_core   python -c "import urllib.request; urllib.request.urlopen('http://localhost:8001/health/live', timeout=5)"
+$C exec -T feedback_billing python -c "import urllib.request; urllib.request.urlopen('http://localhost:8003/health/live', timeout=5)"
+$C exec -T admin_ops        python -c "import urllib.request; urllib.request.urlopen('http://localhost:8004/health/live', timeout=5)"
+```
+
+Do NOT try to `curl http://VM-IP:8002` from outside — those ports are closed by design.
+To watch logs: `docker compose --env-file deploy.env -f docker-compose.prod.yml logs -f`.
 
 ## Step 7 — Connect the website (Vercel)
 
-1. In `web/vercel.json`, point the 4 rewrites at your VM's IP:
-   - gateway → `http://<VM-IP>:8002`
-   - interview → `http://<VM-IP>:8001`
-   - feedback → `http://<VM-IP>:8003`
-   - admin → `http://<VM-IP>:8004`
-2. Set the Vercel env vars (`VITE_API_BASE_URL=/api/gateway`, etc. — see
-   `docs/DEPLOY-SIMPLE.md` Section 8) and **redeploy** the frontend.
+Vercel rewrites must point at `https://<PUBLIC_API_DOMAIN>` (your Caddy TLS
+endpoint) — not at `http://VM-IP:800x`. The raw service ports are closed;
+the only public entry point is Caddy on 443.
 
-The browser only talks to Vercel (HTTPS); Vercel forwards to your VM. So the VM
-can stay plain HTTP — no certificate setup needed.
+1. In `web/vercel.json`, point all rewrites at your domain:
+   - gateway routes  → `https://api.yourdomain.com/api/v1/auth/`,
+     `https://api.yourdomain.com/api/v1/users/`, etc.
+   - interview routes → `https://api.yourdomain.com/api/v1/interview/`, etc.
+   - feedback routes  → `https://api.yourdomain.com/api/v1/feedback/`, etc.
+   - ops/analytics    → `https://api.yourdomain.com/api/v1/ops/`, etc.
+2. Set the Vercel env var: `VITE_API_BASE_URL=https://api.yourdomain.com`
+   (see `docs/DEPLOY-SIMPLE.md` Section 8 for the full list).
+3. **Redeploy** the Vercel frontend.
+
+The browser talks to Vercel (HTTPS); Vercel rewrites to your domain (also HTTPS,
+via Caddy). All TLS is end-to-end. The VM's raw service ports (8001-8004) remain
+closed to the internet.
 
 ## Step 8 — Make yourself admin, then test
 
@@ -146,12 +188,17 @@ $C up -d --build      # rebuild + start (after a git pull)
 
 | Problem | Cause | Fix |
 |---|---|---|
-| Can't reach `http://VM-IP:8002` from outside | Ports not open in OCI Console | Step 2 (Security List ingress) |
-| Health works locally but not from browser | Same — OCI ingress missing | Step 2 |
+| `curl https://api.yourdomain.com/health` returns TLS error / connection refused | Caddy not yet up or domain not yet resolving to this VM | Check DNS: `nslookup api.yourdomain.com`; check Caddy logs: `$C logs caddy` |
+| Caddy log shows "no DNS records" or "ACME challenge failed" | DNS A-record for `PUBLIC_API_DOMAIN` not set, or not yet propagated | Add/wait for the A-record to point to this VM's public IP, then `$C restart caddy` |
+| `curl https://api.yourdomain.com/health` returns 502 | Upstream service (data_gateway) is down | `$C ps` to see unhealthy containers; `$C logs data_gateway` |
+| Setup script exits with "PUBLIC_API_DOMAIN is not set" | Variable missing on CLI and not in `deploy.env` | Add the DNS A-record first, then re-run with both variables |
+| Vercel rewrites return 404 or connection refused | Rewrites still point at `http://VM-IP:800x` | Update `vercel.json` to use `https://api.yourdomain.com` and redeploy |
+| Health works inside VM but not from browser | Rewrites using old HTTP/IP URLs | Same fix as above |
 | Coding exam fails / shows 0 | JDoodle creds missing/wrong, or 200/day limit hit | Check `JDOODLE_*` in `data_gateway/.env`; check daily credits |
-| Exam/interview invite emails link to localhost | `PUBLIC_WEB_ORIGIN` wrong | Fix `deploy.env`, `up -d` again |
+| Exam/interview invite emails link to localhost | `PUBLIC_WEB_ORIGIN` wrong in `deploy.env` | Fix `deploy.env`, then `$C up -d` again |
 | A container keeps restarting | Missing setting in its `.env` | `$C logs <svc>` to see what's missing |
-| "CORS" error in browser | Vercel link not allowed | It's set from `PUBLIC_WEB_ORIGIN` — confirm it matches your real Vercel URL |
+| `interview_worker` shows `unhealthy` | Worker not writing heartbeat — crashed or stalled | `$C logs interview_worker`; check LiveKit env vars in `services/interview_core/.env` |
+| "CORS" error in browser | Vercel link not in allowed origins | `PUBLIC_WEB_ORIGIN` in `deploy.env` must match your exact Vercel URL; `$C up -d` after fixing |
 
 ## Before sharing publicly
 

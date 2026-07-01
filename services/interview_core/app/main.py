@@ -5,9 +5,9 @@ from collections.abc import MutableMapping
 from typing import Any
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
-
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from shared.observability.sentry import init_sentry
 
 from app.config import settings
@@ -91,6 +91,24 @@ async def root() -> dict[str, str]:
         "env": settings.app_env,
         "version": "0.1.0",
     }
+
+
+@app.get(
+    "/metrics",
+    summary="Prometheus metrics",
+    description=(
+        "Exposes default process metrics (CPU, memory, open FDs, GC) "
+        "in Prometheus text format. Scraped by the deploy-cluster's "
+        "Prometheus instance every 15 s."
+    ),
+    response_class=Response,
+    tags=["observability"],
+    include_in_schema=True,
+)
+async def metrics() -> Response:
+    """Return prometheus_client default metrics in text exposition format."""
+    data = generate_latest()
+    return Response(content=data, media_type=CONTENT_TYPE_LATEST)
 
 
 @app.on_event("startup")

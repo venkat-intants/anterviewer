@@ -851,12 +851,20 @@ class ChangePasswordBody(BaseModel):
 async def change_password(
     body: ChangePasswordBody,
     current_user: CurrentUserDep,
+    auth: AuthProviderDep,
     db: DbSessionDep,
 ) -> OkResponse:
     """Set the authenticated user's password and clear must_change_password.
 
     Used by HR managers (created with a bootstrap password) to set a real one on
     first login, but available to any authenticated user.
+
+    SECURITY: after a successful password change, ALL other sessions for this user
+    are revoked (auth.logout_all). This closes the audit finding
+    'change_password does not revoke sessions': a stolen credential or hijacked
+    session cannot remain valid after the owner changes their password.
+    The revocation is best-effort — a Redis hiccup is logged but does NOT roll back
+    the password change (the new password is already the safer state).
     """
     rounds: int = settings.password_hash_rounds
     new_hash = await asyncio.to_thread(
@@ -873,6 +881,26 @@ async def change_password(
     )
     await db.commit()
     log.info("auth.password_changed", user_id=current_user.user_id)
+
+    # Revoke all OTHER sessions for this user (best-effort — logged on failure).
+    # logout_all bumps the auth epoch so outstanding access tokens also stop working.
+    # This is the core fix for the audit finding: changing your password must
+    # invalidate sessions an attacker may hold, without failing the response.
+    try:
+        revoked = await auth.logout_all(current_user.user_id)
+        log.info(
+            "auth.password_changed.sessions_revoked",
+            user_id=current_user.user_id,
+            sessions_revoked=revoked,
+        )
+    except Exception as exc:  # noqa: BLE001 — session revocation is best-effort
+        log.warning(
+            "auth.password_changed.revoke_failed",
+            user_id=current_user.user_id,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+
     return OkResponse()
 
 

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid as _uuid_mod
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -39,7 +40,7 @@ from typing import Any
 import httpx
 from jose import jwt as jose_jwt
 from livekit import api as lk_api
-from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli
+from livekit.agents import Agent, AgentSession, JobContext, JobProcess, WorkerOptions, cli
 from livekit.agents.llm.chat_context import ChatMessage as _ChatMessage
 from livekit.agents.voice.events import ConversationItemAddedEvent
 from livekit.plugins import openai, sarvam, silero, simli
@@ -60,6 +61,28 @@ from app.avatars import resolve_avatar
 from app.config import settings
 
 logger = logging.getLogger("interview-worker")
+
+# ---------------------------------------------------------------------------
+# Admission control — thread-safe counter of currently running interviews.
+# ---------------------------------------------------------------------------
+# We track active jobs ourselves (in addition to load_threshold) so request_fnc
+# can reject jobs over the ceiling WITHOUT waiting for the OS load average to
+# catch up (the default _DefaultLoadCalc is CPU-based; on our Oracle Free Tier
+# VM the CPU can look idle even as memory fills with VAD models).
+_active_jobs: int = 0
+
+
+def _active_jobs_increment() -> None:
+    """Increment the active-jobs counter (called at entrypoint start)."""
+    global _active_jobs  # noqa: PLW0603 — module-level mutable counter is intentional
+    _active_jobs += 1
+
+
+def _active_jobs_decrement() -> None:
+    """Decrement the active-jobs counter (called at job shutdown hook)."""
+    global _active_jobs  # noqa: PLW0603
+    _active_jobs = max(0, _active_jobs - 1)
+
 
 # ---------------------------------------------------------------------------
 # Module constants — tune here, not in config (scope is only this worker).
@@ -783,7 +806,25 @@ async def entrypoint(ctx: JobContext) -> None:
     and session.start(), so elapsed time includes cold-start setup time (~1-3s).
     This is a known minor overcount; re-architecting it would require a separate
     "first candidate audio" timestamp which adds complexity for negligible gain.
+
+    ADMISSION CONTROL: increments _active_jobs on entry; decrements via the
+    framework's add_shutdown_callback so the counter is always consistent.
+
+    TEARDOWN RELIABILITY: _abrupt_close is wrapped in asyncio.shield() and
+    tracked so the framework's shutdown hook can await it.  This prevents the
+    task from being GC'd when the candidate closes their browser (the most
+    common abrupt exit), which previously left sessions stuck 'in_progress'
+    with no scorecard.
     """
+    _active_jobs_increment()
+    # Register the decrement immediately so it fires on any exit path (normal
+    # close, abrupt disconnect, SIGTERM drain, crash).  add_shutdown_callback
+    # guarantees this runs even when the entrypoint raises.
+    async def _decrement_job_counter() -> None:
+        _active_jobs_decrement()
+
+    ctx.add_shutdown_callback(_decrement_job_counter)
+
     await ctx.connect()
 
     # DB lookup is best-effort and MUST NEVER crash the avatar path.
@@ -827,10 +868,21 @@ async def entrypoint(ctx: JobContext) -> None:
     session_started_at: datetime = datetime.now(tz=UTC)
 
     # ------------------------------------------------------------------
-    # Build the AgentSession
+    # Build the AgentSession — use the prewarmed VAD from prewarm_fnc if
+    # available; fall back to cold-loading in case prewarm failed.
     # ------------------------------------------------------------------
+    _prewarmed_vad = getattr(ctx.proc, "userdata", {}).get("vad") if ctx.proc else None
+    vad_instance = _prewarmed_vad if _prewarmed_vad is not None else silero.VAD.load()
+    if _prewarmed_vad is not None:
+        logger.info("interview-worker: using prewarmed silero VAD room=%s", session_id)
+    else:
+        logger.info(
+            "interview-worker: cold-loading silero VAD (prewarm unavailable) room=%s",
+            session_id,
+        )
+
     session: AgentSession[None] = AgentSession(
-        vad=silero.VAD.load(),
+        vad=vad_instance,
         stt=sarvam.STT(
             language=vendor_lang,
             model=settings.sarvam_stt_model,
@@ -1066,8 +1118,20 @@ async def entrypoint(ctx: JobContext) -> None:
     # closed mid-session). The state._close_triggered guard prevents double-execution.
     # ------------------------------------------------------------------
 
+    # Holder for the shielded teardown task created by _on_session_close.
+    # The framework shutdown hook awaits it so teardown always completes.
+    _teardown_task_holder: dict[str, asyncio.Task[None] | None] = {"task": None}
+
     async def _abrupt_close() -> None:
-        """DB update + conditional scoring for unexpected disconnects."""
+        """DB update + conditional scoring for unexpected disconnects.
+
+        Wrapped in asyncio.shield() by the caller (_on_session_close) so the
+        event loop cannot GC this coroutine when the candidate closes their
+        browser before it finishes — the most common abrupt exit path.
+
+        The framework's add_shutdown_callback awaits the shielded task to ensure
+        turns are persisted and scoring fires before the job process exits.
+        """
         if state.close_triggered:
             return
         state.mark_close_triggered()
@@ -1082,9 +1146,9 @@ async def entrypoint(ctx: JobContext) -> None:
         # Persist the transcript before scoring (audit + admin view + resilience).
         await _persist_turns(session_id, state.transcript)
         if state.should_score():
-            # Await (not fire-and-forget): the candidate already disconnected, so
-            # this job is tearing down — a background task would be cancelled
-            # before the scorecard is written.
+            # Await directly: the candidate already disconnected and this job is
+            # tearing down — a bare background task would be cancelled before the
+            # scorecard is written.  asyncio.shield() above keeps us alive.
             await _post_score(
                 session_id=session_id,
                 job_title=job_title,
@@ -1095,16 +1159,49 @@ async def entrypoint(ctx: JobContext) -> None:
             )
 
     def _on_session_close(_event: Any) -> None:
-        """Handle session close: cancel background tasks; run DB+scoring if not done."""
+        """Handle session close: cancel background tasks; run DB+scoring if not done.
+
+        The teardown coroutine is launched via asyncio.shield() so it survives
+        event-loop cancellation triggered by the LiveKit framework when the room
+        is torn down.  The task reference is stored in _teardown_task_holder so
+        the framework's shutdown callback can await it before exiting the process.
+        """
         cap_task.cancel()
         consent_task = consent_task_holder["task"]
         if consent_task is not None:
             consent_task.cancel()
         if not state.close_triggered:
-            # Candidate disconnected abruptly — schedule teardown as a task.
-            asyncio.create_task(_abrupt_close())
+            # Candidate disconnected abruptly — schedule teardown under shield
+            # so it cannot be GC'd before it writes to the DB.
+            shielded = asyncio.shield(asyncio.ensure_future(_abrupt_close()))
+            _teardown_task_holder["task"] = shielded  # type: ignore[assignment]
+            logger.info(
+                "interview-worker.abrupt_close_scheduled room=%s", session_id
+            )
 
     session.on("close", _on_session_close)
+
+    # Register a framework-level shutdown hook that awaits the teardown task.
+    # This hook fires when the job process is shutting down (SIGTERM / drain
+    # timeout) and ensures _abrupt_close always completes even if the LiveKit
+    # framework cancels the entrypoint coroutine before the shielded task
+    # finishes.  The hook is a no-op when close was already handled by _on_close
+    # (state.close_triggered is True) or when no abrupt close was needed.
+    async def _await_teardown_on_shutdown() -> None:
+        teardown_task = _teardown_task_holder["task"]
+        if teardown_task is not None and not teardown_task.done():
+            logger.info(
+                "interview-worker.shutdown_hook_awaiting_teardown room=%s", session_id
+            )
+            try:
+                await asyncio.wait_for(teardown_task, timeout=30.0)
+            except (TimeoutError, asyncio.CancelledError, Exception) as exc:
+                logger.warning(
+                    "interview-worker.shutdown_hook_teardown_incomplete room=%s err=%s",
+                    session_id, type(exc).__name__,
+                )
+
+    ctx.add_shutdown_callback(_await_teardown_on_shutdown)
 
     # ------------------------------------------------------------------
     # Avatar FIRST, then the agent session (proven ordering).
@@ -1170,20 +1267,157 @@ async def entrypoint(ctx: JobContext) -> None:
     # Teardown is handled via the "close" event listener registered above.
 
 
+# ---------------------------------------------------------------------------
+# Prewarm — load the Silero VAD model once per worker process.
+# ---------------------------------------------------------------------------
+
+
+def _prewarm(proc: JobProcess) -> None:
+    """Pre-load the Silero VAD ONNX model into the worker process's userdata.
+
+    Called by the LiveKit framework once when the worker process starts, before
+    any job is dispatched.  Loading the model here (blocking, ~1-2 s) instead of
+    inside entrypoint() eliminates per-interview cold-start latency.
+
+    Usage in entrypoint():
+        vad = ctx.proc.userdata.get("vad") or silero.VAD.load()
+    """
+    logger.info("interview-worker.prewarm: loading silero VAD model")
+    try:
+        proc.userdata["vad"] = silero.VAD.load()
+        logger.info("interview-worker.prewarm: silero VAD ready")
+    except Exception as exc:  # noqa: BLE001
+        # Prewarm failure is non-fatal — entrypoint() falls back to loading in-place.
+        logger.warning(
+            "interview-worker.prewarm: silero VAD load failed err=%s — "
+            "will cold-load per job",
+            type(exc).__name__,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Worker liveness heartbeat — written every N seconds from the asyncio loop.
+# ---------------------------------------------------------------------------
+
+
+async def _run_heartbeat() -> None:
+    """Write the current UTC timestamp to the heartbeat file every N seconds.
+
+    The deploy cluster (docker-compose healthcheck) reads this file's mtime to
+    decide if the worker event loop has stalled:
+
+        healthcheck:
+          test: ["CMD", "find", "/tmp/interview_worker_heartbeat",
+                 "-mmin", "-1"]
+
+    This coroutine runs for the lifetime of the worker process.  It is started
+    by ``run()`` before ``cli.run_app()`` via the event loop.
+    """
+    path = settings.worker_heartbeat_path
+    interval = settings.worker_heartbeat_interval_seconds
+    logger.info(
+        "interview-worker.heartbeat: starting path=%s interval=%ds", path, interval
+    )
+    while True:
+        try:
+            ts = datetime.now(tz=UTC).isoformat()
+            # Use asyncio.to_thread so the write never blocks the event loop.
+            await asyncio.to_thread(_write_heartbeat, path, ts)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "interview-worker.heartbeat: write failed path=%s err=%s",
+                path, type(exc).__name__,
+            )
+        await asyncio.sleep(interval)
+
+
+def _write_heartbeat(path: str, timestamp: str) -> None:
+    """Write ``timestamp`` to ``path`` atomically (best-effort). Sync helper."""
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            fh.write(timestamp)
+        os.replace(tmp_path, path)
+    except OSError:
+        # /tmp unavailable or permission error — silently swallow; the healthcheck
+        # will catch the stale/missing file independently.
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Admission-control request_fnc — reject jobs over the concurrency ceiling.
+# ---------------------------------------------------------------------------
+
+
+async def _request_fnc(job_request: Any) -> None:
+    """Gate incoming job requests against the max-concurrent-jobs ceiling.
+
+    Called by the LiveKit framework BEFORE dispatching the job to entrypoint().
+    Rejecting here is clean: the framework re-queues the job to another worker
+    (if any) or notifies the room with a 'worker_unavailable' event.
+
+    The ceiling is additive to load_threshold: if the VM CPU/memory is under
+    load_threshold but we're already at max jobs (e.g. due to non-CPU load like
+    network I/O for Sarvam), we still reject.
+
+    ``settings.worker_max_concurrent_jobs == 0`` disables the cap (not
+    recommended for production; useful for single-job dev testing).
+    """
+    cap = settings.worker_max_concurrent_jobs
+    if cap > 0 and _active_jobs >= cap:
+        logger.warning(
+            "interview-worker.admission_rejected active=%d cap=%d — job over ceiling",
+            _active_jobs, cap,
+        )
+        await job_request.reject()
+        return
+    await job_request.accept(entrypoint)
+
+
 def run() -> None:
-    # NO agent_name -> AUTOMATIC dispatch: the worker joins every room that is
-    # created. Each interview is its own room (named after session_id), so this
-    # is the correct + proven model. (Explicit agent_name dispatch did not
-    # connect reliably in testing 2026-05-31.)
-    #
-    # drain_timeout (graceful shutdown): on SIGTERM the worker deregisters (takes
-    # no new jobs) and waits up to this long for active interviews to finish
-    # before terminating them — so a redeploy/restart doesn't cut a live interview
-    # mid-turn. Keep this <= the interview_worker stop_grace_period in
-    # docker-compose.prod.yml so Docker doesn't SIGKILL mid-drain.
+    """Start the LiveKit worker with prewarm, heartbeat, and admission control.
+
+    NO agent_name -> AUTOMATIC dispatch: the worker joins every room created.
+    Each interview is its own room (named after session_id), so this is the
+    correct + proven model. (Explicit agent_name dispatch did not connect
+    reliably in testing 2026-05-31.)
+
+    drain_timeout (graceful shutdown): on SIGTERM the worker deregisters (takes
+    no new jobs) and waits up to this long for active interviews to finish
+    before terminating them. Keep this <= the worker's compose stop_grace_period
+    so Docker doesn't SIGKILL mid-drain.
+
+    Heartbeat: an asyncio task writes the current UTC time to the heartbeat file
+    every worker_heartbeat_interval_seconds so the Docker healthcheck can
+    verify the event loop is alive.
+    """
+    import threading
+
+    def _start_heartbeat_in_thread() -> None:
+        """Run the heartbeat coroutine in a dedicated event loop on a daemon thread.
+
+        cli.run_app() blocks the main thread and owns its own event loop, so
+        we spin the heartbeat in a separate daemon thread with its own loop.
+        The thread is daemon so it exits automatically when the process exits.
+        """
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_run_heartbeat())
+        finally:
+            loop.close()
+
+    heartbeat_thread = threading.Thread(
+        target=_start_heartbeat_in_thread, daemon=True, name="worker-heartbeat"
+    )
+    heartbeat_thread.start()
+
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
+            request_fnc=_request_fnc,
+            prewarm_fnc=_prewarm,
+            load_threshold=settings.worker_load_threshold,
             ws_url=settings.livekit_url,
             api_key=settings.livekit_api_key,
             api_secret=settings.livekit_api_secret,
