@@ -111,9 +111,31 @@ class Settings(BaseSettings):
     # The LiveKit load_threshold (0.0–1.0) gates when the worker stops accepting
     # new jobs.  The max_concurrent_jobs ceiling is an additional application-level
     # guard enforced inside request_fnc; 0 = no cap (not recommended for prod).
-    # Recommended for a 2-vCPU / 4 GB VM (Oracle Free Tier): 10–15 jobs.
+    #
+    # Sizing rationale for a 2-vCPU / 2 GB VM (Oracle Cloud Free Tier):
+    #   Each interview job holds: one Silero VAD ONNX thread, one Sarvam STT
+    #   WebSocket stream, one Sarvam TTS HTTP stream, one LLM HTTP connection,
+    #   and one LiveKit WebRTC connection (≈ 80-150 MB RSS per job at p95).
+    #   At p95 < 2 s latency, 2 vCPU safely handles 3–4 concurrent jobs.
+    #   Beyond that, scheduling contention pushes turn latency over the SLA and
+    #   the combined RSS of 5+ jobs risks OOM-killing the entire worker process,
+    #   dropping ALL live interviews simultaneously.
+    #   Default is deliberately conservative; operators can raise via env var.
     worker_load_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
-    worker_max_concurrent_jobs: int = Field(default=15, ge=0)
+    worker_max_concurrent_jobs: int = Field(default=4, ge=0)
+
+    # Per-job soft memory ceiling in MB.  When non-zero, request_fnc checks
+    # whether accepting one more job would push estimated RSS above the VM's
+    # hard cap (container_memory_limit_mb).  Set to 0 to disable the check.
+    # Recommended: ~150 MB per job for the Sarvam + LLM + LiveKit stack.
+    # Example for a 2 GB VM with 20% OS overhead: 150 MB → admits up to ~10
+    # jobs in theory, but worker_max_concurrent_jobs is the binding constraint.
+    job_memory_limit_mb: int = Field(default=150, ge=0)
+
+    # Hard memory cap of the container/VM in MB.  Used with job_memory_limit_mb
+    # to estimate whether a new job would OOM.  Set to the actual container
+    # memory limit (e.g. 1800 for a 2 GB VM leaving headroom for OS + models).
+    container_memory_limit_mb: int = Field(default=1800, ge=0)
 
     # Heartbeat: path written by the asyncio liveness task in the worker process.
     # The deploy cluster's Docker compose healthcheck reads this file's mtime.

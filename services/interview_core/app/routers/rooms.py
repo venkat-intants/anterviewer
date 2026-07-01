@@ -38,6 +38,8 @@ from app.dependencies import CurrentUserDep
 from app.graph.state import Language as InterviewLanguage
 from app.models import Job
 from app.models import Session as InterviewSession
+from app.redis_client import get_redis
+from app.worker_capacity import read_active_jobs
 
 log = structlog.get_logger(__name__)
 
@@ -115,7 +117,35 @@ async def create_room_token(
             detail="You do not own this interview session.",
         )
 
-    # 3. DPDP consent must be present (server-side; can't bypass via curl).
+    # 3. Worker capacity check — BEFORE issuing a token.
+    #    The worker publishes its active-job count to Redis on every admission
+    #    change.  We read it here so a full worker returns HTTP 503 with a clear
+    #    human-readable message BEFORE the candidate enters a dead LiveKit room.
+    #    Fails open: if Redis is unavailable we issue the token and let the
+    #    worker's in-process gate handle overload (silent dead-room risk is
+    #    preferable to blocking ALL token issuance on a Redis outage).
+    cap = settings.worker_max_concurrent_jobs
+    if cap > 0:
+        try:
+            active = await read_active_jobs(get_redis())
+        except Exception:  # noqa: BLE001
+            active = None
+        if active is not None and active >= cap:
+            log.warning(
+                "rooms.token.worker_full",
+                session_id=str(session_id),
+                active_jobs=active,
+                cap=cap,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "All interview slots are currently occupied. "
+                    "Please wait a few minutes and try again."
+                ),
+            )
+
+    # 4. DPDP consent must be present (server-side; can't bypass via curl).
     if not await has_active_consent(db, user_id_str):
         log.info("rooms.token.consent_required", session_id=str(session_id))
         raise HTTPException(
@@ -126,7 +156,7 @@ async def create_room_token(
             ),
         )
 
-    # 4. Dispatch the interview WORKER into this room with session metadata.
+    # 5. Dispatch the interview WORKER into this room with session metadata.
     #    The worker (app/worker/interview_worker.py) must be running separately;
     #    it drives the Simli avatar + Sarvam voice. Idempotent per room.
     room_name = str(session_id)
@@ -144,7 +174,7 @@ async def create_room_token(
     )
     log.info("rooms.token.agent_dispatch", session_id=str(session_id), dispatched=dispatched)
 
-    # 5. Mint the LiveKit join token, scoped to this one room.
+    # 6. Mint the LiveKit join token, scoped to this one room.
     token = (
         api.AccessToken(settings.livekit_api_key, settings.livekit_api_secret)
         .with_identity(f"candidate-{user_id_str}")

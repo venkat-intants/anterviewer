@@ -57,7 +57,11 @@ services:
         condition: service_healthy
     restart: unless-stopped
     mem_limit: 256m
-    cpus: "0.5"
+    # CPU reservations across all 6 containers are budgeted to stay at or below
+    # 4.0 OCPU total (the Oracle Free Tier VM ceiling):
+    #   caddy 0.25 + data_gateway 0.75 + interview_core 0.75
+    #   + interview_worker 1.5 + feedback_billing 0.5 + admin_ops 0.25 = 4.00
+    cpus: "0.25"
     networks:
       - intants
 
@@ -97,7 +101,7 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     mem_limit: 1g
-    cpus: "1.0"
+    cpus: "0.75"
     networks:
       - intants
 
@@ -127,7 +131,7 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     mem_limit: 1536m
-    cpus: "1.5"
+    cpus: "0.75"
     networks:
       - intants
 
@@ -146,6 +150,29 @@ services:
     environment:
       <<: *common-env
       FEEDBACK_BILLING_URL: http://feedback_billing:8003
+      # -----------------------------------------------------------------------
+      # Worker sizing — tuned for a single 4-OCPU / 24 GB Oracle Free Tier VM
+      # shared across 6 containers.
+      #
+      # WORKER_MAX_CONCURRENT_JOBS: each live interview holds the prewarmed
+      # Silero VAD model + one Sarvam STT stream + one Sarvam TTS stream + an
+      # LLM call (Groq). Measured peak per-job overhead is ~350–450 MB. With
+      # 4 GB allocated to this container and 6 services sharing the 24 GB host,
+      # 5 concurrent jobs keeps peak RSS safely below mem_limit and leaves
+      # headroom for GC spikes. Raise to 7–8 if the VM is upgraded to 32 GB.
+      #
+      # WORKER_DRAIN_TIMEOUT_SECONDS: on SIGTERM the worker stops accepting new
+      # jobs and waits up to 120 s for in-flight interviews to finish naturally
+      # (say goodbye → persist transcript → call scorer). The compose
+      # stop_grace_period below MUST be >= drain_timeout + scoring overhead
+      # (see stop_grace_period comment).
+      #
+      # JOB_MEMORY_LIMIT_MB: informational annotation used by monitoring/alerts
+      # to set the per-job memory budget. Docker enforces the container-level
+      # mem_limit; this variable is not read by the worker binary itself.
+      WORKER_MAX_CONCURRENT_JOBS: "5"
+      WORKER_DRAIN_TIMEOUT_SECONDS: "120"
+      JOB_MEMORY_LIMIT_MB: "400"
     command: ["python", "-m", "app.worker.interview_worker", "start"]
     healthcheck:
       # The worker has no HTTP port. Instead it writes its current timestamp
@@ -172,13 +199,34 @@ services:
       # before the health check starts firing.
       start_period: 60s
     restart: unless-stopped
-    # Graceful drain of LIVE interviews on redeploy/restart: must be >= the
-    # worker's WORKER_DRAIN_TIMEOUT_SECONDS (default 120s) so livekit-agents can
-    # finish/close active interviews (running their DB + scoring hooks) before
-    # Docker SIGKILLs the container. Bumped well above the 10s default for this.
-    stop_grace_period: 150s
-    mem_limit: 2g
-    cpus: "2.0"
+    # -----------------------------------------------------------------------
+    # Graceful drain margin — stop_grace_period must exceed drain_timeout by
+    # enough for in-flight scoring to complete after the drain window closes.
+    #
+    # Timeline on SIGTERM:
+    #   0 s   — Docker sends SIGTERM; livekit-agents starts drain (no new jobs)
+    #   0–120 s — active interviews finish naturally (drain_timeout = 120 s);
+    #             each close path: goodbye TTS ~5 s + DB write ~1 s + scoring
+    #             HTTP call up to 47 s (15 s timeout × 1 retry + 2 s sleep +
+    #             overhead) = ~53 s worst-case close overhead per job
+    #   120 s — drain window closes; agent sends SIGTERM to worker process;
+    #           scoring calls that started before 120 s are still in-flight
+    #  ~170 s — worst-case final scoring call completes
+    #   210 s — stop_grace_period fires; Docker sends SIGKILL
+    #
+    # Margin: 210 s − 120 s = 90 s comfortably covers worst-case scoring
+    # overhead and leaves a 40 s buffer for DB commit retries. Raises the
+    # previous 150 s value (only 30 s above drain) which risked SIGKILL
+    # mid-scoring on a busy VM.
+    stop_grace_period: 210s
+    # 4 GB for the worker: base Silero VAD model ~150 MB + 5 concurrent jobs
+    # × ~450 MB peak = ~2.4 GB + buffer. Keeps the worker within its share of
+    # the 24 GB host without starving the other five containers.
+    mem_limit: 4g
+    # 1.5 vCPU: the worker is I/O-bound (WebRTC relay, Sarvam HTTP, Groq HTTP)
+    # not CPU-bound. 1.5 provides burst headroom for VAD inference without
+    # starving the API services. Total across all 6 containers = 4.00 OCPU.
+    cpus: "1.5"
     networks:
       - intants
 
@@ -207,7 +255,7 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     mem_limit: 1g
-    cpus: "1.0"
+    cpus: "0.5"
     networks:
       - intants
 
@@ -239,7 +287,7 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     mem_limit: 512m
-    cpus: "0.5"
+    cpus: "0.25"
     networks:
       - intants
 

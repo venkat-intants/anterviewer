@@ -389,6 +389,11 @@ const en = {
     // Consent modal
     // IMPORTANT: HI/TE translations below must receive native-speaker and
     // legal/compliance review before any government-bid or production launch.
+    //
+    // DPDP cross-border disclosure (audit finding, 2026-07-01):
+    // The dataFlowNote key must be surfaced in the consent UI so candidates
+    // are informed that data is currently processed outside India. Do NOT claim
+    // India residency until Tier-2 (AWS Mumbai) migration is complete.
     consent: {
       title: 'Data & Privacy Consent',
       intro: 'To run your interview, this platform will:',
@@ -404,7 +409,12 @@ const en = {
       rightsLabel: 'Your rights under DPDP Act 2023:',
       rightsValue:
         'You can request deletion or a copy of your data at any time by emailing',
-      footerNote: 'By clicking "I Agree", you grant consent for the above processing.',
+      // Cross-border disclosure — DPDP Act 2023 / IT (Amendment) Rules requirement.
+      // This note must remain visible and accurate. Do NOT change wording to imply
+      // India residency until Tier-2 (AWS Mumbai) deployment is confirmed live.
+      dataFlowNote:
+        'Data disclosure: your voice, transcript, and profile are currently processed by sub-processors located outside India (Singapore, United States). India-resident storage is planned but not yet active. Full sub-processor list: intants.com/data-flow',
+      footerNote: 'By clicking "I Agree", you grant consent for the above processing, including cross-border transfer as described above.',
       agree: 'I Agree',
       saving: 'Saving…',
       decline: 'Decline',
@@ -965,7 +975,10 @@ const hi = {
       retentionDays: '90 दिनों',
       rightsLabel: 'DPDP Act 2023 के तहत आपके अधिकार:',
       rightsValue: 'आप कभी भी अपने डेटा की deletion या copy का अनुरोध कर सकते हैं, इस ईमेल पर:',
-      footerNote: '"I Agree" क्लिक करके आप उपरोक्त processing के लिए सहमति देते हैं।',
+      // Cross-border disclosure (DPDP) — IMPORTANT: must receive legal review before govt-bid launch.
+      dataFlowNote:
+        'डेटा प्रकटीकरण: आपकी आवाज़, transcript और प्रोफ़ाइल वर्तमान में भारत से बाहर स्थित sub-processors (Singapore, United States) द्वारा process की जाती है। India-resident storage की योजना है लेकिन अभी सक्रिय नहीं है। पूरी sub-processor सूची: intants.com/data-flow',
+      footerNote: '"मैं सहमत हूँ" क्लिक करके आप उपरोक्त processing के लिए सहमति देते हैं, जिसमें ऊपर वर्णित cross-border transfer शामिल है।',
       agree: 'मैं सहमत हूँ',
       saving: 'सहेजा जा रहा है…',
       decline: 'अस्वीकार करें',
@@ -1511,7 +1524,10 @@ const te = {
       retentionDays: '90 రోజుల',
       rightsLabel: 'DPDP Act 2023 కింద మీ హక్కులు:',
       rightsValue: 'మీరు ఎప్పుడైనా మీ డేటాను తొలగించమని లేదా కాపీ అడగవచ్చు, ఈ ఈమెయిల్‌కి:',
-      footerNote: '"I Agree" క్లిక్ చేయడం ద్వారా మీరు పై processing కి సమ్మతిస్తున్నారు.',
+      // Cross-border disclosure (DPDP) — IMPORTANT: must receive legal review before govt-bid launch.
+      dataFlowNote:
+        'డేటా వెల్లడి: మీ వాయిస్, transcript మరియు ప్రొఫైల్ ప్రస్తుతం భారతదేశం వెలుపల ఉన్న sub-processors (Singapore, United States) ద్వారా process చేయబడుతున్నాయి. India-resident storage ప్రణాళికలో ఉంది కానీ ఇంకా సక్రియం కాలేదు. పూర్తి sub-processor జాబితా: intants.com/data-flow',
+      footerNote: '"నేను అంగీకరిస్తున్నాను" క్లిక్ చేయడం ద్వారా మీరు పై processing కి సమ్మతిస్తున్నారు, పై వివరించిన cross-border transfer తో సహా.',
       agree: 'నేను అంగీకరిస్తున్నాను',
       saving: 'సేవ్ అవుతోంది…',
       decline: 'తిరస్కరించండి',

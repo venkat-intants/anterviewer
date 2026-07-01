@@ -205,3 +205,18 @@ $C up -d --build      # rebuild + start (after a git pull)
 - **Rotate all secrets** in the `.env` files (they're in the code history).
 - Put **Cloudflare** in front of the VM (login has no rate-limit yet).
 - This setup stores data outside India — fine for demos, not for the government bid.
+
+## Data residency and DPDP disclosure
+
+This deployment is **NOT India-resident**. Candidate data flows to sub-processors
+in **Singapore** (Neon database), **United States** (Groq/Gemini LLM, Cloudflare R2
+storage, Tavus/Simli avatar, LiveKit), and global edge (Upstash). This is the
+"Tier-1 demo" stack — the same codebase is env-swappable to Tier-2 (AWS Mumbai,
+India-resident) without code changes.
+
+**What this means for consent:** the in-app DPDP consent modal shows candidates
+a cross-border disclosure notice before they consent. Do NOT remove or weaken
+this notice. Do NOT add any wording that claims India residency until Tier-2
+(AWS Mumbai) is confirmed live.
+
+Full sub-processor details and the India-residency migration plan: `docs/DATA-FLOW.md`

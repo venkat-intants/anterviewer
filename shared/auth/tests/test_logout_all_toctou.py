@@ -11,6 +11,8 @@ These tests use mocked Redis (no live server required) and prove that:
 6. Redis read errors during epoch check in refresh() are fail-open.
 7. _parse_rt_value handles both legacy and current Redis value formats.
 8. logout() ownership check correctly parses the new value format.
+9. mint_refresh_session writes the tracked format and session index (AUTH-01).
+10. An SSO-minted session (via mint_refresh_session) is rejected after logout_all.
 """
 
 from __future__ import annotations
@@ -24,7 +26,9 @@ import pytest
 from shared.auth.local import (
     USER_TOKEN_EPOCH_PREFIX,
     LocalAuthProvider,
+    _RT_PREFIX,
     _SESSIONS_PREFIX,
+    mint_refresh_session,
 )
 
 
@@ -522,3 +526,180 @@ class TestLogoutOwnershipCheckNewFormat:
         )
 
         redis.delete.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# AUTH-01: mint_refresh_session — shared SSO token mint path
+# ---------------------------------------------------------------------------
+
+
+class TestMintRefreshSession:
+    """Verify that mint_refresh_session always writes the tracked format.
+
+    These tests use an in-memory dict-backed fake Redis so we can inspect the
+    exact bytes stored, without importing any network code.
+    """
+
+    @pytest.mark.asyncio
+    async def test_writes_tracked_format_to_redis(self) -> None:
+        """mint_refresh_session must store '<user_id>:<created_at_unix>' in Redis."""
+        store: dict[str, str] = {}
+
+        class _FakeRedis:
+            async def setex(self, key: str, ttl: int, value: str) -> None:  # noqa: ARG002
+                store[key] = value
+
+            async def sadd(self, key: str, member: str) -> int:  # noqa: ARG002
+                return 1
+
+            async def expire(self, key: str, ttl: int) -> bool:  # noqa: ARG002
+                return True
+
+        user_id = "sso-user-uuid-abc"
+        raw = await mint_refresh_session(_FakeRedis(), user_id, ttl_seconds=604800)  # type: ignore[arg-type]
+
+        assert raw, "raw refresh token must be non-empty"
+        assert len(store) == 1, "exactly one Redis key must be written"
+        stored_value = next(iter(store.values()))
+        assert stored_value.startswith(f"{user_id}:"), (
+            f"Redis value must start with '<user_id>:' — got {stored_value!r}"
+        )
+        ts_part = stored_value[len(user_id) + 1:]
+        assert ts_part.isdigit(), f"created_at part must be a digit string — got {ts_part!r}"
+
+    @pytest.mark.asyncio
+    async def test_adds_key_to_session_index(self) -> None:
+        """mint_refresh_session must SADD the refresh key to user_sessions:<uid>."""
+        sadd_calls: list[tuple[str, str]] = []
+        stored: dict[str, str] = {}
+
+        class _FakeRedis:
+            async def setex(self, key: str, ttl: int, value: str) -> None:  # noqa: ARG002
+                stored[key] = value
+
+            async def sadd(self, key: str, member: str) -> int:
+                sadd_calls.append((key, member))
+                return 1
+
+            async def expire(self, key: str, ttl: int) -> bool:  # noqa: ARG002
+                return True
+
+        user_id = "sso-user-index-test"
+        await mint_refresh_session(_FakeRedis(), user_id, ttl_seconds=86400)  # type: ignore[arg-type]
+
+        assert len(sadd_calls) == 1
+        index_key, member = sadd_calls[0]
+        assert index_key == _SESSIONS_PREFIX + user_id
+        # The member added to the index must be the same refresh: key written to Redis.
+        assert member in stored
+        assert member.startswith(_RT_PREFIX)
+
+    @pytest.mark.asyncio
+    async def test_sso_session_rejected_by_refresh_after_logout_all(self) -> None:
+        """An SSO session minted via mint_refresh_session must be revoked by logout_all.
+
+        This is the primary regression test for AUTH-01.
+
+        Scenario
+        --------
+        1. mint_refresh_session() simulates Google/Naipunyam SSO sign-in.
+        2. logout_all() is called for the user (e.g. admin deletes the account).
+        3. refresh() with the SSO-minted token must raise ValueError — the session
+           is rejected by the epoch check because the token's created_at <= epoch.
+
+        Before the fix, the SSO router wrote plain ``<user_id>`` (no timestamp),
+        which caused _parse_rt_value to return (user_id, None), skipping the epoch
+        check entirely (fail-open) and allowing the session to survive revocation.
+        """
+        user_id = "sso-candidate-auth01"
+        # In-memory fake Redis with real dict storage so logout_all can read back
+        # what mint_refresh_session wrote.
+        store: dict[str, str] = {}
+        sets: dict[str, set[str]] = {}
+        expiries: dict[str, int] = {}
+
+        class _FullFakeRedis:
+            async def setex(self, key: str, ttl: int, value: str) -> None:
+                store[key] = value
+                expiries[key] = ttl
+
+            async def get(self, key: str) -> str | None:
+                return store.get(key)
+
+            async def delete(self, *keys: str) -> int:
+                deleted = 0
+                for k in keys:
+                    if store.pop(k, None) is not None:
+                        deleted += 1
+                return deleted
+
+            async def sadd(self, key: str, member: str) -> int:
+                sets.setdefault(key, set()).add(member)
+                return 1
+
+            async def srem(self, key: str, member: str) -> int:
+                sets.get(key, set()).discard(member)
+                return 1
+
+            async def expire(self, key: str, ttl: int) -> bool:
+                expiries[key] = ttl
+                return True
+
+            async def smembers(self, key: str) -> set[bytes]:
+                return {m.encode() for m in sets.get(key, set())}
+
+        fake_redis = _FullFakeRedis()
+
+        # Step 1: SSO sign-in — mint a tracked refresh token (AUTH-01 fix path).
+        raw_token = await mint_refresh_session(fake_redis, user_id, ttl_seconds=604800)  # type: ignore[arg-type]
+
+        # Confirm the token is tracked in the session index.
+        assert _SESSIONS_PREFIX + user_id in sets
+        session_index = sets[_SESSIONS_PREFIX + user_id]
+        assert len(session_index) == 1
+
+        # Confirm the stored value is in the new tracked format.
+        refresh_key = next(iter(session_index))
+        stored_value = store[refresh_key]
+        assert ":" in stored_value, (
+            "AUTH-01 REGRESSION: SSO token stored in legacy plain format — "
+            f"got {stored_value!r}, expected '<user_id>:<created_at>'"
+        )
+
+        # Step 2: logout_all() called (e.g. HR deletes the candidate account).
+        async def _empty_db() -> AsyncGenerator[Any, None]:
+            return
+            yield
+
+        provider = LocalAuthProvider(
+            db_session_factory=lambda: _empty_db(),
+            redis_client=fake_redis,  # type: ignore[arg-type]
+            settings=_make_settings(),
+        )
+        revoked = await provider.logout_all(user_id)
+        assert revoked == 1, "logout_all must report 1 session revoked"
+
+        # Step 3: attempt to use the SSO refresh token after logout_all.
+        # Must raise — the epoch check sees created_at <= epoch.
+        with pytest.raises(ValueError, match="invalid or expired"):
+            await provider.refresh(raw_token)
+
+    @pytest.mark.asyncio
+    async def test_session_index_failure_does_not_block_token_mint(self) -> None:
+        """mint_refresh_session must succeed even if the session-index SADD fails."""
+        store: dict[str, str] = {}
+
+        class _FailingIndexRedis:
+            async def setex(self, key: str, ttl: int, value: str) -> None:  # noqa: ARG002
+                store[key] = value
+
+            async def sadd(self, key: str, member: str) -> int:  # noqa: ARG002
+                raise ConnectionError("Redis index unavailable")
+
+            async def expire(self, key: str, ttl: int) -> bool:  # noqa: ARG002
+                return True
+
+        # Must not raise — sadd failure is best-effort.
+        raw = await mint_refresh_session(_FailingIndexRedis(), "user-fail-index", ttl_seconds=3600)  # type: ignore[arg-type]
+        assert raw, "raw token must still be returned even when session index fails"
+        assert len(store) == 1, "the refresh:hash key must still be written"

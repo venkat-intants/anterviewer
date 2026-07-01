@@ -18,6 +18,12 @@ The stub currently skips server-side ``state`` verification (a nonce stored in
 session/Redis).  Full CSRF protection will be added in S5-003b once the Redis
 session layer is wired for SSO flows.
 
+AUTH-01 fix (2026-07-01): the callback now mints a proper tracked refresh token
+via ``mint_refresh_session`` (same function used by LocalAuthProvider and the
+Google SSO router) so that Naipunyam sessions are covered by logout_all/epoch
+revocation, admin deletion, and password-reset invalidation.  The raw refresh
+token is set as an httpOnly cookie exactly like local and Google sessions.
+
 PII note: user profile data from Naipunyam is NEVER written to logs.
 """
 
@@ -26,15 +32,16 @@ from __future__ import annotations
 import secrets
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 from urllib.parse import urlencode
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from shared.auth.jwt import issue_access_token
+from shared.auth.local import mint_refresh_session
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,6 +50,7 @@ from app.database import get_db_session
 from app.models import User
 from app.naipunyam.circuit_breaker import CircuitOpenError
 from app.naipunyam.client import NaipunyamClient, NaipunyamError
+from app.redis_client import get_redis
 
 log = structlog.get_logger(__name__)
 
@@ -52,6 +60,7 @@ router = APIRouter(prefix="/auth/sso/naipunyam", tags=["sso"])
 # Dependency shortcuts
 # ---------------------------------------------------------------------------
 DbSessionDep = Annotated[AsyncSession, Depends(get_db_session)]
+RedisDep = Annotated[Any, Depends(get_redis)]
 
 # ---------------------------------------------------------------------------
 # Request / Response schemas
@@ -66,8 +75,12 @@ class SsoCallbackBody(BaseModel):
 
 
 class SsoTokenResponse(BaseModel):
-    """Successful SSO response — mirrors local auth token shape (no refresh token
-    for SSO flow; Naipunyam session handles re-authentication)."""
+    """Successful SSO response — mirrors local auth token shape.
+
+    A refresh token is minted and delivered as an httpOnly cookie (not in this
+    JSON body) so the Naipunyam session persists past the 15-minute access
+    token and is revocable by logout_all / admin delete (AUTH-01).
+    """
 
     access_token: str
     token_type: str = "bearer"
@@ -100,6 +113,36 @@ def _require_naipunyam_configured() -> None:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="NAIPUNYAM_NOT_CONFIGURED",
         )
+
+
+def _set_session_cookies(response: Response, raw_refresh: str) -> None:
+    """Set the httpOnly refresh + JS-readable CSRF cookies on *response*.
+
+    Mirrors the Google SSO and local auth cookie setup so a Naipunyam session
+    is silently refreshed via /auth/refresh exactly like any other session.
+    """
+    max_age = settings.jwt_refresh_expiry_days * 86400
+    csrf_token = secrets.token_urlsafe(32)
+    response.set_cookie(
+        key=settings.auth_refresh_cookie_name,
+        value=raw_refresh,
+        httponly=True,
+        secure=settings.auth_cookie_secure,
+        samesite=settings.auth_cookie_samesite,
+        domain=settings.auth_cookie_domain,
+        path=settings.auth_cookie_path,
+        max_age=max_age,
+    )
+    response.set_cookie(
+        key=settings.auth_csrf_cookie_name,
+        value=csrf_token,
+        httponly=False,  # JS must read + echo as X-CSRF-Token on refresh.
+        secure=settings.auth_cookie_secure,
+        samesite=settings.auth_cookie_samesite,
+        domain=settings.auth_cookie_domain,
+        path=settings.auth_cookie_path,
+        max_age=max_age,
+    )
 
 
 def _make_client() -> NaipunyamClient:
@@ -184,6 +227,8 @@ async def initiate(
 async def callback(
     body: SsoCallbackBody,
     db: DbSessionDep,
+    redis: RedisDep,
+    response: Response,
 ) -> SsoTokenResponse:
     """Complete the Naipunyam OAuth2 flow and create/update the Intants user.
 
@@ -196,7 +241,8 @@ async def callback(
     5. Fetch the full profile via GET /v1/users/{uid}/profile.
     6. Upsert the user row (INSERT … ON CONFLICT naipunyam_id DO UPDATE).
     7. Issue an Intants JWT (same claim shape as LocalAuthProvider).
-    8. Return {"access_token": …, "token_type": "bearer", "user_id": …}.
+    8. Mint a tracked refresh token via mint_refresh_session + set cookies.
+    9. Return {"access_token": …, "token_type": "bearer", "user_id": …}.
 
     Error handling
     --------------
@@ -330,6 +376,17 @@ async def callback(
             issuer=settings.jwt_issuer,
             audience=settings.jwt_audience,
         )
+
+        # ------------------------------------------------------------------
+        # Step 8: mint tracked refresh token + set auth cookies (AUTH-01)
+        #
+        # mint_refresh_session writes "<user_id>:<created_at_unix>" and adds
+        # the key to the user_sessions:<uid> index, making this Naipunyam
+        # session fully revocable by logout_all / admin delete / epoch check.
+        # ------------------------------------------------------------------
+        refresh_ttl = settings.jwt_refresh_expiry_days * 86400
+        raw_refresh = await mint_refresh_session(redis, str(final_user_id), refresh_ttl)
+        _set_session_cookies(response, raw_refresh)
 
         return SsoTokenResponse(
             access_token=access_token,

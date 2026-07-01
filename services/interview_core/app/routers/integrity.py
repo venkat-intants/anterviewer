@@ -11,11 +11,14 @@ Contract:
     body : {"events": [{type, started_at, ended_at?, metadata?}, ...]}
     200  : {"integrity_score": int, "summary": {...}, "stored": int}
     401  : missing/invalid JWT
-    403  : session belongs to another user
+    403  : session belongs to another user OR active recording consent absent
     404  : session not found
 
-DPDP note: raw video stays on the candidate's device. Only derived events are
-stored, under the candidate's video_capture consent.
+DPDP note: gaze/face proctoring events are biometric-derived data under the
+DPDP Act 2023.  Storing them requires an active ``interview_voice_recording``
+consent on the ``dpdp_consent_ledger``.  This endpoint is FAIL-CLOSED: if the
+consent check fails for any reason (DB error, revoked consent, missing entry)
+the batch is rejected with HTTP 403 and NO events are persisted.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.consent_guard import has_active_consent
 from app.database import get_db_session
 from app.dependencies import CurrentUserDep
 from app.models import IntegrityEvent
@@ -110,6 +114,38 @@ async def post_integrity_events(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not own this session.",
+        )
+
+    # ---- DPDP consent gate (FAIL-CLOSED) ----
+    # Gaze/face proctoring events are biometric-derived data under the DPDP Act
+    # 2023.  We require an active interview_voice_recording consent entry on the
+    # dpdp_consent_ledger before persisting ANY such data.  If the consent check
+    # itself raises (DB error, network partition) we reject the batch — fail-closed
+    # is the DPDP-correct posture; recording without confirmed consent is a
+    # violation, but refusing a batch during a transient outage is recoverable.
+    try:
+        consent_ok = await has_active_consent(db, current_user["sub"])
+    except Exception as _exc:
+        log.warning(
+            "integrity.consent_check_error",
+            session_id=str(session_id),
+            user_id=current_user["sub"],
+            err=type(_exc).__name__,
+        )
+        consent_ok = False
+
+    if not consent_ok:
+        log.warning(
+            "integrity.consent_absent — rejecting biometric batch",
+            session_id=str(session_id),
+            user_id=current_user["sub"],
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Active recording consent is required to persist proctoring events. "
+                "Please renew your consent or contact support."
+            ),
         )
 
     now = datetime.now(tz=UTC)

@@ -27,6 +27,16 @@ Redis error handling policy (unchanged):
 - Epoch READ errors in refresh() → fail-open (token allowed through).
   A Redis outage must not lock users out.
 - Epoch WRITE errors in logout_all → logged as WARNING (best-effort, as before).
+
+## Single shared mint path (AUTH-01 fix, 2026-07-01)
+
+``mint_refresh_session`` is a module-level async helper that encapsulates ALL
+refresh-token minting logic: generate raw token, hash it, write
+``<user_id>:<created_at_unix>`` to Redis, add the key to the session index.
+Both ``LocalAuthProvider._issue_tokens`` and the SSO routers (Google,
+Naipunyam) call this single function so that every token — regardless of how
+the user authenticated — is stored in the revocable tracked format and is
+covered by ``logout_all`` and the admin delete/password-reset revocation paths.
 """
 
 from __future__ import annotations
@@ -95,6 +105,46 @@ def _hash_email(email: str) -> str:
     return hashlib.sha256(email.encode()).hexdigest()[:16]
 
 
+async def mint_refresh_session(
+    redis: Redis,
+    user_id: str,
+    ttl_seconds: int,
+) -> str:
+    """Generate a refresh token, persist it in the tracked format, and index it.
+
+    This is the **single canonical path** for creating any refresh token in the
+    Intants platform.  Both ``LocalAuthProvider._issue_tokens`` and the SSO
+    routers (Google, Naipunyam) call this function so the revocation guarantees
+    provided by ``logout_all`` apply uniformly to *every* session, regardless
+    of how the user signed in.
+
+    Redis value written:
+        ``refresh:{sha256(raw_token)}``  →  ``<user_id>:<created_at_unix>``
+
+    Session index updated (best-effort):
+        ``user_sessions:<user_id>``  ←  SADD the refresh key
+
+    Returns the raw (unhashed) token suitable for delivery to the client.
+    The caller must never store the raw token server-side — only the hash lives
+    in Redis.
+    """
+    raw_refresh = generate_refresh_token()
+    refresh_key = _RT_PREFIX + hash_refresh_token(raw_refresh)
+    created_at = int(datetime.now(tz=UTC).timestamp())
+    redis_value = f"{user_id}{_RT_VALUE_SEP}{created_at}"
+    await redis.setex(refresh_key, ttl_seconds, redis_value)
+
+    # Best-effort session index — a failure here must never block the login.
+    try:
+        sess_key = _SESSIONS_PREFIX + user_id
+        await redis.sadd(sess_key, refresh_key)
+        await redis.expire(sess_key, ttl_seconds)
+    except Exception:  # noqa: BLE001 — index is an optimisation, never fatal
+        log.warning("auth.session_index.track_failed", user_id=user_id)
+
+    return raw_refresh
+
+
 class LocalAuthProvider(AuthProvider):
     """Concrete AuthProvider that stores credentials in Postgres and tokens in Redis."""
 
@@ -119,9 +169,9 @@ class LocalAuthProvider(AuthProvider):
     ) -> AuthTokens:
         """Issue access + refresh token pair, store refresh token in Redis.
 
-        The Redis value format is ``<user_id>:<created_at_unix>`` so that
-        ``refresh()`` can compare the session's creation time against the
-        per-user revocation epoch set by ``logout_all``.
+        Delegates refresh-token minting to the module-level ``mint_refresh_session``
+        so the tracked ``<user_id>:<created_at_unix>`` format and session-index
+        update are guaranteed for every token, regardless of code path.
         """
         access = issue_access_token(
             user_id=user_id,
@@ -131,14 +181,8 @@ class LocalAuthProvider(AuthProvider):
             issuer=getattr(self._settings, "jwt_issuer", "intants-data-gateway"),
             audience=getattr(self._settings, "jwt_audience", "intants-services"),
         )
-        raw_refresh = generate_refresh_token()
-        refresh_key = _RT_PREFIX + hash_refresh_token(raw_refresh)
         ttl_seconds = self._settings.jwt_refresh_expiry_days * 86400
-        created_at = int(datetime.now(tz=UTC).timestamp())
-        # Store "<user_id>:<created_at>" so refresh() can do epoch comparison.
-        redis_value = f"{user_id}{_RT_VALUE_SEP}{created_at}"
-        await self._redis.setex(refresh_key, ttl_seconds, redis_value)
-        await self._track_session(user_id, refresh_key, ttl_seconds)
+        raw_refresh = await mint_refresh_session(self._redis, user_id, ttl_seconds)
 
         log.debug("auth.tokens_issued", user_id=user_id, roles=roles)
         return AuthTokens(

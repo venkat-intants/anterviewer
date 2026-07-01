@@ -144,6 +144,11 @@ export default function ConsentModal({
             </div>
           </dl>
 
+          {/* DPDP cross-border transparency — data currently processed outside India */}
+          <p className="text-body-sm text-foreground">
+            {t('consent.dataFlowNote')}
+          </p>
+
           <p className="text-muted-foreground text-caption">
             {t('consent.footerNote')}
           </p>

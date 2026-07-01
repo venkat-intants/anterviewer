@@ -11,6 +11,13 @@ Covers:
      handles failure without crashing.
   5. Prometheus /metrics endpoint: returns 200 with the correct content-type.
   6. PII redaction in structlog: _redact_pii_processor strips the expected fields.
+  7. Settings — config fields for worker sizing have correct defaults.
+  8. Abrupt-close shield — teardown survives outer cancel.
+  9. (Finding 2) resolve_consent_user_id retries on transient DB errors and
+     returns the DB-error sentinel after exhausting retries.
+ 10. (Finding 3) _request_fnc memory-gate rejects when estimated RSS would
+     exceed the container limit; accepted jobs publish capacity to Redis.
+ 11. (Finding 3) Settings defaults are right-sized for a 2-vCPU VM.
 """
 
 from __future__ import annotations
@@ -69,8 +76,14 @@ async def test_request_fnc_accepts_under_ceiling() -> None:
 
         fake_settings = MagicMock()
         fake_settings.worker_max_concurrent_jobs = 10
+        # Disable memory gate so this test isolates the concurrency ceiling.
+        fake_settings.job_memory_limit_mb = 0
+        fake_settings.container_memory_limit_mb = 0
 
-        with patch.object(wk, "settings", fake_settings):
+        with (
+            patch.object(wk, "settings", fake_settings),
+            patch.object(wk, "_publish_capacity", new=AsyncMock()),
+        ):
             await wk._request_fnc(mock_request)
 
         mock_request.accept.assert_called_once_with(wk.entrypoint)
@@ -86,13 +99,18 @@ async def test_request_fnc_rejects_at_ceiling() -> None:
 
     original = wk._active_jobs
     try:
-        wk._active_jobs = 15
+        wk._active_jobs = 4
         mock_request = AsyncMock()
 
         fake_settings = MagicMock()
-        fake_settings.worker_max_concurrent_jobs = 15
+        fake_settings.worker_max_concurrent_jobs = 4
+        fake_settings.job_memory_limit_mb = 0
+        fake_settings.container_memory_limit_mb = 0
 
-        with patch.object(wk, "settings", fake_settings):
+        with (
+            patch.object(wk, "settings", fake_settings),
+            patch.object(wk, "_publish_capacity", new=AsyncMock()),
+        ):
             await wk._request_fnc(mock_request)
 
         mock_request.reject.assert_called_once()
@@ -108,13 +126,18 @@ async def test_request_fnc_rejects_over_ceiling() -> None:
 
     original = wk._active_jobs
     try:
-        wk._active_jobs = 20
+        wk._active_jobs = 5
         mock_request = AsyncMock()
 
         fake_settings = MagicMock()
-        fake_settings.worker_max_concurrent_jobs = 15
+        fake_settings.worker_max_concurrent_jobs = 4
+        fake_settings.job_memory_limit_mb = 0
+        fake_settings.container_memory_limit_mb = 0
 
-        with patch.object(wk, "settings", fake_settings):
+        with (
+            patch.object(wk, "settings", fake_settings),
+            patch.object(wk, "_publish_capacity", new=AsyncMock()),
+        ):
             await wk._request_fnc(mock_request)
 
         mock_request.reject.assert_called_once()
@@ -135,8 +158,14 @@ async def test_request_fnc_zero_cap_always_accepts() -> None:
 
         fake_settings = MagicMock()
         fake_settings.worker_max_concurrent_jobs = 0
+        # Disable memory gate too so no rejection fires from that path.
+        fake_settings.job_memory_limit_mb = 0
+        fake_settings.container_memory_limit_mb = 0
 
-        with patch.object(wk, "settings", fake_settings):
+        with (
+            patch.object(wk, "settings", fake_settings),
+            patch.object(wk, "_publish_capacity", new=AsyncMock()),
+        ):
             await wk._request_fnc(mock_request)
 
         mock_request.accept.assert_called_once_with(wk.entrypoint)
@@ -377,4 +406,287 @@ async def test_abrupt_close_shielded_task_survives_outer_cancel() -> None:
     assert completed == [True], (
         "asyncio.shield() must allow the inner coroutine to complete even when "
         "the outer future is cancelled — _abrupt_close must not be GC'd on browser close"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 9. (Finding 2) resolve_consent_user_id — retry logic and fail-closed sentinel
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_consent_user_id_retries_on_transient_error() -> None:
+    """DB errors trigger up to _RESOLVE_CONSENT_MAX_ATTEMPTS retries before giving up.
+
+    On each failure the resolver should log a warning and retry.  After all
+    attempts are exhausted the sentinel _CONSENT_RESOLVE_DB_ERROR is returned
+    so the watchdog can fail-closed.
+    """
+    import app.worker.interview_worker as wk
+    from contextlib import asynccontextmanager
+    from typing import AsyncGenerator
+
+    call_count = 0
+
+    @asynccontextmanager
+    async def _raising_cm() -> AsyncGenerator[None, None]:
+        nonlocal call_count
+        call_count += 1
+        raise RuntimeError("transient DB error")
+        yield  # pragma: no cover
+
+    factory = MagicMock(side_effect=lambda: _raising_cm())
+    valid_room = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    with (
+        patch("app.database.init_engine"),
+        patch("app.database.get_session_factory", return_value=factory),
+        # Suppress the asyncio.sleep so the test runs instantly.
+        patch("app.worker.interview_worker.asyncio.sleep", new=AsyncMock()),
+    ):
+        result = await wk.resolve_consent_user_id(valid_room)
+
+    assert result == wk._CONSENT_RESOLVE_DB_ERROR, (
+        "After exhausting retries, resolve_consent_user_id must return "
+        "_CONSENT_RESOLVE_DB_ERROR so the watchdog can fail-closed"
+    )
+    assert call_count == wk._RESOLVE_CONSENT_MAX_ATTEMPTS, (
+        f"Expected exactly {wk._RESOLVE_CONSENT_MAX_ATTEMPTS} attempts, got {call_count}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_consent_user_id_succeeds_on_second_attempt() -> None:
+    """Transient error on attempt 1 followed by success on attempt 2.
+
+    The resolver must not give up prematurely — a single transient error
+    should not produce the fail-closed sentinel.
+    """
+    import uuid
+    import app.worker.interview_worker as wk
+    from contextlib import asynccontextmanager
+    from typing import AsyncGenerator
+
+    target_uid = uuid.UUID("11111111-2222-3333-4444-555555555555")
+    attempt = 0
+
+    @asynccontextmanager
+    async def _cm() -> AsyncGenerator[None, None]:
+        nonlocal attempt
+        attempt += 1
+        if attempt == 1:
+            raise RuntimeError("transient")
+        db = AsyncMock()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = target_uid
+        db.execute = AsyncMock(return_value=result)
+        yield db
+
+    factory = MagicMock(side_effect=lambda: _cm())
+    valid_room = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    with (
+        patch("app.database.init_engine"),
+        patch("app.database.get_session_factory", return_value=factory),
+        patch("app.worker.interview_worker.asyncio.sleep", new=AsyncMock()),
+    ):
+        result = await wk.resolve_consent_user_id(valid_room)
+
+    assert result == str(target_uid), (
+        "Resolver must return the user_id when a subsequent attempt succeeds"
+    )
+    assert result != wk._CONSENT_RESOLVE_DB_ERROR
+
+
+@pytest.mark.asyncio
+async def test_resolve_consent_user_id_invalid_uuid_no_retry() -> None:
+    """An invalid UUID room name must return None immediately without any DB call."""
+    import app.worker.interview_worker as wk
+
+    factory = MagicMock(side_effect=AssertionError("DB must not be called"))
+    with (
+        patch("app.database.init_engine"),
+        patch("app.database.get_session_factory", return_value=factory),
+    ):
+        result = await wk.resolve_consent_user_id("not-a-uuid")
+
+    assert result is None, (
+        "Non-UUID room names are legitimate no-ops — no retry, no sentinel"
+    )
+    factory.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 10. (Finding 3) _request_fnc — memory gate and Redis capacity publish
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_request_fnc_rejects_on_memory_estimate() -> None:
+    """Admission must be rejected when estimated RSS exceeds container limit.
+
+    With job_memory_limit_mb=150 and 2 active jobs and 1 more incoming, the
+    estimated RSS = 3 * 150 = 450 MB.  If container_memory_limit_mb=400, the
+    gate must reject even though active_jobs (2) < max_concurrent_jobs (10).
+    """
+    import app.worker.interview_worker as wk
+
+    original = wk._active_jobs
+    try:
+        wk._active_jobs = 2  # 2 running + 1 incoming = 3 * 150 = 450 > 400
+        mock_request = AsyncMock()
+
+        fake_settings = MagicMock()
+        fake_settings.worker_max_concurrent_jobs = 10  # not the binding constraint
+        fake_settings.job_memory_limit_mb = 150
+        fake_settings.container_memory_limit_mb = 400
+        fake_settings.redis_url = "redis://localhost"
+
+        with (
+            patch.object(wk, "settings", fake_settings),
+            patch.object(wk, "_publish_capacity", new=AsyncMock()),
+        ):
+            await wk._request_fnc(mock_request)
+
+        mock_request.reject.assert_called_once()
+        mock_request.accept.assert_not_called()
+    finally:
+        wk._active_jobs = original
+
+
+@pytest.mark.asyncio
+async def test_request_fnc_accepts_within_memory_budget() -> None:
+    """Job is accepted when estimated RSS is within the container limit."""
+    import app.worker.interview_worker as wk
+
+    original = wk._active_jobs
+    try:
+        wk._active_jobs = 1  # 1 + 1 incoming = 2 * 150 = 300 < 400 → accept
+        mock_request = AsyncMock()
+
+        fake_settings = MagicMock()
+        fake_settings.worker_max_concurrent_jobs = 10
+        fake_settings.job_memory_limit_mb = 150
+        fake_settings.container_memory_limit_mb = 400
+        fake_settings.redis_url = "redis://localhost"
+
+        with (
+            patch.object(wk, "settings", fake_settings),
+            patch.object(wk, "_publish_capacity", new=AsyncMock()),
+        ):
+            await wk._request_fnc(mock_request)
+
+        mock_request.accept.assert_called_once_with(wk.entrypoint)
+        mock_request.reject.assert_not_called()
+    finally:
+        wk._active_jobs = original
+
+
+@pytest.mark.asyncio
+async def test_request_fnc_zero_memory_limit_skips_check() -> None:
+    """job_memory_limit_mb=0 must disable the memory estimate entirely."""
+    import app.worker.interview_worker as wk
+
+    original = wk._active_jobs
+    try:
+        wk._active_jobs = 1
+        mock_request = AsyncMock()
+
+        fake_settings = MagicMock()
+        fake_settings.worker_max_concurrent_jobs = 10
+        fake_settings.job_memory_limit_mb = 0   # disabled
+        fake_settings.container_memory_limit_mb = 400
+        fake_settings.redis_url = "redis://localhost"
+
+        with (
+            patch.object(wk, "settings", fake_settings),
+            patch.object(wk, "_publish_capacity", new=AsyncMock()),
+        ):
+            await wk._request_fnc(mock_request)
+
+        mock_request.accept.assert_called_once_with(wk.entrypoint)
+    finally:
+        wk._active_jobs = original
+
+
+@pytest.mark.asyncio
+async def test_request_fnc_publishes_capacity_on_reject() -> None:
+    """On rejection, _publish_capacity must be called so the HTTP server can
+    read the latest active-job count and return 503 before issuing a token."""
+    import app.worker.interview_worker as wk
+
+    original = wk._active_jobs
+    try:
+        wk._active_jobs = 4
+        mock_request = AsyncMock()
+        mock_publish = AsyncMock()
+
+        fake_settings = MagicMock()
+        fake_settings.worker_max_concurrent_jobs = 4  # at ceiling
+        fake_settings.job_memory_limit_mb = 0
+        fake_settings.container_memory_limit_mb = 0
+        fake_settings.redis_url = "redis://localhost"
+
+        with (
+            patch.object(wk, "settings", fake_settings),
+            patch.object(wk, "_publish_capacity", mock_publish),
+        ):
+            await wk._request_fnc(mock_request)
+
+        mock_request.reject.assert_called_once()
+        mock_publish.assert_called_once(), (
+            "_publish_capacity must be called on rejection so the HTTP server "
+            "can return HTTP 503 instead of issuing a join token for a dead room"
+        )
+    finally:
+        wk._active_jobs = original
+
+
+# ---------------------------------------------------------------------------
+# 11. (Finding 3) Settings defaults right-sized for 2-vCPU VM
+# ---------------------------------------------------------------------------
+
+
+def test_worker_max_concurrent_jobs_default_is_conservative() -> None:
+    """Default worker_max_concurrent_jobs must be <= 4 for a 2-vCPU VM.
+
+    A default of 15 (the old value) would allow 2-3x more jobs than the VM
+    can serve at p95 < 2s, risking OOM-kill of all live interviews.
+    The new default should be 3 or 4.
+    """
+    from app.config import settings
+
+    assert settings.worker_max_concurrent_jobs <= 4, (
+        f"worker_max_concurrent_jobs default is {settings.worker_max_concurrent_jobs}; "
+        "must be <= 4 for a 2-vCPU / 2 GB VM (Oracle Free Tier). "
+        "Old default of 15 caused OOM spikes."
+    )
+    # Must still be positive — 0 disables the cap which is not the safe default.
+    assert settings.worker_max_concurrent_jobs > 0, (
+        "worker_max_concurrent_jobs must be > 0 for production safety"
+    )
+
+
+def test_job_memory_limit_mb_default_is_nonzero() -> None:
+    """job_memory_limit_mb must have a sane non-zero default.
+
+    A default of 0 would disable the memory estimate, leaving only the
+    concurrency counter as the OOM guard.  Under a hard 2 GB container cap
+    a spike of 6+ jobs would OOM-kill all live interviews simultaneously.
+    """
+    from app.config import settings
+
+    assert settings.job_memory_limit_mb > 0, (
+        f"job_memory_limit_mb default is {settings.job_memory_limit_mb}; "
+        "must be > 0 to enable the per-job memory estimate in _request_fnc"
+    )
+
+
+def test_container_memory_limit_mb_default_nonzero() -> None:
+    """container_memory_limit_mb must have a sane non-zero default."""
+    from app.config import settings
+
+    assert settings.container_memory_limit_mb > 0, (
+        "container_memory_limit_mb must be > 0 so the memory gate in "
+        "_request_fnc has a ceiling to compare against"
     )

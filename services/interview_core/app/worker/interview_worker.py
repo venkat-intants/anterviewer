@@ -59,6 +59,7 @@ except ImportError:  # pragma: no cover — only absent in stripped envs
 
 from app.avatars import resolve_avatar
 from app.config import settings
+from app.worker_capacity import publish_active_jobs
 
 logger = logging.getLogger("interview-worker")
 
@@ -82,6 +83,30 @@ def _active_jobs_decrement() -> None:
     """Decrement the active-jobs counter (called at job shutdown hook)."""
     global _active_jobs  # noqa: PLW0603
     _active_jobs = max(0, _active_jobs - 1)
+
+
+async def _publish_capacity() -> None:
+    """Publish the current active-job count to Redis (best-effort, never raises).
+
+    Called after every admission change (increment and decrement) so the HTTP
+    server process can read the counter and reject overloaded candidates with
+    a clear HTTP 503 before issuing a LiveKit join token — preventing the silent
+    "dead room" failure mode where a candidate joins a room with no interviewer.
+    """
+    import contextlib
+
+    import redis.asyncio as _aioredis
+
+    with contextlib.suppress(Exception):
+        rc = _aioredis.from_url(  # type: ignore[no-untyped-call]
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=1,
+        )
+        try:
+            await publish_active_jobs(rc, _active_jobs)
+        finally:
+            await rc.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -277,8 +302,17 @@ async def _lookup_session(
 # ---------------------------------------------------------------------------
 
 
+_RESOLVE_CONSENT_MAX_ATTEMPTS: int = 3
+_RESOLVE_CONSENT_BACKOFF_SECONDS: float = 1.0
+
+# Sentinel returned by resolve_consent_user_id to distinguish a transient DB
+# error (consent watchdog must fail-closed) from a genuine no-op such as an
+# unrecognised room name (consent watchdog may legitimately skip polling).
+_CONSENT_RESOLVE_DB_ERROR: str = "__DB_ERROR__"
+
+
 async def resolve_consent_user_id(room_name: str) -> str | None:
-    """Return the ``user_id`` to poll for consent for a session, or None.
+    """Return the ``user_id`` to poll for consent for a session.
 
     Covers BOTH the registered-candidate flow and the primary guest magic-link
     flow:
@@ -299,13 +333,23 @@ async def resolve_consent_user_id(room_name: str) -> str | None:
         re-checking would mean a guest who withdraws consent mid-session is
         never cut off (DPDP §11 violation).
 
-    Returns ``None`` only for genuine edge cases that make polling impossible:
-        - ``room_name`` is not a valid UUID (bare/CI dispatch, no DB row).
-        - The session row does not exist (orphaned room).
-        - The ``user_id`` column is NULL on the session row (should not happen
-          for live sessions; guard kept for safety against schema drift).
-        - A transient DB error — fails open (watchdog no-ops that tick and
-          retries next interval).
+    Returns:
+        ``str``  — the ``user_id`` UUID string for a known, live session.
+        ``None`` — only for *genuine* no-ops where consent polling is
+                   impossible: ``room_name`` is not a UUID, or the session row
+                   does not exist (orphaned/CI dispatch).  The watchdog may
+                   safely skip polling in these cases.
+        ``_CONSENT_RESOLVE_DB_ERROR`` — the DB was reachable on a previous call
+                   but a *transient* error occurred on every retry attempt.
+                   The watchdog treats this as a fail-closed signal and ends
+                   the session rather than recording without withdrawal
+                   protection (DPDP §11 fail-safe).
+
+    Retry policy:
+        Up to _RESOLVE_CONSENT_MAX_ATTEMPTS attempts with linear backoff of
+        _RESOLVE_CONSENT_BACKOFF_SECONDS between retries. This distinguishes a
+        genuine transient error (exhausts retries → fail-closed) from a
+        permanent "room not found" (returns None immediately, no retries).
 
     Isolated from ``_lookup_session`` so the consent watchdog can resolve the
     candidate without disturbing that function's stable return tuple.
@@ -319,22 +363,28 @@ async def resolve_consent_user_id(room_name: str) -> str | None:
 
     with contextlib.suppress(Exception):
         init_engine()
+
     try:
         sid = _uuid_mod.UUID(room_name)
     except ValueError:
+        # Not a UUID — bare/CI dispatch; no DB row possible. Legit no-op.
         return None
-    try:
-        factory = get_session_factory()
-        async with factory() as db:
-            uid = (
-                await db.execute(
-                    select(InterviewSession.user_id).where(InterviewSession.id == sid)
-                )
-            ).scalar_one_or_none()
+
+    last_exc: Exception | None = None
+    for attempt in range(1, _RESOLVE_CONSENT_MAX_ATTEMPTS + 1):
+        try:
+            factory = get_session_factory()
+            async with factory() as db:
+                uid = (
+                    await db.execute(
+                        select(InterviewSession.user_id).where(InterviewSession.id == sid)
+                    )
+                ).scalar_one_or_none()
+            # scalar_one_or_none() returns None for two sub-cases:
+            #   (a) No session row — orphaned room. Legit no-op.
+            #   (b) session row exists but user_id IS NULL — data integrity
+            #       problem; log a WARNING and treat as no-op.
             if uid is None:
-                # Log at WARNING so missing-user-id on a live session is visible
-                # in ops dashboards — this indicates a data integrity problem,
-                # NOT a normal guest session (which always has user_id set).
                 logger.warning(
                     "interview-worker.consent_user_lookup_no_user_id room=%s "
                     "— session row missing or user_id NULL; consent watchdog "
@@ -343,12 +393,24 @@ async def resolve_consent_user_id(room_name: str) -> str | None:
                 )
                 return None
             return str(uid)
-    except Exception as exc:  # noqa: BLE001 — never crash the interview on this
-        logger.warning(
-            "interview-worker.consent_user_lookup_failed room=%s err=%s",
-            room_name, type(exc).__name__,
-        )
-        return None
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            logger.warning(
+                "interview-worker.consent_user_lookup_failed room=%s attempt=%d/%d err=%s",
+                room_name, attempt, _RESOLVE_CONSENT_MAX_ATTEMPTS, type(exc).__name__,
+            )
+            if attempt < _RESOLVE_CONSENT_MAX_ATTEMPTS:
+                await asyncio.sleep(_RESOLVE_CONSENT_BACKOFF_SECONDS * attempt)
+
+    # All attempts failed — transient DB error. Caller (watchdog) must treat
+    # this as fail-closed to preserve DPDP §11 right-to-withdraw protection.
+    logger.error(
+        "interview-worker.consent_user_lookup_exhausted room=%s — "
+        "all %d attempts failed (last: %s); watchdog will fail-closed",
+        room_name, _RESOLVE_CONSENT_MAX_ATTEMPTS,
+        type(last_exc).__name__ if last_exc else "unknown",
+    )
+    return _CONSENT_RESOLVE_DB_ERROR
 
 
 # Keep the old name as an alias so any external callers (e.g. tests pinned to
@@ -817,11 +879,17 @@ async def entrypoint(ctx: JobContext) -> None:
     with no scorecard.
     """
     _active_jobs_increment()
+    # Publish the updated count immediately so the HTTP server can reject
+    # further requests if we're now at the ceiling.  Best-effort — never raises.
+    await _publish_capacity()
+
     # Register the decrement immediately so it fires on any exit path (normal
     # close, abrupt disconnect, SIGTERM drain, crash).  add_shutdown_callback
     # guarantees this runs even when the entrypoint raises.
     async def _decrement_job_counter() -> None:
         _active_jobs_decrement()
+        # Publish the decremented count so the HTTP server sees freed capacity.
+        await _publish_capacity()
 
     ctx.add_shutdown_callback(_decrement_job_counter)
 
@@ -1059,18 +1127,38 @@ async def entrypoint(ctx: JobContext) -> None:
         a withdrawal DURING a live session would otherwise keep recording until the
         session ends.
 
-        ``user_id`` is resolved by ``resolve_consent_user_id`` above.  Both
-        registered-candidate and guest magic-link sessions set ``sessions.user_id``
-        and record a ``dpdp_consent_ledger`` row — so ``user_id`` should be non-None
-        for every live session.  ``None`` only occurs for unrecognised room names,
-        orphaned rows, or transient DB errors (all logged by the resolver).
+        ``user_id`` is resolved by ``resolve_consent_user_id`` above.
 
-        FAILS OPEN: on any DB/query error we keep the interview running and retry on
-        the next tick — a transient DB blip must never kill a valid, consented
-        interview. We act ONLY on a definitive 'consent is no longer active'.
+        Sentinel values for ``user_id``:
+          - valid UUID string → poll the consent ledger for this user.
+          - None              → legit no-op: unrecognised room or orphaned row
+                                (not a real session; nothing to protect).
+          - _CONSENT_RESOLVE_DB_ERROR → transient DB error exhausted all retries
+                                at session start; FAIL-CLOSED: end the session
+                                now rather than record without withdrawal
+                                protection (DPDP §11 fail-safe).
+
+        Mid-session consent checks FAIL OPEN: a transient DB blip during the
+        polling loop keeps the interview running and retries on the next tick.
+        Only a *definitive* 'consent is no longer active' response ends the
+        session — this avoids dropping a valid, consented interview on
+        momentary DB unavailability.
         """
+        if user_id == _CONSENT_RESOLVE_DB_ERROR:
+            # Resolver exhausted retries at session start — we cannot confirm
+            # active consent.  Fail-closed: end the session now to ensure
+            # a DB outage cannot silently disable DPDP right-to-withdraw.
+            logger.error(
+                "interview-worker.consent_watchdog_fail_closed room=%s — "
+                "resolver DB error exhausted; ending session to protect DPDP §11",
+                session_id,
+            )
+            await _on_close(timed_out=False, consent_withdrawn=True)
+            return
+
         if not user_id:
-            # resolve_consent_user_id already logged the reason; nothing to poll.
+            # Legit no-op: unrecognised room (e.g. bare CI dispatch), orphaned
+            # row, or non-UUID room name.  resolve_consent_user_id already logged.
             return
 
         import contextlib as _contextlib
@@ -1254,10 +1342,13 @@ async def entrypoint(ctx: JobContext) -> None:
     logger.info("interview-worker: session started room=%s", session_id)
 
     # Start the DPDP consent watchdog now that the session is live.
-    # resolve_consent_user_id works for BOTH registered-candidate and guest
-    # magic-link sessions (both always set sessions.user_id).  None is returned
-    # only for unrecognised rooms or transient DB errors; the watchdog no-ops
-    # in those cases (already logged by the resolver).
+    # resolve_consent_user_id covers both registered-candidate and guest
+    # magic-link sessions (both always set sessions.user_id).
+    # Returns:
+    #   str uuid   → valid user found; watchdog will poll consent.
+    #   None       → legit no-op (unrecognised/CI room); watchdog skips.
+    #   _CONSENT_RESOLVE_DB_ERROR → transient DB error after retries;
+    #                watchdog will FAIL-CLOSED (end session) to protect DPDP §11.
     candidate_user_id = await resolve_consent_user_id(session_id)
     consent_task_holder["task"] = asyncio.create_task(
         _consent_watchdog(candidate_user_id)
@@ -1350,27 +1441,64 @@ def _write_heartbeat(path: str, timestamp: str) -> None:
 
 
 async def _request_fnc(job_request: Any) -> None:
-    """Gate incoming job requests against the max-concurrent-jobs ceiling.
+    """Gate incoming job requests against the max-concurrent-jobs and memory ceilings.
 
     Called by the LiveKit framework BEFORE dispatching the job to entrypoint().
-    Rejecting here is clean: the framework re-queues the job to another worker
-    (if any) or notifies the room with a 'worker_unavailable' event.
+    Rejection here is clean: the framework notifies the room with a
+    'worker_unavailable' event so the token/launch endpoint can detect the
+    rejection and return a clear HTTP 503 to the candidate instead of silently
+    leaving them in a dead LiveKit room with no interviewer.
 
-    The ceiling is additive to load_threshold: if the VM CPU/memory is under
-    load_threshold but we're already at max jobs (e.g. due to non-CPU load like
-    network I/O for Sarvam), we still reject.
+    Two complementary guards:
+    1. Concurrency cap (worker_max_concurrent_jobs > 0): reject when the
+       application-tracked active-job counter meets or exceeds the ceiling.
+       This is additive to load_threshold: CPU load may look low while
+       network I/O (Sarvam streams) or memory fills up, so we enforce both.
+    2. Memory estimation (job_memory_limit_mb > 0 AND container_memory_limit_mb
+       > 0): if accepting one more job would push the estimated RSS above the
+       VM's hard cap, reject pre-emptively.  A spike OOM-kill terminates ALL
+       live interviews simultaneously, which is far worse than one polite
+       rejection.
 
-    ``settings.worker_max_concurrent_jobs == 0`` disables the cap (not
-    recommended for production; useful for single-job dev testing).
+    ``settings.worker_max_concurrent_jobs == 0`` disables the concurrency cap
+    (not recommended for production; useful for single-job dev testing).
     """
     cap = settings.worker_max_concurrent_jobs
+    reason: str | None = None
+
     if cap > 0 and _active_jobs >= cap:
+        reason = f"concurrency ceiling reached (active={_active_jobs} cap={cap})"
+
+    if reason is None:
+        mem_per_job = settings.job_memory_limit_mb
+        mem_limit = settings.container_memory_limit_mb
+        if mem_per_job > 0 and mem_limit > 0:
+            # Conservative estimate: jobs already running × per-job RSS.
+            # The actual prewarmed VAD model RSS (≈100–200 MB) is already in
+            # the worker process and shared across jobs, so we only count
+            # the *incremental* cost per additional job here.
+            estimated_rss_mb = (_active_jobs + 1) * mem_per_job
+            if estimated_rss_mb > mem_limit:
+                reason = (
+                    f"estimated RSS {estimated_rss_mb} MB would exceed "
+                    f"container limit {mem_limit} MB"
+                )
+
+    if reason is not None:
         logger.warning(
-            "interview-worker.admission_rejected active=%d cap=%d — job over ceiling",
-            _active_jobs, cap,
+            "interview-worker.admission_rejected active=%d — %s",
+            _active_jobs, reason,
         )
+        # reject() signals 'worker_unavailable' to LiveKit.  The HTTP token
+        # endpoint reads the active-job count from Redis (written by
+        # _publish_capacity) BEFORE issuing the join token, and returns HTTP 503
+        # with a human-readable "server busy, try again" message so the candidate
+        # is never silently dropped into a dead room with no interviewer.
         await job_request.reject()
+        # Publish current capacity so the HTTP layer sees the latest count.
+        await _publish_capacity()
         return
+
     await job_request.accept(entrypoint)
 
 

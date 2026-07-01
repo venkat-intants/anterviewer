@@ -1,0 +1,307 @@
+# ==============================================================================
+# Intants AI Voice Interview Platform — CD Workflow (Oracle Free-Tier VM)
+#
+# PURPOSE
+# -------
+# Provides a guarded, auditable deploy path to the single production VM that
+# runs docker-compose.prod.yml. It is intentionally NOT triggered on every push.
+#
+# TRIGGER MODES
+# -------------
+# 1. Manual (primary): workflow_dispatch — operator clicks "Run workflow" in
+#    GitHub Actions UI. Only users with write access to the repo can trigger it.
+# 2. NO automatic push-to-main deploy. Every production push is a human decision.
+#
+# GATE: CI must be green first (unit + integration tests across all 4 services +
+#       the frontend build). The deploy job lists the `ci` workflow as a
+#       prerequisite via `workflow_run`. An operator triggering this manually must
+#       ensure CI has passed on the commit they want to deploy.
+#
+# SECRETS REQUIRED (Settings → Secrets and variables → Actions)
+# ------------------------------------------------------------
+#   DEPLOY_SSH_KEY       — private key whose public key is in ~/.ssh/authorized_keys
+#                          on the Oracle VM (PEM or OpenSSH format)
+#   DEPLOY_SSH_HOST      — public IP or hostname of the Oracle VM
+#   DEPLOY_SSH_USER      — SSH user on the VM (typically "ubuntu")
+#   DEPLOY_REPO_PATH     — absolute path to the repo on the VM
+#                          (e.g. /home/ubuntu/anterviewer)
+#
+# Without ALL four secrets the deploy job exits as a no-op (skips SSH).
+# The workflow file can therefore be merged safely before secrets are configured.
+#
+# ROLLBACK
+# --------
+# The previous Docker image tag is preserved as <service>:prev on the VM.
+# To roll back, re-run this workflow with the "rollback" input set to "true",
+# or SSH into the VM and run:
+#
+#   cd $DEPLOY_REPO_PATH
+#   docker compose --env-file deploy.env -f docker-compose.prod.yml \
+#     down --remove-orphans
+#   # Re-tag :prev as :prod for the affected service then:
+#   docker compose --env-file deploy.env -f docker-compose.prod.yml \
+#     up -d --no-build
+#
+# Full rollback runbook: docs/DEPLOY-ORACLE.md
+# ==============================================================================
+
+name: CD — Deploy to Oracle VM
+
+on:
+  # Primary trigger: explicit human dispatch only. No auto-deploy on push.
+  workflow_dispatch:
+    inputs:
+      rollback:
+        description: "Set to 'true' to roll back to the previous image (:prev tag)"
+        required: false
+        default: "false"
+      commit_sha:
+        description: "Full SHA to deploy (defaults to HEAD of main). Used for audit log only — the VM always pulls the latest code from the checked-out branch."
+        required: false
+        default: ""
+
+concurrency:
+  # Only one deploy can run at a time. A second dispatch while one is in
+  # progress will wait (not cancel) to avoid partial deploys.
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # GATE: run the full CI suite as a prerequisite.
+  # This re-runs the same tests that ci.yml runs on push/PR, giving an
+  # up-to-the-moment green signal for the exact commit being deployed.
+  # ---------------------------------------------------------------------------
+  ci-gate:
+    name: CI gate (must pass before deploy)
+    uses: ./.github/workflows/ci.yml
+    # Inherit secrets so the matrix jobs can access SARVAM_API_KEY etc.
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------
+  # DEPLOY: SSH into the Oracle VM, pull, build, and bring up the new images.
+  # Skips cleanly if the required secrets are not configured.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to production VM
+    needs: [ci-gate]
+    runs-on: ubuntu-latest
+    # Guard: skip the deploy job entirely when secrets are not configured.
+    # We cannot reference secrets.* in a job-level `if:` (GitHub Actions
+    # restriction), so we use a repository variable DEPLOY_SECRETS_CONFIGURED
+    # that the operator must set to 'true' once all four secrets are in place.
+    # Set it under Settings → Variables → Actions → DEPLOY_SECRETS_CONFIGURED=true.
+    # Without it the deploy job is skipped, making the workflow a no-op in forks
+    # and environments where secrets have not been configured yet.
+    if: vars.DEPLOY_SECRETS_CONFIGURED == 'true'
+
+    environment:
+      name: production
+      # Optional: set this in the GitHub environment settings to require manual
+      # approval from a protected reviewer before the deploy step runs.
+      # url: https://${{ secrets.DEPLOY_SSH_HOST }}/health
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Write the SSH private key to a temp file.
+      # -----------------------------------------------------------------------
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Add the host to known_hosts via keyscan to avoid interactive prompts.
+          # StrictHostKeyChecking=accept-new will add it on first connect.
+          ssh-keyscan -H "${{ secrets.DEPLOY_SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      # -----------------------------------------------------------------------
+      # Normal deploy path: pull latest code, rebuild images, rolling restart.
+      # -----------------------------------------------------------------------
+      - name: Deploy — pull, build, restart
+        if: inputs.rollback != 'true'
+        env:
+          SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          REPO_PATH: ${{ secrets.DEPLOY_REPO_PATH }}
+          GIT_SHA: ${{ inputs.commit_sha || github.sha }}
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+              -o StrictHostKeyChecking=accept-new \
+              "${SSH_USER}@${SSH_HOST}" \
+              bash -s -- "${REPO_PATH}" "${GIT_SHA}" << 'ENDSSH'
+            set -euo pipefail
+            REPO="$1"
+            SHA="$2"
+            cd "$REPO"
+
+            echo "=== [deploy] starting at $(date -u) | commit: ${SHA} ==="
+
+            # Pull latest code
+            git fetch origin main
+            git checkout main
+            git pull origin main
+
+            C="docker compose --env-file deploy.env -f docker-compose.prod.yml"
+
+            # Tag current prod images as :prev before we rebuild, so rollback
+            # has a known-good target. Best-effort — ignore if image doesn't exist.
+            for SVC in data_gateway interview_core feedback_billing admin_ops; do
+              docker tag "intants/${SVC}:prod" "intants/${SVC}:prev" 2>/dev/null || true
+            done
+
+            # Build new images (multi-stage; uses Docker layer cache)
+            $C build --pull
+
+            # Bring up new containers with a rolling restart. Docker Compose
+            # starts new containers before removing the old ones for services
+            # that do not change image. The interview_worker stop_grace_period
+            # (210 s) ensures live interviews drain before the container stops.
+            $C up -d --remove-orphans
+
+            # Run any pending database migrations (idempotent — safe to run on
+            # every deploy; alembic checks current head before migrating).
+            $C exec -T data_gateway \
+              poetry run alembic upgrade head
+
+            echo "=== [deploy] finished at $(date -u) ==="
+          ENDSSH
+
+      # -----------------------------------------------------------------------
+      # Rollback path: re-tag :prev → :prod and restart without rebuilding.
+      # -----------------------------------------------------------------------
+      - name: Rollback to previous image
+        if: inputs.rollback == 'true'
+        env:
+          SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          REPO_PATH: ${{ secrets.DEPLOY_REPO_PATH }}
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+              -o StrictHostKeyChecking=accept-new \
+              "${SSH_USER}@${SSH_HOST}" \
+              bash -s -- "${REPO_PATH}" << 'ENDSSH'
+            set -euo pipefail
+            REPO="$1"
+            cd "$REPO"
+
+            echo "=== [rollback] starting at $(date -u) ==="
+
+            C="docker compose --env-file deploy.env -f docker-compose.prod.yml"
+
+            # Re-tag :prev back to :prod for all services.
+            MISSING=0
+            for SVC in data_gateway interview_core feedback_billing admin_ops; do
+              if docker image inspect "intants/${SVC}:prev" >/dev/null 2>&1; then
+                docker tag "intants/${SVC}:prev" "intants/${SVC}:prod"
+                echo "  re-tagged intants/${SVC}:prev -> :prod"
+              else
+                echo "  WARNING: intants/${SVC}:prev not found — cannot roll back this service"
+                MISSING=1
+              fi
+            done
+
+            if [ "$MISSING" -eq 1 ]; then
+              echo "ERROR: one or more :prev images missing; rollback aborted to avoid partial state."
+              exit 1
+            fi
+
+            # Restart containers without rebuilding (uses the just-tagged :prod images).
+            $C up -d --no-build --remove-orphans
+
+            echo "=== [rollback] finished at $(date -u) ==="
+          ENDSSH
+
+      # -----------------------------------------------------------------------
+      # Health check: verify Caddy /health responds 200 after deploy.
+      # Fails the job (alerting the operator) if the stack did not come up clean.
+      # -----------------------------------------------------------------------
+      - name: Health check — Caddy /health
+        if: always() && inputs.rollback != 'true'
+        env:
+          SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          REPO_PATH: ${{ secrets.DEPLOY_REPO_PATH }}
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+              -o StrictHostKeyChecking=accept-new \
+              "${SSH_USER}@${SSH_HOST}" \
+              bash -s -- "${REPO_PATH}" << 'ENDSSH'
+            set -euo pipefail
+            REPO="$1"
+            cd "$REPO"
+
+            C="docker compose --env-file deploy.env -f docker-compose.prod.yml"
+
+            # Wait up to 90 s for all containers to report healthy.
+            echo "Waiting for containers to become healthy (up to 90 s)..."
+            WAITED=0
+            while [ "$WAITED" -lt 90 ]; do
+              UNHEALTHY=$($C ps --format json 2>/dev/null \
+                | python3 -c "
+import sys, json
+lines = sys.stdin.read().strip().splitlines()
+count = 0
+for line in lines:
+    try:
+        svc = json.loads(line)
+        state = svc.get('Health', '') or svc.get('State', '')
+        if state not in ('healthy', 'running'):
+            count += 1
+    except Exception:
+        pass
+print(count)
+" 2>/dev/null || echo "0")
+              if [ "$UNHEALTHY" -eq 0 ]; then
+                break
+              fi
+              sleep 5
+              WAITED=$((WAITED + 5))
+            done
+
+            # Hit the Caddy /health endpoint via localhost to confirm routing.
+            API_DOMAIN=$(grep '^PUBLIC_API_DOMAIN=' deploy.env | cut -d= -f2 | tr -d '"' || echo "")
+            if [ -n "$API_DOMAIN" ]; then
+              echo "Checking https://${API_DOMAIN}/health ..."
+              HTTP_CODE=$(curl -sk -o /dev/null -w "%{http_code}" \
+                "https://${API_DOMAIN}/health" || echo "000")
+              echo "HTTP status: ${HTTP_CODE}"
+              if [ "$HTTP_CODE" != "200" ]; then
+                echo "ERROR: health check returned ${HTTP_CODE} — deploy may be broken."
+                $C ps
+                $C logs --tail=30 caddy
+                exit 1
+              fi
+              echo "Health check PASSED."
+            else
+              echo "WARNING: PUBLIC_API_DOMAIN not found in deploy.env — skipping HTTPS health check."
+              echo "Run: docker compose --env-file deploy.env -f docker-compose.prod.yml ps"
+            fi
+          ENDSSH
+
+      # -----------------------------------------------------------------------
+      # Always print a summary so the operator can see what happened.
+      # -----------------------------------------------------------------------
+      - name: Deploy summary
+        if: always()
+        run: |
+          echo "### Deploy summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Trigger | \`${{ github.event_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Actor | \`${{ github.actor }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ inputs.commit_sha || github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Rollback | \`${{ inputs.rollback }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Time (UTC) | \`$(date -u)\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Rollback: re-run this workflow with **rollback = true** or see \`docs/DEPLOY-ORACLE.md\`." >> $GITHUB_STEP_SUMMARY
+
+      # -----------------------------------------------------------------------
+      # Clean up the SSH key regardless of outcome.
+      # -----------------------------------------------------------------------
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
