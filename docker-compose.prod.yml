@@ -156,10 +156,13 @@ services:
       #
       # WORKER_MAX_CONCURRENT_JOBS: each live interview holds the prewarmed
       # Silero VAD model + one Sarvam STT stream + one Sarvam TTS stream + an
-      # LLM call (Groq). Measured peak per-job overhead is ~350–450 MB. With
+      # LLM call (Gemini). Measured peak per-job overhead is ~350–450 MB. With
       # 4 GB allocated to this container and 6 services sharing the 24 GB host,
-      # 5 concurrent jobs keeps peak RSS safely below mem_limit and leaves
-      # headroom for GC spikes. Raise to 7–8 if the VM is upgraded to 32 GB.
+      # 4 concurrent jobs is the memory-safe ceiling (4 × 450 MB = 1.8 GB peak
+      # RSS + ~150 MB VAD model = ~2 GB, well inside the 4 GB mem_limit with
+      # buffer for GC spikes). Raise to 6–7 if the VM is upgraded to 32 GB.
+      # EFFECTIVE CAP ON THIS BOX: 4. Do NOT set this above 4 without re-
+      # measuring RSS on the actual host — OOM kills are silent mid-interview.
       #
       # WORKER_DRAIN_TIMEOUT_SECONDS: on SIGTERM the worker stops accepting new
       # jobs and waits up to 120 s for in-flight interviews to finish naturally
@@ -170,7 +173,7 @@ services:
       # JOB_MEMORY_LIMIT_MB: informational annotation used by monitoring/alerts
       # to set the per-job memory budget. Docker enforces the container-level
       # mem_limit; this variable is not read by the worker binary itself.
-      WORKER_MAX_CONCURRENT_JOBS: "5"
+      WORKER_MAX_CONCURRENT_JOBS: "4"
       WORKER_DRAIN_TIMEOUT_SECONDS: "120"
       JOB_MEMORY_LIMIT_MB: "400"
     command: ["python", "-m", "app.worker.interview_worker", "start"]
@@ -219,8 +222,8 @@ services:
     # previous 150 s value (only 30 s above drain) which risked SIGKILL
     # mid-scoring on a busy VM.
     stop_grace_period: 210s
-    # 4 GB for the worker: base Silero VAD model ~150 MB + 5 concurrent jobs
-    # × ~450 MB peak = ~2.4 GB + buffer. Keeps the worker within its share of
+    # 4 GB for the worker: base Silero VAD model ~150 MB + 4 concurrent jobs
+    # × ~450 MB peak = ~1.95 GB + buffer. Keeps the worker within its share of
     # the 24 GB host without starving the other five containers.
     mem_limit: 4g
     # 1.5 vCPU: the worker is I/O-bound (WebRTC relay, Sarvam HTTP, Groq HTTP)

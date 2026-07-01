@@ -840,6 +840,18 @@ async def update_profile(
 
 class ChangePasswordBody(BaseModel):
     new_password: str = Field(min_length=8, description="New password (min 8 chars)")
+    # Required for normal authenticated users so a stolen 15-min access token
+    # cannot permanently take over the account.
+    # EXEMPTION: when must_change_password=true the user is setting their very
+    # first password (admin-provisioned bootstrap flow) — there is no "current"
+    # password to supply, so we allow this field to be omitted in that case only.
+    current_password: str | None = Field(
+        default=None,
+        description=(
+            "Current password — required unless must_change_password is true "
+            "(bootstrap first-change flow)."
+        ),
+    )
 
 
 @router.post(
@@ -859,13 +871,69 @@ async def change_password(
     Used by HR managers (created with a bootstrap password) to set a real one on
     first login, but available to any authenticated user.
 
-    SECURITY: after a successful password change, ALL other sessions for this user
-    are revoked (auth.logout_all). This closes the audit finding
+    SECURITY — current-password verification:
+    When the account is NOT in the forced-first-change state (must_change_password
+    is false), ``current_password`` MUST be supplied and must match the stored
+    bcrypt hash.  This prevents a stolen 15-minute access token from permanently
+    taking over the account.
+
+    EXEMPTION: when must_change_password=true the user is completing the bootstrap
+    first-login flow.  There is no pre-existing real password to verify; the check
+    is skipped for this path only.
+
+    SECURITY — session revocation:
+    After a successful password change, ALL other sessions for this user are
+    revoked (auth.logout_all). This closes the audit finding
     'change_password does not revoke sessions': a stolen credential or hijacked
     session cannot remain valid after the owner changes their password.
     The revocation is best-effort — a Redis hiccup is logged but does NOT roll back
     the password change (the new password is already the safer state).
     """
+    uid = uuid.UUID(current_user.user_id)
+
+    # --- Fetch must_change_password + stored password hash in one round-trip ---
+    row = (
+        await db.execute(
+            text(
+                "SELECT must_change_password, password_hash "
+                "FROM users WHERE id = :uid AND deleted_at IS NULL"
+            ),
+            {"uid": uid},
+        )
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found.",
+        )
+    must_change: bool = bool(row[0])
+    stored_hash: str | None = row[1]
+
+    # --- Current-password verification (skip only for bootstrap first-change) ---
+    if not must_change:
+        if not body.current_password:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="current_password is required to change your password.",
+            )
+        if not stored_hash:
+            # Account has no password (e.g. SSO-only) — block to prevent silent bypass.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Password change is not supported for this account type.",
+            )
+        current_pw_bytes = body.current_password.encode()
+        stored_hash_bytes = stored_hash.encode()
+        pw_ok: bool = await asyncio.to_thread(
+            bcrypt.checkpw, current_pw_bytes, stored_hash_bytes
+        )
+        if not pw_ok:
+            log.warning("auth.password_change.wrong_current", user_id=current_user.user_id)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Current password is incorrect.",
+            )
+
     rounds: int = settings.password_hash_rounds
     new_hash = await asyncio.to_thread(
         lambda: bcrypt.hashpw(
@@ -877,7 +945,7 @@ async def change_password(
             "UPDATE users SET password_hash = :pw, must_change_password = false, "
             "updated_at = now() WHERE id = :uid"
         ),
-        {"pw": new_hash, "uid": uuid.UUID(current_user.user_id)},
+        {"pw": new_hash, "uid": uid},
     )
     await db.commit()
     log.info("auth.password_changed", user_id=current_user.user_id)

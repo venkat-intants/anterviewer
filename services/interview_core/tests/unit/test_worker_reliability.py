@@ -422,9 +422,10 @@ async def test_resolve_consent_user_id_retries_on_transient_error() -> None:
     attempts are exhausted the sentinel _CONSENT_RESOLVE_DB_ERROR is returned
     so the watchdog can fail-closed.
     """
-    import app.worker.interview_worker as wk
+    from collections.abc import AsyncGenerator
     from contextlib import asynccontextmanager
-    from typing import AsyncGenerator
+
+    import app.worker.interview_worker as wk
 
     call_count = 0
 
@@ -463,9 +464,10 @@ async def test_resolve_consent_user_id_succeeds_on_second_attempt() -> None:
     should not produce the fail-closed sentinel.
     """
     import uuid
-    import app.worker.interview_worker as wk
+    from collections.abc import AsyncGenerator
     from contextlib import asynccontextmanager
-    from typing import AsyncGenerator
+
+    import app.worker.interview_worker as wk
 
     target_uid = uuid.UUID("11111111-2222-3333-4444-555555555555")
     attempt = 0
@@ -690,3 +692,112 @@ def test_container_memory_limit_mb_default_nonzero() -> None:
         "container_memory_limit_mb must be > 0 so the memory gate in "
         "_request_fnc has a ceiling to compare against"
     )
+
+
+# ---------------------------------------------------------------------------
+# 12. (Finding 3 — cap consistency) Effective cap equals the configured cap
+# ---------------------------------------------------------------------------
+
+
+def test_effective_cap_equals_configured_cap() -> None:
+    """The memory gate must NOT reject any job slot up to worker_max_concurrent_jobs.
+
+    This test proves the two admission-control values in config are consistent:
+    for every job slot from 1 to worker_max_concurrent_jobs (inclusive), the
+    memory gate passes.  If job_memory_limit_mb and container_memory_limit_mb
+    are misconfigured such that the memory gate fires BEFORE the concurrency
+    ceiling, _request_fnc would silently reject below the advertised cap —
+    the reconciled cap is 4 (memory-safe on the box), and BOTH gates must
+    agree on exactly 4.
+
+    This test FAILS if:
+      - container_memory_limit_mb is set too low (e.g., 500 MB with 150 MB/job
+        would only fit 3 jobs before the gate fires at slot 4: 4*150=600>500).
+      - worker_max_concurrent_jobs is increased without raising
+        container_memory_limit_mb proportionally.
+      - job_memory_limit_mb is raised without raising container_memory_limit_mb.
+    """
+    from app.config import settings
+
+    cap = settings.worker_max_concurrent_jobs
+    mem_per_job = settings.job_memory_limit_mb
+    mem_limit = settings.container_memory_limit_mb
+
+    assert cap == 4, (
+        f"Reconciled concurrency cap must be 4 (memory-safe on the Oracle Free "
+        f"Tier VM), got {cap}. Update the cap AND this test if the VM spec changes."
+    )
+
+    if mem_per_job == 0 or mem_limit == 0:
+        # Memory gate is disabled — only the concurrency counter matters.
+        return
+
+    # For every job slot 1..cap, accepting it must NOT trigger the memory gate.
+    for slot in range(1, cap + 1):
+        # _active_jobs when the slot-th job requests admission = slot - 1.
+        active_before = slot - 1
+        estimated_rss_mb = (active_before + 1) * mem_per_job
+        assert estimated_rss_mb <= mem_limit, (
+            f"Memory gate would reject job slot {slot}/{cap} "
+            f"(estimated {estimated_rss_mb} MB > container limit {mem_limit} MB). "
+            f"Raise container_memory_limit_mb to at least {cap * mem_per_job} MB "
+            f"or reduce job_memory_limit_mb so all {cap} configured jobs fit."
+        )
+
+
+@pytest.mark.asyncio
+async def test_request_fnc_accepts_exactly_cap_jobs_sequentially() -> None:
+    """_request_fnc must accept the 1st through cap-th job and reject the (cap+1)-th.
+
+    This is the end-to-end admission-gate integration test: both the concurrency
+    cap and the memory gate are active (with defaults matching config) and the
+    effective ceiling must equal worker_max_concurrent_jobs (4).
+
+    The test FAILS if:
+      - The memory gate fires before the concurrency ceiling (effective cap < 4).
+      - The concurrency cap is misconfigured to a value other than 4.
+    """
+    import app.worker.interview_worker as wk
+    from app.config import settings
+
+    cap = settings.worker_max_concurrent_jobs
+
+    original = wk._active_jobs
+    try:
+        accepted = 0
+        rejected = False
+
+        for slot in range(1, cap + 2):  # test cap+1 total attempts
+            wk._active_jobs = slot - 1  # simulate jobs already running
+            mock_request = AsyncMock()
+
+            with (
+                patch.object(wk, "_publish_capacity", new=AsyncMock()),
+            ):
+                await wk._request_fnc(mock_request)
+
+            if mock_request.accept.called:
+                accepted += 1
+                # Simulate the job actually starting (increment counter).
+                # _request_fnc does NOT increment — entrypoint() does; we
+                # simulate that by setting _active_jobs = slot so the next
+                # iteration sees the correct running count.
+            elif mock_request.reject.called:
+                rejected = True
+                # First rejection must be at slot == cap + 1.
+                assert slot == cap + 1, (
+                    f"First rejection occurred at slot {slot} but expected slot {cap + 1}. "
+                    f"The effective cap is {slot - 1}, not the configured {cap}."
+                )
+                break
+
+        assert accepted == cap, (
+            f"Expected exactly {cap} accepted jobs (== worker_max_concurrent_jobs), "
+            f"got {accepted}. The memory gate may be rejecting below the configured cap."
+        )
+        assert rejected, (
+            f"Expected a rejection at slot {cap + 1} but got {cap + 1} acceptances. "
+            f"The concurrency cap may not be enforced."
+        )
+    finally:
+        wk._active_jobs = original

@@ -1,9 +1,10 @@
 """Pydantic schemas for the DPDP consent endpoints — S3-011 / S4-010.
 
-ConsentRequest          — POST /consent body: purpose + version
-ConsentResponse         — response shape for both 200 (idempotent) and 201 (new)
-ConsentStatus           — GET /consent/status response
-ConsentRevocationResponse — DELETE /consent response (S4-010)
+ConsentRequest              — POST /consent body: purpose + version
+ConsentResponse             — response shape for both 200 (idempotent) and 201 (new)
+ConsentStatus               — GET /consent/status response
+RevokedConsentItem          — one revoked row (consent_type, consent_id, revoked_at)
+ConsentRevocationResponse   — DELETE /consent response (S4-010); covers ALL consent types
 """
 
 from __future__ import annotations
@@ -55,14 +56,31 @@ class ConsentStatus(BaseModel):
     )
 
 
+class RevokedConsentItem(BaseModel):
+    """One revoked consent row returned inside ConsentRevocationResponse."""
+
+    consent_type: str = Field(description="The consent type that was revoked")
+    consent_id: str = Field(description="UUID of the revoked dpdp_consent_ledger row")
+    revoked_at: str = Field(description="ISO-8601 UTC timestamp of this revocation")
+
+
 class ConsentRevocationResponse(BaseModel):
     """Response returned on DELETE /consent — S4-010 (DPDP §11 right to withdraw).
 
-    revoked:     Always True when HTTP 200 is returned.
-    consent_id:  UUID of the row that was just revoked.
-    revoked_at:  ISO-8601 UTC timestamp set by this request.
+    DPDP §11 mandates that a data principal can withdraw ALL consents at once.
+    DELETE /consent therefore revokes every active consent row for the user —
+    both 'interview_voice_recording' (voice/audio) and 'video_capture'
+    (webcam / proctoring biometric) — in a single atomic call.
+
+    revoked:  Always True when HTTP 200 is returned.
+    items:    List of each consent type that was revoked in this call.
+              Empty only when HTTP 404 is returned (no active consents exist).
     """
 
     revoked: bool
-    consent_id: str = Field(description="UUID of the revoked dpdp_consent_ledger row")
-    revoked_at: str = Field(description="ISO-8601 UTC timestamp of consent revocation")
+    items: list[RevokedConsentItem] = Field(
+        description=(
+            "Each active consent row that was revoked. Includes all consent types "
+            "(interview_voice_recording, video_capture) that had an active row."
+        )
+    )

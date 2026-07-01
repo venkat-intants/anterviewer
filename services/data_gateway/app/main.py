@@ -73,8 +73,30 @@ from app.routers.sso_naipunyam import router as sso_naipunyam_router
 # Drops known PII field names from every log event dict before rendering.
 # This catches cases where a developer accidentally logs a raw field.
 # Placed just before JSONRenderer in the processor chain.
+#
+# Deny-list policy:
+#   Identity PII   — email, password, phone, full_name
+#   Voice / text   — transcript, answer, question, text_content
+#   Document PII   — resume_text, jd_text (may contain candidate bio / job details)
+#   Contact / geo  — address
 # ---------------------------------------------------------------------------
-_PII_FIELDS = frozenset({"email", "password", "phone", "full_name"})
+_PII_FIELDS = frozenset({
+    # identity
+    "email",
+    "password",
+    "phone",
+    "full_name",
+    # voice / interview transcript content
+    "transcript",
+    "answer",
+    "question",
+    "text_content",
+    # document PII (resume / job description free-text)
+    "resume_text",
+    "jd_text",
+    # contact / geo
+    "address",
+})
 
 
 def _redact_pii_processor(

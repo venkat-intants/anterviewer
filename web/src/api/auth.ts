@@ -78,15 +78,30 @@ export async function logout(_token?: string): Promise<LogoutResponse> {
 }
 
 /**
- * Set a new password and clear the must-change flag (HR workflow).
- * Used after an HR manager logs in with the bootstrap password.
+ * Set a new password and clear the must-change flag.
+ *
+ * When `currentPassword` is supplied it is sent as `current_password` in the
+ * request body — required for normal (non-bootstrap) password changes so a stolen
+ * access token cannot permanently take over the account.
+ *
+ * When `currentPassword` is omitted the backend allows the call ONLY if the
+ * account has `must_change_password=true` (the HR bootstrap first-change flow).
+ * The ChangePassword.tsx page (must_change_password gate) uses this path and
+ * intentionally omits `currentPassword`.
  */
-export async function changePassword(newPassword: string): Promise<{ ok: boolean }> {
+export async function changePassword(
+  newPassword: string,
+  currentPassword?: string,
+): Promise<{ ok: boolean }> {
   if (USE_MOCK) {
     await simulateDelay(300);
     return { ok: true };
   }
-  return apiPost<{ ok: boolean }>('/auth/change-password', { new_password: newPassword });
+  const body: Record<string, string> = { new_password: newPassword };
+  if (currentPassword !== undefined) {
+    body.current_password = currentPassword;
+  }
+  return apiPost<{ ok: boolean }>('/auth/change-password', body);
 }
 
 /**

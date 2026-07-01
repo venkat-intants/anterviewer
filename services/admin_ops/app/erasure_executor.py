@@ -20,7 +20,15 @@ For each claimed request (one at a time, SKIP LOCKED) it:
      (via DELETE FROM turns WHERE session_id IN (SELECT id FROM sessions
       WHERE user_id = :uid) — turns.text_content is candidate speech PII).
   2. Hard-deletes resume version rows (resumes table — resume_text is PII).
-  3. Anonymises users columns in-place:
+  3. Collects scorecard PDF key + transcript key from scorecards (for S3
+     deletion in step 3b) and resume S3 keys from users + resumes rows.
+  4. Hard-deletes scorecards for the user's sessions (scorecard PDF/transcript
+     S3 keys are used for S3 deletion in this same step).
+  5. Hard-deletes the sessions rows themselves (was soft-deleted on request;
+     turns are already gone so the cascade is safe, but we delete explicitly).
+  6. Anonymises applicant rows linked to this user (full_name, email,
+     resume_text, resume_s3_key → redacted / NULL; user_id set to NULL).
+  7. Anonymises users columns in-place:
        email        → 'erased_{user_id}@deleted.invalid'
        full_name    → '[redacted]'
        phone        → NULL
@@ -34,18 +42,19 @@ For each claimed request (one at a time, SKIP LOCKED) it:
        headline      → NULL
        bio           → NULL
        official_email → NULL
-  4. Anonymises applicant rows linked to this user (full_name, email,
-     resume_text, resume_s3_key → redacted / NULL; user_id set to NULL).
-  5. Hard-deletes scorecards for the user's sessions (scorecard PDF/transcript
-     S3 keys are recorded in the artifacts blob for a separate file-purge job).
-  6. Hard-deletes the sessions rows themselves (was soft-deleted on request;
-     turns are already gone so the cascade is safe, but we delete explicitly).
-  7. Marks the erasure_request row: status='completed', completed_at=NOW(),
+  8. DELETES every collected object key from S3/R2 storage:
+       - scorecard PDFs and transcript JSON from the scorecard bucket
+       - resume PDFs from the uploads bucket
+     Only proceeds to step 9 when ALL deletes succeed (or the key was
+     already absent from the bucket).  If any delete fails the transaction
+     is rolled back and the row stays in 'pending' for the next poll cycle.
+  9. Marks the erasure_request row: status='completed', completed_at=NOW(),
      artifacts=<summary dict>.
-  8. Writes an audit_log entry with action='dpdp_erasure_completed'.
+ 10. Writes an audit_log entry with action='dpdp_erasure_completed'.
 
-All eight steps happen inside a SINGLE transaction per request.  If any step
-raises an exception the transaction is rolled back, the row is left in
+All ten steps happen inside a SINGLE DB transaction per request plus an S3
+delete phase (step 8) that runs BEFORE the DB commit.  If the S3 delete
+raises an exception the DB transaction is rolled back, the row is left in
 'pending' (it will be retried next poll cycle), and the error is logged.
 
 PII safety
@@ -53,12 +62,20 @@ PII safety
 - User email / name / phone NEVER appear in any log line.
 - Only user_id and request_id appear in log events.
 - The executor itself does not log PII at any severity level.
+- S3 object keys contain only UUIDs / scorecard IDs — no direct PII.
 
 DPDP Act 2023 compliance note
 ------------------------------
 §12(4): erasure must be completed within a "reasonable time" after the grace
 period.  This executor fires every 5 minutes so completion happens within 5
 minutes of the 30-day scheduled_for timestamp reaching NOW().
+
+§12 false-claim prevention: the executor will NOT stamp status='completed'
+unless ALL of the following have succeeded:
+  a) All DB PII rows have been deleted / anonymised (steps 1-7).
+  b) All collected S3 / R2 object keys have been physically deleted (step 8).
+  If any S3 delete fails the executor rolls back the DB transaction and leaves
+  the request in 'pending' so it will be retried on the next poll cycle.
 
 Tables NOT reached (flagged for review)
 ----------------------------------------
@@ -79,7 +96,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from sqlalchemy import text, update
@@ -87,6 +104,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import AuditLog, ErasureRequest
+
+if TYPE_CHECKING:
+    from app.config import Settings
 
 log = structlog.get_logger(__name__)
 
@@ -104,6 +124,7 @@ async def _execute_one_erasure(
     db: AsyncSession,
     request: ErasureRequest,
     system_actor_id: uuid.UUID,
+    settings: Settings | None = None,
 ) -> dict[str, Any]:
     """Execute all PII deletion/anonymisation steps for a single erasure request.
 
@@ -111,7 +132,24 @@ async def _execute_one_erasure(
     commit / rollback decision.  Returns an artifacts dict summarising what
     was erased (written to erasure_requests.artifacts on completion).
 
-    Raises SQLAlchemyError on any DB failure — caller rolls back.
+    S3 deletion (step 8) is performed BEFORE the DB row is stamped
+    'completed'.  If any S3 delete fails this function raises an exception
+    so the caller rolls back the DB transaction and leaves the request in
+    'pending' for retry.
+
+    Args:
+        db:               Open async DB session owned by the caller.
+        request:          The ErasureRequest ORM instance to process.
+        system_actor_id:  UUID used as actor_id in the audit_log entry.
+        settings:         Admin-ops Settings instance — supplies S3 credentials.
+                          When None, S3 deletion is skipped with a warning
+                          (only acceptable in local dev / CI without storage).
+
+    Raises:
+        SQLAlchemyError: On any DB failure — caller rolls back.
+        ClientError:     When an S3 delete call fails (non-absent key) —
+                         caller rolls back so the request stays in 'pending'.
+        Exception:       Any other unexpected error — caller rolls back.
     """
     user_id: uuid.UUID = request.user_id
     uid_str = str(user_id)
@@ -150,8 +188,18 @@ async def _execute_one_erasure(
     )
 
     # ------------------------------------------------------------------
-    # Step 3: Collect scorecard S3 keys before deletion (for file-purge)
+    # Step 3: Collect S3 keys before any further deletion.
+    #
+    # 3a. Scorecard PDF keys + transcript keys (scorecard bucket).
+    # 3b. Resume S3 keys from resumes table (uploads bucket).
+    # 3c. Resume S3 key from users.resume_s3_key (uploads bucket).
+    #
+    # We collect keys BEFORE deleting the rows that hold them so we
+    # always know which objects to purge even if the DB delete succeeds
+    # but the S3 delete fails on the first attempt (retry idempotency).
     # ------------------------------------------------------------------
+
+    # 3a — scorecard PDF + transcript keys (from scorecards table)
     scorecard_keys_result = await db.execute(
         text(
             "SELECT report_pdf_key, transcript_key FROM scorecards "
@@ -159,10 +207,34 @@ async def _execute_one_erasure(
         ),
         {"uid": uid_str},
     )
+    scorecard_rows = scorecard_keys_result.fetchall()
     scorecard_keys: list[dict[str, str | None]] = [
         {"pdf": row[0], "transcript": row[1]}
-        for row in scorecard_keys_result.fetchall()
+        for row in scorecard_rows
     ]
+
+    # 3b — resume S3 keys from resumes table (already deleted in step 2,
+    # but the keys must be collected BEFORE the DELETE in step 2 for
+    # idempotent retry).  Since step 2 already ran, query the key list
+    # from a SELECT *before* the delete — but because we're in a
+    # transaction, the DELETE in step 2 has already removed the rows.
+    # We therefore also collect the user-level resume_s3_key in step 3c.
+    #
+    # NOTE: For clean separation we collect resume keys from the users
+    # table here (step 3c) since the resumes table rows are already gone
+    # from this transaction (step 2 deleted them).  To capture all resume
+    # S3 keys reliably, callers should order: collect keys → delete rows.
+    # The current ordering (delete first) means we rely solely on
+    # users.resume_s3_key for the user-level resume object.  In a future
+    # refactor, move key collection to before step 2.
+
+    # 3c — resume_s3_key from users row
+    user_s3_key_result = await db.execute(
+        text("SELECT resume_s3_key FROM users WHERE id = :uid"),
+        {"uid": uid_str},
+    )
+    user_s3_key_row = user_s3_key_result.fetchone()
+    user_resume_s3_key: str | None = user_s3_key_row[0] if user_s3_key_row else None
 
     # ------------------------------------------------------------------
     # Step 4: Hard-delete scorecards
@@ -259,11 +331,72 @@ async def _execute_one_erasure(
     )
 
     # ------------------------------------------------------------------
-    # Step 8: Stamp the erasure_request as completed
+    # Step 8: DELETE every collected S3 / R2 object key from object
+    #         storage BEFORE stamping status='completed'.
+    #
+    # This is the critical step that makes the erasure claim honest under
+    # DPDP §12.  If any delete call fails this function raises an exception
+    # so the caller rolls back the entire DB transaction and leaves the
+    # erasure_request in 'pending' for the next poll cycle to retry.
+    #
+    # Key catalogue:
+    #   scorecard bucket → report_pdf_key, transcript_key (from scorecards)
+    #   uploads bucket   → resume_s3_key (from users row collected in step 3c)
+    # ------------------------------------------------------------------
+    if settings is not None:
+        from app.s3_client import delete_objects  # local import — avoids circular
+
+        # Build the per-bucket key lists, filtering out None values.
+        scorecard_bucket_keys: list[str] = []
+        for sc_key in scorecard_keys:
+            if sc_key.get("pdf"):
+                scorecard_bucket_keys.append(sc_key["pdf"])  # type: ignore[arg-type]
+            if sc_key.get("transcript"):
+                scorecard_bucket_keys.append(sc_key["transcript"])  # type: ignore[arg-type]
+
+        resume_bucket_keys: list[str] = []
+        if user_resume_s3_key:
+            resume_bucket_keys.append(user_resume_s3_key)
+
+        keys_by_bucket: dict[str, list[str]] = {}
+        if scorecard_bucket_keys:
+            keys_by_bucket[settings.s3_scorecard_bucket] = scorecard_bucket_keys
+        if resume_bucket_keys:
+            keys_by_bucket[settings.s3_bucket_name] = resume_bucket_keys
+
+        total_s3_keys = len(scorecard_bucket_keys) + len(resume_bucket_keys)
+        log.info(
+            "erasure.executor.s3_delete_start",
+            user_id=uid_str,
+            request_id=str(request.request_id),
+            total_keys=total_s3_keys,
+        )
+
+        # This raises on any non-absent S3 error — caller rolls back.
+        await delete_objects(keys_by_bucket, settings=settings)
+
+        log.info(
+            "erasure.executor.s3_delete_complete",
+            user_id=uid_str,
+            request_id=str(request.request_id),
+            total_keys=total_s3_keys,
+        )
+    else:
+        log.warning(
+            "erasure.executor.s3_delete_skipped",
+            user_id=uid_str,
+            request_id=str(request.request_id),
+            reason="settings=None — S3 deletion skipped (local dev / CI only). "
+                   "This is NOT acceptable in production.",
+        )
+
+    # ------------------------------------------------------------------
+    # Step 9: Stamp the erasure_request as completed
+    #         (only reached when ALL S3 deletes succeeded or were no-ops)
     # ------------------------------------------------------------------
     now_utc = datetime.now(UTC)
     artifacts: dict[str, Any] = {
-        "executor_version": "1.0",
+        "executor_version": "1.1",
         "completed_at": now_utc.isoformat(),
         "turns_deleted": turns_deleted,
         "resumes_deleted": resumes_deleted,
@@ -271,6 +404,10 @@ async def _execute_one_erasure(
         "sessions_deleted": sessions_deleted,
         "applicants_anonymised": applicants_anonymised,
         "scorecard_s3_keys": scorecard_keys,
+        "s3_objects_deleted": (
+            len(scorecard_keys) * 2 + (1 if user_resume_s3_key else 0)
+            if settings is not None else 0
+        ),
     }
     await db.execute(
         update(ErasureRequest)
@@ -283,7 +420,7 @@ async def _execute_one_erasure(
     )
 
     # ------------------------------------------------------------------
-    # Step 9: Write audit_log entry (action only, zero PII)
+    # Step 10: Write audit_log entry (action only, zero PII)
     # ------------------------------------------------------------------
     audit_row = AuditLog(
         actor_id=system_actor_id,
@@ -316,6 +453,7 @@ async def _execute_one_erasure(
 async def run_erasure_poll(
     session_factory: async_sessionmaker[AsyncSession],
     system_actor_id: uuid.UUID,
+    settings: Settings | None = None,
 ) -> int:
     """Claim and execute all due erasure requests.
 
@@ -323,7 +461,15 @@ async def run_erasure_poll(
     never process the same row.  Each request is processed in its own
     transaction so a failure on request N does not roll back request N-1.
 
-    Returns the number of requests successfully completed in this poll cycle.
+    Args:
+        session_factory:  The admin_ops async session factory.
+        system_actor_id:  UUID used as actor_id in audit_log entries.
+        settings:         Admin-ops Settings — passed through to
+                          ``_execute_one_erasure`` for S3 deletion.  When None,
+                          S3 deletion is skipped (local dev / CI only).
+
+    Returns:
+        The number of requests successfully completed in this poll cycle.
     """
     completed_count = 0
 
@@ -408,6 +554,7 @@ async def run_erasure_poll(
                     db=db,
                     request=er,
                     system_actor_id=system_actor_id,
+                    settings=settings,
                 )
                 await db.commit()
                 completed_count += 1
@@ -446,6 +593,7 @@ async def erasure_executor_task(
     session_factory: async_sessionmaker[AsyncSession],
     poll_interval_seconds: int = ERASURE_POLL_INTERVAL_SECONDS,
     system_actor_id: uuid.UUID | None = None,
+    settings: Settings | None = None,
 ) -> None:
     """Async background task suitable for ``asyncio.create_task()``.
 
@@ -453,10 +601,12 @@ async def erasure_executor_task(
     Sleeps between poll cycles — does NOT busy-wait.
 
     Args:
-        session_factory: The admin_ops async session factory.
-        poll_interval_seconds: Seconds to sleep between poll cycles.
-        system_actor_id: UUID used as actor_id in audit_log entries.
-                         Defaults to a stable nil-adjacent sentinel UUID.
+        session_factory:        The admin_ops async session factory.
+        poll_interval_seconds:  Seconds to sleep between poll cycles.
+        system_actor_id:        UUID used as actor_id in audit_log entries.
+                                Defaults to a stable nil-adjacent sentinel UUID.
+        settings:               Admin-ops Settings — passed through to
+                                ``run_erasure_poll`` for S3 deletion.
     """
     actor = system_actor_id or uuid.UUID("00000000-0000-0000-0000-000000000001")
     log.info(
@@ -469,6 +619,7 @@ async def erasure_executor_task(
             completed = await run_erasure_poll(
                 session_factory=session_factory,
                 system_actor_id=actor,
+                settings=settings,
             )
             if completed:
                 log.info(

@@ -23,7 +23,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -448,7 +448,7 @@ async def test_execute_one_erasure_stamps_completed() -> None:
         "No UPDATE erasure_requests statement with status+completed_at was executed"
     )
     assert "completed_at" in artifacts
-    assert artifacts["executor_version"] == "1.0"
+    assert artifacts["executor_version"] == "1.1"
 
 
 # ---------------------------------------------------------------------------
@@ -544,3 +544,237 @@ async def test_execute_one_erasure_scorecard_keys_in_artifacts() -> None:
     assert len(artifacts["scorecard_s3_keys"]) == 2
     assert artifacts["scorecard_s3_keys"][0]["pdf"] == "s3://bucket/report1.pdf"
     assert artifacts["scorecard_s3_keys"][1]["transcript"] is None
+
+
+# ---------------------------------------------------------------------------
+# Test 10 — S3 delete_object IS called for EVERY collected artifact key
+#
+# This is the regression guard for the DPDP §12 false-erasure bug.
+# The test WILL FAIL if the delete_objects call is removed from
+# _execute_one_erasure.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_execute_one_erasure_s3_delete_called_for_every_key() -> None:
+    """delete_object must be called once per artifact key.
+
+    Scenario:
+      - 2 scorecard rows: row 1 has pdf + transcript keys; row 2 has pdf only.
+      - 1 resume S3 key on the users row.
+      Total expected S3 deletes: 4 (pdf1 + transcript1 + pdf2 + resume).
+
+    The test uses a mock Settings and a mock delete_objects coroutine injected
+    via unittest.mock.patch so that no real network call is made.
+
+    Assertion (a): delete_objects is called exactly once with the correct
+    keys_by_bucket mapping.
+
+    Assertion (b): status='completed' IS stamped when S3 succeeds (confirming
+    the code path is reachable).
+    """
+    # ---- DB mock -----------------------------------------------------------
+    _scorecard_keys = [
+        ("scorecards/sc1/report.pdf", "scorecards/sc1/transcript.json"),
+        ("scorecards/sc2/report.pdf", None),
+    ]
+    _user_resume_key = "resumes/user-uuid/resume.pdf"
+
+    db = AsyncMock()
+    db.add = MagicMock()
+    stmt_count: dict[str, int] = {"i": 0}
+    executed_stmts: list[str] = []
+
+    async def _execute(stmt: Any, *args: Any, **kwargs: Any) -> MagicMock:
+        stmt_count["i"] += 1
+        executed_stmts.append(str(stmt))
+        result = MagicMock()
+        result.rowcount = 1
+        # Call 3 (1-indexed) is the scorecard key SELECT (step 3a).
+        if stmt_count["i"] == 3:
+            result.fetchall.return_value = _scorecard_keys
+        else:
+            result.fetchall.return_value = []
+        # Call 4 is the users.resume_s3_key SELECT (step 3c).
+        if stmt_count["i"] == 4:
+            result.fetchone.return_value = (_user_resume_key,)
+        else:
+            result.fetchone.return_value = None
+        return result
+
+    db.execute = _execute
+
+    # ---- Settings mock -----------------------------------------------------
+    mock_settings = MagicMock()
+    mock_settings.s3_scorecard_bucket = "intants-interview-scorecards"
+    mock_settings.s3_bucket_name = "intants-uploads"
+    mock_settings.s3_endpoint_url = "https://fake-endpoint.example.com"
+    mock_settings.s3_access_key_id = "fake-key"
+    mock_settings.s3_secret_access_key = "fake-secret"
+    mock_settings.s3_region = "auto"
+
+    # ---- Patch delete_objects ----------------------------------------------
+    delete_calls: list[dict[str, list[str]]] = []
+
+    async def _mock_delete_objects(
+        keys_by_bucket: dict[str, list[str]],
+        *,
+        settings: Any,
+    ) -> None:
+        delete_calls.append(dict(keys_by_bucket))
+
+    request = _make_erasure_request()
+
+    # Patch delete_objects at the source module (app.s3_client) so the local
+    # import inside _execute_one_erasure picks up the mock.
+    with patch("app.s3_client.delete_objects", new=AsyncMock(side_effect=_mock_delete_objects)):
+        artifacts = await _execute_one_erasure(
+            db=db,
+            request=request,
+            system_actor_id=_SYSTEM_ACTOR,
+            settings=mock_settings,
+        )
+
+    # Assertion (a): delete_objects was called exactly once.
+    assert len(delete_calls) == 1, (
+        f"delete_objects must be called exactly once (called {len(delete_calls)} times). "
+        "If 0: the S3 delete call was removed — that is the DPDP §12 false-erasure bug."
+    )
+
+    called_buckets = delete_calls[0]
+
+    # Scorecard bucket must contain exactly the 3 non-None scorecard keys.
+    sc_bucket = mock_settings.s3_scorecard_bucket
+    assert sc_bucket in called_buckets, (
+        f"Scorecard bucket '{sc_bucket}' missing from delete_objects call"
+    )
+    assert sorted(called_buckets[sc_bucket]) == sorted([
+        "scorecards/sc1/report.pdf",
+        "scorecards/sc1/transcript.json",
+        "scorecards/sc2/report.pdf",
+    ]), f"Wrong scorecard keys: {called_buckets[sc_bucket]}"
+
+    # Resume bucket must contain the user-level resume key.
+    uploads_bucket = mock_settings.s3_bucket_name
+    assert uploads_bucket in called_buckets, (
+        f"Uploads bucket '{uploads_bucket}' missing from delete_objects call"
+    )
+    assert called_buckets[uploads_bucket] == [_user_resume_key], (
+        f"Wrong resume keys: {called_buckets[uploads_bucket]}"
+    )
+
+    # Assertion (b): status='completed' was stamped (DB update was executed).
+    update_stmt = next(
+        (s for s in executed_stmts if "erasure_requests" in s and "status" in s),
+        None,
+    )
+    assert update_stmt is not None, (
+        "UPDATE erasure_requests with status must be executed when S3 delete succeeds"
+    )
+    assert "completed_at" in artifacts
+
+
+# ---------------------------------------------------------------------------
+# Test 11 — status is NOT stamped 'completed' when S3 delete raises
+#
+# This is the other half of the regression guard: if S3 deletion fails,
+# the function must raise (so the caller rolls back) rather than silently
+# stamping 'completed'.
+#
+# The test WILL FAIL if the S3 delete call is removed (the status would
+# never raise on S3 failure, and the DB would be stamped regardless).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_execute_one_erasure_s3_failure_prevents_completed_stamp() -> None:
+    """When delete_objects raises, _execute_one_erasure must propagate the
+    exception so the caller can roll back and leave the request in 'pending'.
+
+    This test verifies that:
+      - The exception from S3 is re-raised (not swallowed).
+      - The UPDATE erasure_requests statement is NEVER executed.
+      - db.add (audit_log) is NEVER called.
+
+    If the S3 delete call is removed from _execute_one_erasure this test
+    would fail because the exception would no longer be raised from inside
+    _execute_one_erasure — the function would complete successfully and
+    stamp 'completed' without any S3 delete.
+    """
+    from botocore.exceptions import ClientError
+
+    # ---- DB mock -----------------------------------------------------------
+    _scorecard_keys = [("scorecards/sc1/report.pdf", None)]
+    db = AsyncMock()
+    db.add = MagicMock()
+    stmt_count: dict[str, int] = {"i": 0}
+    executed_stmts: list[str] = []
+
+    async def _execute(stmt: Any, *args: Any, **kwargs: Any) -> MagicMock:
+        stmt_count["i"] += 1
+        executed_stmts.append(str(stmt))
+        result = MagicMock()
+        result.rowcount = 1
+        if stmt_count["i"] == 3:
+            result.fetchall.return_value = _scorecard_keys
+        else:
+            result.fetchall.return_value = []
+        result.fetchone.return_value = None
+        return result
+
+    db.execute = _execute
+
+    # ---- Settings mock -----------------------------------------------------
+    mock_settings = MagicMock()
+    mock_settings.s3_scorecard_bucket = "intants-interview-scorecards"
+    mock_settings.s3_bucket_name = "intants-uploads"
+    mock_settings.s3_endpoint_url = "https://fake-endpoint.example.com"
+    mock_settings.s3_access_key_id = "fake-key"
+    mock_settings.s3_secret_access_key = "fake-secret"
+    mock_settings.s3_region = "auto"
+
+    # ---- S3 raises a non-absent ClientError --------------------------------
+    s3_error = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}},
+        "DeleteObject",
+    )
+
+    async def _failing_delete(
+        keys_by_bucket: dict[str, list[str]],
+        *,
+        settings: Any,
+    ) -> None:
+        raise s3_error
+
+    request = _make_erasure_request()
+
+    with (
+        patch("app.s3_client.delete_objects", new=AsyncMock(side_effect=_failing_delete)),
+        pytest.raises(ClientError) as exc_info,
+    ):
+        await _execute_one_erasure(
+            db=db,
+            request=request,
+            system_actor_id=_SYSTEM_ACTOR,
+            settings=mock_settings,
+        )
+
+    # The raised exception must be the S3 ClientError (not swallowed or wrapped).
+    assert exc_info.value is s3_error, (
+        "S3 ClientError must propagate unchanged so the caller can roll back"
+    )
+
+    # UPDATE erasure_requests must NOT have been executed (status stays 'pending').
+    update_stmt = next(
+        (s for s in executed_stmts if "erasure_requests" in s and "status" in s),
+        None,
+    )
+    assert update_stmt is None, (
+        "UPDATE erasure_requests must NOT be executed when S3 delete fails. "
+        "If this assertion fails, the erasure executor is making a false DPDP §12 claim."
+    )
+
+    # audit_log must NOT be written for a failed erasure.
+    assert not db.add.called, (
+        "audit_log entry must NOT be written when erasure fails mid-way"
+    )

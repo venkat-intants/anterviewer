@@ -116,25 +116,36 @@ class Settings(BaseSettings):
     #   Each interview job holds: one Silero VAD ONNX thread, one Sarvam STT
     #   WebSocket stream, one Sarvam TTS HTTP stream, one LLM HTTP connection,
     #   and one LiveKit WebRTC connection (≈ 80-150 MB RSS per job at p95).
-    #   At p95 < 2 s latency, 2 vCPU safely handles 3–4 concurrent jobs.
-    #   Beyond that, scheduling contention pushes turn latency over the SLA and
-    #   the combined RSS of 5+ jobs risks OOM-killing the entire worker process,
-    #   dropping ALL live interviews simultaneously.
-    #   Default is deliberately conservative; operators can raise via env var.
+    #   At p95 < 2 s latency, 2 vCPU safely handles up to 4 concurrent jobs.
+    #   Beyond that, scheduling contention pushes turn latency over the 2 s SLA
+    #   and combined RSS risks OOM-killing the entire worker process, dropping
+    #   ALL live interviews simultaneously.
+    #
+    # RECONCILED CONCURRENCY VALUE: 4 (enforced here AND in job/container memory
+    # defaults below).  All three values must agree — if you raise
+    # worker_max_concurrent_jobs, also raise container_memory_limit_mb to at
+    # least worker_max_concurrent_jobs * job_memory_limit_mb, or the memory gate
+    # in request_fnc will silently reject below the advertised ceiling.
+    # test_effective_cap_equals_configured_cap in test_worker_reliability.py
+    # asserts this invariant automatically.
     worker_load_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
     worker_max_concurrent_jobs: int = Field(default=4, ge=0)
 
     # Per-job soft memory ceiling in MB.  When non-zero, request_fnc checks
     # whether accepting one more job would push estimated RSS above the VM's
     # hard cap (container_memory_limit_mb).  Set to 0 to disable the check.
-    # Recommended: ~150 MB per job for the Sarvam + LLM + LiveKit stack.
-    # Example for a 2 GB VM with 20% OS overhead: 150 MB → admits up to ~10
-    # jobs in theory, but worker_max_concurrent_jobs is the binding constraint.
+    # Recommended: ~150 MB incremental cost per job for the Sarvam + LLM +
+    # LiveKit stack (the Silero VAD model, ≈100-200 MB, is prewarmed once and
+    # shared across all jobs in the process — not counted per-job here).
+    # Invariant: job_memory_limit_mb * worker_max_concurrent_jobs <=
+    #            container_memory_limit_mb (or the memory gate fires first).
     job_memory_limit_mb: int = Field(default=150, ge=0)
 
     # Hard memory cap of the container/VM in MB.  Used with job_memory_limit_mb
-    # to estimate whether a new job would OOM.  Set to the actual container
-    # memory limit (e.g. 1800 for a 2 GB VM leaving headroom for OS + models).
+    # to estimate whether a new job would OOM.  Must be >= job_memory_limit_mb *
+    # worker_max_concurrent_jobs (4 * 150 = 600 MB) so all 4 slots are admitted.
+    # Default 1800 MB gives ample headroom on the 2 GB Oracle Free Tier VM
+    # (leaving ~200 MB for OS + prewarmed VAD model).
     container_memory_limit_mb: int = Field(default=1800, ge=0)
 
     # Heartbeat: path written by the asyncio liveness task in the worker process.

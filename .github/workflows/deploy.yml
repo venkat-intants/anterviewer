@@ -241,19 +241,19 @@ jobs:
             while [ "$WAITED" -lt 90 ]; do
               UNHEALTHY=$($C ps --format json 2>/dev/null \
                 | python3 -c "
-import sys, json
-lines = sys.stdin.read().strip().splitlines()
-count = 0
-for line in lines:
-    try:
-        svc = json.loads(line)
-        state = svc.get('Health', '') or svc.get('State', '')
-        if state not in ('healthy', 'running'):
-            count += 1
-    except Exception:
-        pass
-print(count)
-" 2>/dev/null || echo "0")
+              import sys, json
+              lines = sys.stdin.read().strip().splitlines()
+              count = 0
+              for line in lines:
+                  try:
+                      svc = json.loads(line)
+                      state = svc.get('Health', '') or svc.get('State', '')
+                      if state not in ('healthy', 'running'):
+                          count += 1
+                  except Exception:
+                      pass
+              print(count)
+              " 2>/dev/null || echo "0")
               if [ "$UNHEALTHY" -eq 0 ]; then
                 break
               fi

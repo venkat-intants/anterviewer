@@ -12,8 +12,9 @@ Contract:
                          | 401 (missing/invalid JWT)
   GET    /consent/status → 200 ConsentStatus
                          | 401
-  DELETE /consent        → 200 ConsentRevocationResponse (active row revoked)
-                         | 404 (no active consent to revoke)
+  DELETE /consent        → 200 ConsentRevocationResponse (ALL active rows revoked —
+                               both interview_voice_recording and video_capture)
+                         | 404 (no active consent of any type to revoke)
                          | 401
 
 S4-009 race safety:
@@ -49,6 +50,7 @@ from app.schemas.consent import (
     ConsentResponse,
     ConsentRevocationResponse,
     ConsentStatus,
+    RevokedConsentItem,
 )
 
 log = structlog.get_logger(__name__)
@@ -366,12 +368,13 @@ async def get_consent_status(
     "",
     status_code=status.HTTP_200_OK,
     response_model=ConsentRevocationResponse,
-    summary="Revoke DPDP consent (DPDP §11 — right to withdraw)",
+    summary="Revoke ALL DPDP consents (DPDP §11 — right to withdraw)",
     description=(
-        "Sets revoked_at = now() on the user's active interview_voice_recording row. "
-        "Returns 200 with the consent_id and revoked_at timestamp. "
-        "Returns 404 if no active consent exists (including the case where consent "
-        "was already previously revoked — both mean 'nothing to revoke'). "
+        "Sets revoked_at = now() on every active consent row for the user, "
+        "covering both 'interview_voice_recording' (voice/audio) and "
+        "'video_capture' (webcam / proctoring biometric). "
+        "Returns 200 with the list of revoked rows. "
+        "Returns 404 if no active consent of any type exists. "
         "Idempotent in the sense that a second DELETE returns 404 consistently."
     ),
 )
@@ -379,23 +382,40 @@ async def revoke_consent(
     current_user: CurrentUserDep,
     db: DbSessionDep,
 ) -> ConsentRevocationResponse:
-    """Revoke the current user's active DPDP consent (DPDP Act 2023, §11).
+    """Revoke ALL active DPDP consents for the current user (DPDP Act 2023, §11).
 
     DPDP §11 grants every data principal the right to withdraw consent at any
-    time. The consent modal advertises this right; this endpoint fulfils it.
+    time without restriction. A candidate must be able to retract both their
+    voice-recording consent AND their video-capture (webcam / proctoring
+    biometric) consent in a single action. This endpoint revokes every active
+    consent row — regardless of type — so the candidate's full withdrawal is
+    honoured atomically.
 
     After revocation:
       - interview_core/app/consent_guard.py ``has_active_consent`` returns False
-        (its SQL already filters ``revoked_at IS NULL``).
+        for both types (its SQL already filters ``revoked_at IS NULL``).
       - Any attempt to open a new interview WebSocket is rejected with 4003
-        ``consent_required`` until the user grants consent again via POST /consent.
+        ``consent_required`` until the user re-grants consent via POST /consent.
 
     PII safety:
-      - Only user_id and consent_id are logged — no PII.
+      - Only user_id and consent_id(s) are logged — no PII.
     """
-    existing = await _find_active_consent(db, current_user.user_id)
+    now_utc = datetime.now(UTC)
+    revoked_items: list[RevokedConsentItem] = []
 
-    if existing is None:
+    for consent_type in _VALID_CONSENT_TYPES:
+        row = await _find_active_consent(db, current_user.user_id, consent_type)
+        if row is not None:
+            row.revoked_at = now_utc
+            revoked_items.append(
+                RevokedConsentItem(
+                    consent_type=consent_type,
+                    consent_id=str(row.id),
+                    revoked_at=now_utc.isoformat(),
+                )
+            )
+
+    if not revoked_items:
         log.info(
             "consent.revoke.no_active",
             user_id=current_user.user_id,
@@ -405,18 +425,16 @@ async def revoke_consent(
             detail="No active consent to revoke",
         )
 
-    now_utc = datetime.now(UTC)
-    existing.revoked_at = now_utc
     await db.commit()
 
     log.info(
         "consent.revoke.done",
         user_id=current_user.user_id,
-        consent_id=str(existing.id),
+        consent_types=[item.consent_type for item in revoked_items],
+        consent_ids=[item.consent_id for item in revoked_items],
     )
 
     return ConsentRevocationResponse(
         revoked=True,
-        consent_id=str(existing.id),
-        revoked_at=now_utc.isoformat(),
+        items=revoked_items,
     )

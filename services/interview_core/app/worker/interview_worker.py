@@ -34,6 +34,7 @@ import asyncio
 import logging
 import os
 import uuid as _uuid_mod
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -416,6 +417,90 @@ async def resolve_consent_user_id(room_name: str) -> str | None:
 # Keep the old name as an alias so any external callers (e.g. tests pinned to
 # the old name) continue to work during the transition period.
 _lookup_candidate_user_id = resolve_consent_user_id
+
+
+# ---------------------------------------------------------------------------
+# Consent watchdog — extracted module-level helper for testability
+# ---------------------------------------------------------------------------
+#
+# The core watchdog logic is split out from the entrypoint() closure so tests
+# can drive it directly without spinning up a full LiveKit session.  The
+# closure inside entrypoint() delegates to this function.  Any change to
+# sentinel-branch behaviour here will be caught by the unit tests.
+#
+# ``on_close`` has the same signature as the ``_on_close`` closure:
+#     async def on_close(*, timed_out: bool, consent_withdrawn: bool = False) -> None
+
+_OnCloseFn = Callable[..., Awaitable[None]]
+
+
+async def _run_consent_watchdog(
+    *,
+    user_id: str | None,
+    on_close: _OnCloseFn,
+    state: InterviewState,
+    session_id: str,
+) -> None:
+    """Module-level consent watchdog body — delegates from the entrypoint closure.
+
+    Sentinel values for ``user_id`` (see ``resolve_consent_user_id`` docstring):
+      - valid UUID string → poll the consent ledger for this user every
+        CONSENT_RECHECK_INTERVAL_SECONDS.
+      - None              → legit no-op: unrecognised room / CI dispatch.
+      - _CONSENT_RESOLVE_DB_ERROR → transient DB error exhausted all retries
+                            at session start; FAIL-CLOSED: end the session now
+                            rather than continue without withdrawal protection
+                            (DPDP §11 fail-safe).
+
+    Mid-session consent checks FAIL OPEN: a transient DB blip keeps the
+    interview running and retries on the next tick.  Only a definitive
+    'consent is no longer active' response ends the session.
+    """
+    if user_id == _CONSENT_RESOLVE_DB_ERROR:
+        # Resolver exhausted retries at session start — we cannot confirm
+        # active consent.  Fail-closed: end the session immediately.
+        logger.error(
+            "interview-worker.consent_watchdog_fail_closed room=%s — "
+            "resolver DB error exhausted; ending session to protect DPDP §11",
+            session_id,
+        )
+        await on_close(timed_out=False, consent_withdrawn=True)
+        return
+
+    if not user_id:
+        # Legit no-op: unrecognised room (e.g. bare CI dispatch), orphaned
+        # row, or non-UUID room name.
+        return
+
+    import contextlib as _contextlib
+
+    from app.consent_guard import has_active_consent
+    from app.database import get_session_factory, init_engine
+
+    with _contextlib.suppress(Exception):
+        init_engine()
+
+    while not state.close_triggered:
+        await asyncio.sleep(CONSENT_RECHECK_INTERVAL_SECONDS)
+        if state.close_triggered:
+            return
+        try:
+            factory = get_session_factory()
+            async with factory() as db:
+                active = await has_active_consent(db, user_id)
+        except Exception as exc:  # noqa: BLE001 — fail open, retry next tick
+            logger.warning(
+                "interview-worker.consent_recheck_failed room=%s err=%s",
+                session_id, type(exc).__name__,
+            )
+            continue
+        if not active:
+            logger.warning(
+                "interview-worker.consent_withdrawn room=%s — ending session",
+                session_id,
+            )
+            await on_close(timed_out=False, consent_withdrawn=True)
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -1122,73 +1207,16 @@ async def entrypoint(ctx: JobContext) -> None:
     async def _consent_watchdog(user_id: str | None) -> None:
         """DPDP §11 — end the interview if recording consent is withdrawn mid-session.
 
-        Polls the consent ledger every CONSENT_RECHECK_INTERVAL_SECONDS. Consent was
-        already validated at session-create and WS-connect; this closes the gap where
-        a withdrawal DURING a live session would otherwise keep recording until the
-        session ends.
-
-        ``user_id`` is resolved by ``resolve_consent_user_id`` above.
-
-        Sentinel values for ``user_id``:
-          - valid UUID string → poll the consent ledger for this user.
-          - None              → legit no-op: unrecognised room or orphaned row
-                                (not a real session; nothing to protect).
-          - _CONSENT_RESOLVE_DB_ERROR → transient DB error exhausted all retries
-                                at session start; FAIL-CLOSED: end the session
-                                now rather than record without withdrawal
-                                protection (DPDP §11 fail-safe).
-
-        Mid-session consent checks FAIL OPEN: a transient DB blip during the
-        polling loop keeps the interview running and retries on the next tick.
-        Only a *definitive* 'consent is no longer active' response ends the
-        session — this avoids dropping a valid, consented interview on
-        momentary DB unavailability.
+        Delegates to the module-level _run_consent_watchdog so the logic is
+        unit-testable without a live LiveKit session.  See that function's
+        docstring for the sentinel-value contract and fail-open/fail-closed rules.
         """
-        if user_id == _CONSENT_RESOLVE_DB_ERROR:
-            # Resolver exhausted retries at session start — we cannot confirm
-            # active consent.  Fail-closed: end the session now to ensure
-            # a DB outage cannot silently disable DPDP right-to-withdraw.
-            logger.error(
-                "interview-worker.consent_watchdog_fail_closed room=%s — "
-                "resolver DB error exhausted; ending session to protect DPDP §11",
-                session_id,
-            )
-            await _on_close(timed_out=False, consent_withdrawn=True)
-            return
-
-        if not user_id:
-            # Legit no-op: unrecognised room (e.g. bare CI dispatch), orphaned
-            # row, or non-UUID room name.  resolve_consent_user_id already logged.
-            return
-
-        import contextlib as _contextlib
-
-        from app.consent_guard import has_active_consent
-        from app.database import get_session_factory, init_engine
-
-        with _contextlib.suppress(Exception):
-            init_engine()
-
-        while not state.close_triggered:
-            await asyncio.sleep(CONSENT_RECHECK_INTERVAL_SECONDS)
-            if state.close_triggered:
-                return
-            try:
-                factory = get_session_factory()
-                async with factory() as db:
-                    active = await has_active_consent(db, user_id)
-            except Exception as exc:  # noqa: BLE001 — fail open, retry next tick
-                logger.warning(
-                    "interview-worker.consent_recheck_failed room=%s err=%s",
-                    session_id, type(exc).__name__,
-                )
-                continue
-            if not active:
-                logger.warning(
-                    "interview-worker.consent_withdrawn room=%s — ending session", session_id
-                )
-                await _on_close(timed_out=False, consent_withdrawn=True)
-                return
+        await _run_consent_watchdog(
+            user_id=user_id,
+            on_close=_on_close,
+            state=state,
+            session_id=session_id,
+        )
 
     # cap_task MUST be assigned before _on_session_close is registered (next block)
     # and before avatar.start() below — otherwise the "close" handler could fire
@@ -1206,19 +1234,24 @@ async def entrypoint(ctx: JobContext) -> None:
     # closed mid-session). The state._close_triggered guard prevents double-execution.
     # ------------------------------------------------------------------
 
-    # Holder for the shielded teardown task created by _on_session_close.
-    # The framework shutdown hook awaits it so teardown always completes.
+    # Holder for the REAL inner teardown task created by _on_session_close.
+    # Storing the real Task (not the asyncio.shield wrapper) gives us two
+    # guarantees:
+    #   1. A strong reference prevents GC of the coroutine while it is running.
+    #   2. The shutdown hook awaits the real Task, which survives cancellation of
+    #      the shield wrapper — so scoring/persist always completes on SIGTERM.
+    # asyncio.shield() is only used at the await site in the shutdown hook, not
+    # here, so we never store the ephemeral shield Future.
     _teardown_task_holder: dict[str, asyncio.Task[None] | None] = {"task": None}
 
     async def _abrupt_close() -> None:
         """DB update + conditional scoring for unexpected disconnects.
 
-        Wrapped in asyncio.shield() by the caller (_on_session_close) so the
-        event loop cannot GC this coroutine when the candidate closes their
-        browser before it finishes — the most common abrupt exit path.
-
-        The framework's add_shutdown_callback awaits the shielded task to ensure
-        turns are persisted and scoring fires before the job process exits.
+        Launched as a real asyncio.Task by _on_session_close and tracked in
+        _teardown_task_holder so the framework's shutdown hook can await it.
+        asyncio.shield() is applied at await-time (in _await_teardown_on_shutdown),
+        not here, ensuring the coroutine body is never GC'd when the candidate
+        closes their browser before it finishes.
         """
         if state.close_triggered:
             return
@@ -1249,20 +1282,23 @@ async def entrypoint(ctx: JobContext) -> None:
     def _on_session_close(_event: Any) -> None:
         """Handle session close: cancel background tasks; run DB+scoring if not done.
 
-        The teardown coroutine is launched via asyncio.shield() so it survives
-        event-loop cancellation triggered by the LiveKit framework when the room
-        is torn down.  The task reference is stored in _teardown_task_holder so
-        the framework's shutdown callback can await it before exiting the process.
+        The teardown coroutine is launched as a real asyncio.Task and its
+        reference is stored in _teardown_task_holder.  Storing the REAL task
+        (not the asyncio.shield wrapper) is critical: only a real Task has a
+        strong reference that prevents GC, and only the real Task can be reliably
+        awaited by the shutdown hook even after the shield wrapper is cancelled
+        by the LiveKit framework's drain path.
         """
         cap_task.cancel()
         consent_task = consent_task_holder["task"]
         if consent_task is not None:
             consent_task.cancel()
         if not state.close_triggered:
-            # Candidate disconnected abruptly — schedule teardown under shield
-            # so it cannot be GC'd before it writes to the DB.
-            shielded = asyncio.shield(asyncio.ensure_future(_abrupt_close()))
-            _teardown_task_holder["task"] = shielded  # type: ignore[assignment]
+            # Candidate disconnected abruptly — create the REAL task first and
+            # keep a strong reference to it.  asyncio.shield() is applied at
+            # await-time in _await_teardown_on_shutdown, not here.
+            real_task: asyncio.Task[None] = asyncio.ensure_future(_abrupt_close())
+            _teardown_task_holder["task"] = real_task
             logger.info(
                 "interview-worker.abrupt_close_scheduled room=%s", session_id
             )
@@ -1272,8 +1308,15 @@ async def entrypoint(ctx: JobContext) -> None:
     # Register a framework-level shutdown hook that awaits the teardown task.
     # This hook fires when the job process is shutting down (SIGTERM / drain
     # timeout) and ensures _abrupt_close always completes even if the LiveKit
-    # framework cancels the entrypoint coroutine before the shielded task
-    # finishes.  The hook is a no-op when close was already handled by _on_close
+    # framework cancels tasks during the drain.
+    #
+    # We use asyncio.shield() HERE (at await-time), wrapping the real Task stored
+    # in _teardown_task_holder.  This means:
+    #   • If the framework cancels THIS hook's coroutine, the shield absorbs the
+    #     CancelledError but the real Task continues running to completion.
+    #   • We then fall through to await the real task directly (unshielded) so we
+    #     can observe completion or timeout without losing the result.
+    # The hook is a no-op when close was already handled by _on_close
     # (state.close_triggered is True) or when no abrupt close was needed.
     async def _await_teardown_on_shutdown() -> None:
         teardown_task = _teardown_task_holder["task"]
@@ -1282,8 +1325,27 @@ async def entrypoint(ctx: JobContext) -> None:
                 "interview-worker.shutdown_hook_awaiting_teardown room=%s", session_id
             )
             try:
-                await asyncio.wait_for(teardown_task, timeout=30.0)
-            except (TimeoutError, asyncio.CancelledError, Exception) as exc:
+                # Shield the real task so a CancelledError from the framework
+                # drain does not propagate into the task itself — the inner
+                # coroutine (_abrupt_close) must always run to completion.
+                await asyncio.shield(teardown_task)
+            except asyncio.CancelledError:
+                # The shield wrapper was cancelled (framework draining), but
+                # the real task is still running.  Wait for it with a hard
+                # timeout so we don't block the process shutdown indefinitely.
+                logger.info(
+                    "interview-worker.shutdown_hook_shield_cancelled room=%s "
+                    "— awaiting real task directly with timeout",
+                    session_id,
+                )
+                try:
+                    await asyncio.wait_for(teardown_task, timeout=30.0)
+                except (TimeoutError, asyncio.CancelledError, Exception) as exc:
+                    logger.warning(
+                        "interview-worker.shutdown_hook_teardown_incomplete room=%s err=%s",
+                        session_id, type(exc).__name__,
+                    )
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "interview-worker.shutdown_hook_teardown_incomplete room=%s err=%s",
                     session_id, type(exc).__name__,

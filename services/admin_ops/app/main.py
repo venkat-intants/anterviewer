@@ -135,6 +135,7 @@ async def _instrumented_erasure_task() -> None:
                 completed = await run_erasure_poll(
                     session_factory=get_session_factory(),
                     system_actor_id=actor,
+                    settings=settings,
                 )
             if completed:
                 ERASURE_REQUESTS_COMPLETED.inc(completed)

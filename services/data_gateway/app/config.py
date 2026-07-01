@@ -3,7 +3,6 @@ from typing import Literal
 import structlog
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 from shared.security import assert_strong_secrets
 
 log = structlog.get_logger(__name__)
@@ -327,6 +326,36 @@ class Settings(BaseSettings):
                 "INTERVIEW_LINK_SECRET": self.interview_link_secret,
             },
         )
+        return self
+
+    @model_validator(mode="after")
+    def validate_database_ssl(self) -> "Settings":
+        """Enforce SSL for the database connection in production/staging.
+
+        Without SSL, PII transits in cleartext between the app and Neon/Postgres —
+        this violates DPDP §8 data security requirements and creates a MitM risk.
+
+        Rule: in 'production' or 'staging' APP_ENV, DATABASE_SSL must be set to a
+        non-empty value (e.g. 'require').  The check is intentionally permissive
+        about the exact value so operators can supply 'require', 'verify-full', etc.
+
+        Operators who genuinely need plain TCP in a prod-like env (e.g. a private
+        network with TLS terminated at the load-balancer and the loopback exposed to
+        the app) may set DATABASE_SSL=loopback-exempt to acknowledge the risk and
+        pass this check — but the value is never passed to asyncpg.
+        """
+        loopback_exempt = "loopback-exempt"
+        if self.app_env in ("production", "staging") and not self.database_ssl:
+            raise ValueError(
+                f"APP_ENV={self.app_env!r} requires DATABASE_SSL to be set "
+                "(e.g. DATABASE_SSL=require).  Without SSL, PII travels in "
+                "cleartext to Neon/Postgres.  Set DATABASE_SSL=require in your "
+                "environment, or DATABASE_SSL=loopback-exempt if TLS is "
+                "terminated upstream and the DB socket is loopback-only."
+            )
+        # Strip the sentinel value before it reaches asyncpg.
+        if self.database_ssl == loopback_exempt:
+            object.__setattr__(self, "database_ssl", "")
         return self
 
     cors_allowed_origins: str = "http://localhost:5173"

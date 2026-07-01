@@ -44,6 +44,22 @@ class Settings(BaseSettings):
     data_gateway_url: str = "http://localhost:8002"
     feedback_billing_url: str = "http://localhost:8003"
 
+    # --- Object storage (S3-compatible) for DPDP erasure file purge ---
+    # The erasure executor deletes scorecard PDFs + transcripts (s3_scorecard_bucket)
+    # and resume files (s3_bucket_name) from object storage as part of §12 compliance.
+    # Mirror the same env vars used by feedback_billing (S3_ENDPOINT_URL,
+    # S3_SCORECARD_BUCKET) and data_gateway (S3_BUCKET_NAME).
+    # Leave all blank in local dev/CI — the executor skips S3 deletes when no
+    # endpoint is configured and logs a warning instead of failing the erasure.
+    s3_endpoint_url: str = ""          # e.g. https://<acct>.r2.cloudflarestorage.com
+    s3_region: str = "auto"
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    # Bucket that holds scorecard PDFs + transcript JSON (feedback_billing writes here).
+    s3_scorecard_bucket: str = "intants-interview-scorecards"
+    # Bucket that holds resume PDFs + JD documents (data_gateway writes here).
+    s3_bucket_name: str = "intants-uploads"
+
     @model_validator(mode="after")
     def validate_secret_strength(self) -> Settings:
         """Fail fast in production/staging if JWT_SECRET is a weak placeholder

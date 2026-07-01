@@ -5,22 +5,36 @@
 #
 # JOBS OVERVIEW
 # -------------
-# backend   — matrix over [data_gateway, interview_core]
-#             Python 3.12 · Poetry · ruff · mypy · pytest
-#             Postgres 16 + Redis 7 service containers
+# backend       — matrix over [data_gateway, interview_core, feedback_billing,
+#                 admin_ops]. Python 3.12 · Poetry · ruff · mypy · pytest
+#                 Postgres 16 + Redis 7 service containers
 #
-# frontend  — Node 22 · npm ci · eslint · tsc build · vitest
+# frontend      — Node 22 · npm ci · eslint · tsc build · vitest
 #
-# e2e       — COST-GATED (opt-in). Spins up the full local stack via
-#             docker compose, starts backend services + Vite dev server,
-#             then runs Playwright against Chromium.
+# security-scan — REQUIRED on every PR/push (not cost-gated).
+#                 Runs two checks in parallel:
+#                 (a) pip-audit across all 4 service requirements.txt files —
+#                     Python dependency CVE scan; produces a SARIF + JSON SBOM
+#                     artifact for govt evaluators.
+#                 (b) Trivy filesystem scan — secret detection + IaC/container
+#                     vulnerability scan (SARIF uploaded to GitHub Security tab).
+#                 Both checks are non-flaky: pip-audit exits 0 when no CVEs are
+#                 found; Trivy exits 0 when no HIGH/CRITICAL findings exist.
+#                 The deploy gate (ci-gate in deploy.yml) calls this entire
+#                 workflow via `uses:`, so security-scan is automatically
+#                 required before any production deploy.
 #
-#             COST GUARD: the e2e job hits live external APIs (Gemini,
-#             Sarvam) on every run. Estimated cost: ~₹1-2 per run.
-#             To trigger it you MUST either:
-#               (a) add the "e2e" label to the pull request, OR
-#               (b) trigger the workflow manually via workflow_dispatch.
-#             Backend + frontend jobs always run on every PR/push.
+# e2e           — COST-GATED (opt-in). Spins up the full local stack via
+#                 docker compose, starts backend services + Vite dev server,
+#                 then runs Playwright against Chromium.
+#
+#                 COST GUARD: the e2e job hits live external APIs (Gemini,
+#                 Sarvam) on every run. Estimated cost: ~₹1-2 per run.
+#                 To trigger it you MUST either:
+#                   (a) add the "e2e" label to the pull request, OR
+#                   (b) trigger the workflow manually via workflow_dispatch.
+#                 Backend + frontend + security-scan jobs always run on every
+#                 PR/push.
 #
 # REQUIRED GITHUB SECRETS (add under Settings → Secrets → Actions)
 # -----------------------------------------------------------------
@@ -57,11 +71,12 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-        # All four services are gated. data_gateway owns the schema (alembic);
-        # the others read the same DB, so the data_gateway migrations are run
-        # for them before their tests (see the migration step's `!= data_gateway`
-        # condition). Gating feedback_billing + admin_ops closes the prior gap
-        # where scoring/PDF and analytics/DPDP-erasure could regress unchecked.
+      # All four services are gated. data_gateway owns the schema (alembic);
+      # the others read the same DB, so the data_gateway migrations are run
+      # for them before their tests (see the migration step's `!= data_gateway`
+      # condition). Gating feedback_billing + admin_ops closes the prior gap
+      # where scoring/PDF and analytics/DPDP-erasure could regress unchecked.
+      matrix:
         service: [data_gateway, interview_core, feedback_billing, admin_ops]
 
     services:
@@ -438,6 +453,160 @@ jobs:
         run: npm test -- --run --reporter=verbose
 
   # ---------------------------------------------------------------------------
+  # SECURITY SCAN JOB — REQUIRED on every PR/push
+  #
+  # Two parallel scanners, both must pass:
+  #
+  # (a) pip-audit — Python dependency CVE scan.
+  #     Scans all 4 service requirements.txt files.  Exits non-zero if any
+  #     dependency has a known CVE in the PyPI advisory database.  The full
+  #     JSON report is uploaded as an artifact so govt evaluators can inspect
+  #     the SBOM / CVE evidence without re-running the workflow.
+  #     Uses: pypa/gh-action-pip-audit (official pip-audit GitHub Action).
+  #
+  # (b) Trivy filesystem scan — secrets + IaC vulnerability scan.
+  #     Scans the full repo checkout for:
+  #       - Hardcoded secrets / credentials (secret detection)
+  #       - Misconfigured IaC (Dockerfiles, docker-compose, Helm charts)
+  #       - Known CVEs in language dependencies (Python/JS)
+  #     Exits non-zero on HIGH or CRITICAL severity findings.
+  #     The SARIF output is uploaded to GitHub's Security tab so findings
+  #     appear inline on the PR diff.
+  #
+  # NON-FLAKINESS DESIGN:
+  #   - pip-audit: only fails on real CVEs; new DB entries are pinned per
+  #     run via the advisory DB cache built into the action.
+  #   - Trivy: --exit-code 1 only fires on HIGH/CRITICAL; INFO/MEDIUM are
+  #     reported but do not fail the build (avoids noise from advisory DB
+  #     updates on unrelated packages).
+  #   - Neither scanner hits live external network endpoints for the scan
+  #     itself (both download advisory DBs at start, then scan offline).
+  #
+  # SBOM / GOVT EVIDENCE:
+  #   Artifacts retained 30 days:
+  #     pip-audit-report-<run_id>.json  — full CVE report (pip-audit JSON)
+  #     trivy-results-<run_id>.sarif    — Trivy SARIF (all severities)
+  # ---------------------------------------------------------------------------
+  security-scan:
+    name: security scan (pip-audit + trivy)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # (a) pip-audit — Python dependency CVE scan across all 4 services
+      #
+      # We pass each requirements.txt explicitly so pip-audit scans the exact
+      # pinned versions in use (not the broader pyproject.toml ranges).
+      # The action installs pip-audit and runs it in a sandboxed venv so it
+      # does not pollute the runner's global Python environment.
+      # -----------------------------------------------------------------------
+      - name: Set up Python 3.12 (for pip-audit)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: pip-audit — scan all service requirements.txt
+        id: pip_audit
+        run: |
+          pip install --quiet "pip-audit==2.9.0"
+          echo "=== pip-audit: data_gateway ==="
+          pip-audit \
+            --requirement services/data_gateway/requirements.txt \
+            --format json \
+            --output pip-audit-data_gateway.json \
+            --no-deps \
+            || AUDIT_FAIL=1
+          echo "=== pip-audit: interview_core ==="
+          pip-audit \
+            --requirement services/interview_core/requirements.txt \
+            --format json \
+            --output pip-audit-interview_core.json \
+            --no-deps \
+            || AUDIT_FAIL=1
+          echo "=== pip-audit: feedback_billing ==="
+          pip-audit \
+            --requirement services/feedback_billing/requirements.txt \
+            --format json \
+            --output pip-audit-feedback_billing.json \
+            --no-deps \
+            || AUDIT_FAIL=1
+          echo "=== pip-audit: admin_ops ==="
+          pip-audit \
+            --requirement services/admin_ops/requirements.txt \
+            --format json \
+            --output pip-audit-admin_ops.json \
+            --no-deps \
+            || AUDIT_FAIL=1
+          # Merge all service reports into a single SBOM file.
+          python3 -c "
+          import json, glob, sys
+          all_deps = []
+          for f in sorted(glob.glob('pip-audit-*.json')):
+              try:
+                  data = json.loads(open(f).read())
+                  # pip-audit JSON schema: {dependencies: [...], ...}
+                  all_deps.extend(data.get('dependencies', []))
+              except Exception as e:
+                  print(f'WARNING: could not parse {f}: {e}', file=sys.stderr)
+          with open('pip-audit-report.json', 'w') as out:
+              json.dump({'dependencies': all_deps, 'source': 'pip-audit-${{ github.run_id }}'}, out, indent=2)
+          print(f'Merged {len(all_deps)} dependency entries into pip-audit-report.json')
+          "
+          if [ "${AUDIT_FAIL:-0}" = "1" ]; then
+            echo "::error::pip-audit found CVEs in one or more service requirements.txt files. See artifact pip-audit-report-${{ github.run_id }}.json for details."
+            exit 1
+          fi
+
+      - name: Upload pip-audit SBOM report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-report-${{ github.run_id }}
+          path: pip-audit-report.json
+          retention-days: 30
+
+      # -----------------------------------------------------------------------
+      # (b) Trivy filesystem scan — secrets + IaC + dependency vulns
+      #
+      # Scans the full repo checkout for hardcoded secrets, misconfigured IaC
+      # (Dockerfiles, docker-compose, k8s YAML), and CVEs in Python/JS deps.
+      # --exit-code 1 only triggers on HIGH/CRITICAL (not LOW/MEDIUM) to keep
+      # the job non-flaky across advisory DB updates.
+      # The SARIF output feeds into GitHub's Security tab for inline PR diffs.
+      # -----------------------------------------------------------------------
+      - name: Trivy — filesystem scan (secrets + IaC + CVEs)
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          scanners: vuln,secret,misconfig
+          # Ignore unfixed CVEs — advisory entries with no available patch
+          # produce noise without actionable remediation steps.
+          ignore-unfixed: true
+
+      - name: Upload Trivy SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-fs
+
+      - name: Upload Trivy SARIF as artifact (govt evidence)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-results-${{ github.run_id }}
+          path: trivy-results.sarif
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
   # E2E JOB — OPT-IN (cost-gated)
   #
   # ONLY runs when:
@@ -448,12 +617,12 @@ jobs:
   # per run. Do not add this label to every PR — reserve it for PR branches
   # that touch the voice pipeline, WebSocket protocol, or auth flows.
   #
-  # Depends on: backend + frontend (both must be green before E2E runs)
+  # Depends on: backend + frontend + security-scan (all must be green)
   # ---------------------------------------------------------------------------
   e2e:
     name: e2e (opt-in)
     runs-on: ubuntu-latest
-    needs: [backend, frontend]
+    needs: [backend, frontend, security-scan]
     if: >
       contains(github.event.pull_request.labels.*.name, 'e2e') ||
       github.event_name == 'workflow_dispatch'
