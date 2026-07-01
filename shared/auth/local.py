@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import uuid
 from collections.abc import AsyncGenerator, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import bcrypt
@@ -31,6 +32,18 @@ log = structlog.get_logger(__name__)
 
 # Redis key prefix for refresh tokens
 _RT_PREFIX = "refresh:"
+
+# Reverse index: SET of a user's live refresh-token keys. Lets "log out all
+# devices" (and DPDP §9 right-to-erasure) purge every session for a user without
+# an O(N) Redis SCAN over the whole keyspace.
+_SESSIONS_PREFIX = "user_sessions:"
+
+# Per-user access-token "epoch" (a Unix timestamp). Any access token whose ``iat``
+# predates this value is treated as revoked by get_current_user. Set by
+# ``logout_all`` (and password reset) to invalidate every outstanding access token
+# for the user *immediately*, rather than waiting out the 15-minute TTL.
+# Imported by data_gateway's get_current_user — keep the name stable.
+USER_TOKEN_EPOCH_PREFIX = "auth_epoch:"
 
 # ---------------------------------------------------------------------------
 # Timing-oracle mitigation (Security finding: HIGH — user enumeration)
@@ -89,6 +102,7 @@ class LocalAuthProvider(AuthProvider):
         refresh_key = _RT_PREFIX + hash_refresh_token(raw_refresh)
         ttl_seconds = self._settings.jwt_refresh_expiry_days * 86400
         await self._redis.setex(refresh_key, ttl_seconds, user_id)
+        await self._track_session(user_id, refresh_key, ttl_seconds)
 
         log.debug("auth.tokens_issued", user_id=user_id, roles=roles)
         return AuthTokens(
@@ -98,6 +112,29 @@ class LocalAuthProvider(AuthProvider):
             user_id=user_id,
             roles=roles,
         )
+
+    async def _track_session(self, user_id: str, refresh_key: str, ttl_seconds: int) -> None:
+        """Add *refresh_key* to the user's session index (best-effort).
+
+        Best-effort by design: a failure here must never block login. The worst
+        case is that ``logout_all`` misses this one refresh key — which still
+        expires on its own TTL, and the access-token epoch bump still logs the
+        device out within the 15-minute access-token window.
+        """
+        try:
+            sess_key = _SESSIONS_PREFIX + user_id
+            await self._redis.sadd(sess_key, refresh_key)
+            # Keep the index at least as long as the longest-lived member.
+            await self._redis.expire(sess_key, ttl_seconds)
+        except Exception:  # noqa: BLE001 — index is an optimisation, never fatal
+            log.warning("auth.session_index.track_failed", user_id=user_id)
+
+    async def _untrack_session(self, user_id: str, refresh_key: str) -> None:
+        """Remove *refresh_key* from the user's session index (best-effort)."""
+        try:
+            await self._redis.srem(_SESSIONS_PREFIX + user_id, refresh_key)
+        except Exception:  # noqa: BLE001 — stale members are harmless (they expire)
+            log.warning("auth.session_index.untrack_failed", user_id=user_id)
 
     async def _get_roles_for_user(self, session: AsyncSession, user_id: str) -> list[str]:
         result = await session.execute(
@@ -216,8 +253,10 @@ class LocalAuthProvider(AuthProvider):
 
         user_id = str(user_id_raw)
 
-        # Rotate: delete old token immediately
+        # Rotate: delete old token immediately + drop it from the session index
+        # (the new token is re-added by _issue_tokens below).
         await self._redis.delete(key)
+        await self._untrack_session(user_id, key)
 
         roles: list[str] = []
         async for session in self._db_factory():
@@ -257,9 +296,54 @@ class LocalAuthProvider(AuthProvider):
                     )
                     return  # Do NOT delete another user's token.
             deleted = await self._redis.delete(key)
+            if current_user_id is not None:
+                await self._untrack_session(current_user_id, key)
             log.info("auth.logout", refresh_deleted=bool(deleted))
-        # access_token: no denylist in Sprint 1 — 15 min TTL is the mitigation.
-        # S1-007 security review is aware of this trade-off.
+        # access_token: no per-jti denylist — 15 min TTL is the mitigation for a
+        # single logout. "Log out ALL devices" (logout_all) additionally bumps the
+        # user's token epoch so outstanding access tokens are rejected immediately.
+
+    async def logout_all(self, user_id: str) -> int:
+        """Revoke every session for *user_id*: all refresh tokens + all access tokens.
+
+        Refresh tokens: every key in the ``user_sessions:<uid>`` index is deleted
+        (no Redis SCAN needed), then the index itself is dropped.
+
+        Access tokens: the per-user ``auth_epoch:<uid>`` is set to *now*, so
+        get_current_user rejects any access token whose ``iat`` predates it. The
+        epoch key only needs to outlive the 15-minute access-token window — after
+        that all pre-cutoff access tokens have expired on their own.
+
+        Returns the number of refresh sessions revoked. Best-effort throughout:
+        Redis errors are logged, never raised, so a logout-all attempt cannot
+        itself 500.
+        """
+        revoked = 0
+        sess_key = _SESSIONS_PREFIX + user_id
+        try:
+            members = await self._redis.smembers(sess_key)
+            keys = [
+                m.decode() if isinstance(m, bytes | bytearray) else str(m) for m in members
+            ]
+            if keys:
+                await self._redis.delete(*keys)
+                revoked = len(keys)
+            await self._redis.delete(sess_key)
+        except Exception:  # noqa: BLE001 — refresh purge is best-effort
+            log.warning("auth.logout_all.refresh_purge_failed", user_id=user_id)
+
+        try:
+            epoch = int(datetime.now(tz=UTC).timestamp())
+            await self._redis.setex(
+                USER_TOKEN_EPOCH_PREFIX + user_id,
+                ACCESS_TOKEN_TTL_SECONDS + 60,  # outlive the access-token window
+                epoch,
+            )
+        except Exception:  # noqa: BLE001 — epoch bump is best-effort
+            log.warning("auth.logout_all.epoch_set_failed", user_id=user_id)
+
+        log.info("auth.logout_all", user_id=user_id, sessions_revoked=revoked)
+        return revoked
 
     async def get_user(self, user_id: str) -> User:
         """Return user profile by ID."""

@@ -200,6 +200,11 @@ class OkResponse(BaseModel):
     ok: bool = True
 
 
+class LogoutAllResponse(BaseModel):
+    ok: bool = True
+    sessions_revoked: int = 0
+
+
 # ---------------------------------------------------------------------------
 # Dependency shortcuts
 # ---------------------------------------------------------------------------
@@ -590,15 +595,15 @@ async def refresh(
     If neither source provides a token → 401.
     After rotation both cookies (refresh_token + csrf_token) are rotated.
 
-    # SECURITY TODO (prod-gate): TWO DEFERRED HARDENING ITEMS — do NOT remove this comment.
+    # SECURITY TODO (prod-gate): ONE DEFERRED HARDENING ITEM — do NOT remove this comment.
     # (a) Refresh-token reuse / lineage detection: on replay of an already-rotated
     #     token, revoke the entire token *family* (all tokens descended from the same
     #     original issuance) to invalidate a stolen-token scenario.  Requires storing
     #     a parent→child lineage graph in Redis alongside each token key.
-    # (b) User→refresh-keys reverse index in Redis: maintain a SET at
-    #     "user_sessions:<user_id>" containing all live refresh-token keys for that
-    #     user so that DPDP §9 right-to-erasure can atomically purge all of a user's
-    #     live sessions without a full Redis SCAN.  Also enables "log out all devices".
+    # (b) DONE — User→refresh-keys reverse index ("user_sessions:<user_id>" SET) now
+    #     backs LocalAuthProvider.logout_all(), powering POST /auth/logout-all and
+    #     DPDP §9 right-to-erasure session purge without a Redis SCAN. The access-token
+    #     epoch ("auth_epoch:<user_id>") makes the revocation immediate.
     """
     token_from_cookie = bool(cookie_token)
     raw_token: str | None = cookie_token or (body.refresh_token if body else None)
@@ -674,6 +679,32 @@ async def logout(
     _clear_refresh_cookie(response)
     _clear_csrf_cookie(response)
     return OkResponse()
+
+
+@router.post(
+    "/logout-all",
+    status_code=status.HTTP_200_OK,
+    response_model=LogoutAllResponse,
+    summary="Log out of all devices (revoke every session)",
+)
+async def logout_all(
+    auth: AuthProviderDep,
+    current_user: CurrentUserDep,
+    response: Response,
+) -> LogoutAllResponse:
+    """Revoke every session for the authenticated user, on every device.
+
+    Purges all of the user's refresh tokens and bumps their access-token epoch so
+    outstanding access tokens (including the one used to make this call) stop
+    working immediately. The current device's cookies are cleared too, so the
+    caller is fully signed out. Use after a suspected compromise or a "sign out
+    everywhere" action.
+    """
+    revoked = await auth.logout_all(current_user.user_id)
+    _clear_refresh_cookie(response)
+    _clear_csrf_cookie(response)
+    log.info("auth.logout_all", user_id=current_user.user_id, sessions_revoked=revoked)
+    return LogoutAllResponse(sessions_revoked=revoked)
 
 
 async def _build_me_response(db: object, user_id_str: str, user: object) -> MeResponse:
@@ -990,15 +1021,18 @@ class ResetPasswordBody(BaseModel):
     summary="Set a new password from a reset link",
     dependencies=[rate_limit("reset_password", settings.rate_limit_login_per_minute)],
 )
-async def reset_password(body: ResetPasswordBody, db: DbSessionDep) -> OkResponse:
+async def reset_password(
+    body: ResetPasswordBody, db: DbSessionDep, auth: AuthProviderDep
+) -> OkResponse:
     """Consume a valid reset token and set the new password.
 
     Clears must_change_password and (since holding the link proves email control)
     marks the email verified if it wasn't already.
 
-    NOTE (deferred, prod-gate): existing refresh-token sessions are NOT revoked
-    here — the auth provider has no "log out all devices" primitive yet (tracked in
-    the refresh() SECURITY TODO). Access tokens expire on their own short TTL.
+    SECURITY: on a successful reset we revoke ALL of the user's existing sessions
+    (auth.logout_all) — a password reset often follows a suspected compromise, so
+    any sessions an attacker holds must die. The user simply logs in again with
+    the new password.
     """
     tok = await db.scalar(
         select(AuthToken).where(
@@ -1028,5 +1062,7 @@ async def reset_password(body: ResetPasswordBody, db: DbSessionDep) -> OkRespons
         {"pw": new_hash, "now": now, "uid": tok.user_id},
     )
     await db.commit()
+    # Revoke every existing session — a reset may follow a compromise.
+    await auth.logout_all(str(tok.user_id))
     log.info("auth.password_reset", user_id=str(tok.user_id))
     return OkResponse()

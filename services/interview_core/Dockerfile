@@ -86,4 +86,9 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # Default = API.
 # Railway worker service overrides this to:
 #   python -m app.worker.interview_worker start
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
+# `exec` so uvicorn replaces the shell as PID 1 and actually RECEIVES SIGTERM
+# (the Docker/compose stop signal). Without it the shell holds PID 1, uvicorn
+# never sees the signal, in-flight requests are not drained, and the container is
+# SIGKILLed at the stop grace period. --timeout-graceful-shutdown bounds the drain
+# so it fits within the compose stop_grace_period.
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --timeout-graceful-shutdown 25"]
