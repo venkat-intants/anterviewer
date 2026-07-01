@@ -78,6 +78,11 @@ SESSION_WALL_CLOCK_CAP_SECONDS: int = 12 * 60  # 720 s
 # Minimum candidate answers required before we bother scoring. If the candidate
 # disconnects before this, we mark the session 'abandoned' and skip the scorer.
 MIN_ANSWERS_TO_SCORE: int = 2
+# DPDP §11 — how often to re-check that the candidate's recording consent is still
+# active DURING a live session (not just at join). On withdrawal we end the
+# interview within this window. Kept short enough to honour withdrawal promptly,
+# long enough to be a negligible DB load (one indexed SELECT per tick).
+CONSENT_RECHECK_INTERVAL_SECONDS: int = 15
 
 # Service-to-service JWT TTL — generous but finite; scorer returns immediately.
 _SERVICE_JWT_TTL_SECONDS: int = 60
@@ -242,6 +247,49 @@ async def _lookup_session(
             room_name, type(exc).__name__,
         )
         return "the role", "en", "entry", "", None, ""
+
+
+# ---------------------------------------------------------------------------
+# Candidate lookup (for the mid-session consent watchdog)
+# ---------------------------------------------------------------------------
+
+
+async def _lookup_candidate_user_id(room_name: str) -> str | None:
+    """Return the candidate ``user_id`` for a session (room == session_id), or None.
+
+    Isolated from ``_lookup_session`` so the consent watchdog can resolve the
+    candidate without disturbing that function's stable return tuple. Best-effort:
+    any failure (bad UUID, missing row, DB error) returns None, which makes the
+    watchdog a no-op (a session with no bound user — guest/legacy — has nothing to
+    poll)."""
+    import contextlib
+
+    from sqlalchemy import select
+
+    from app.database import get_session_factory, init_engine
+    from app.models import Session as InterviewSession
+
+    with contextlib.suppress(Exception):
+        init_engine()
+    try:
+        sid = _uuid_mod.UUID(room_name)
+    except ValueError:
+        return None
+    try:
+        factory = get_session_factory()
+        async with factory() as db:
+            uid = (
+                await db.execute(
+                    select(InterviewSession.user_id).where(InterviewSession.id == sid)
+                )
+            ).scalar_one_or_none()
+            return str(uid) if uid is not None else None
+    except Exception as exc:  # noqa: BLE001 — never crash the interview on this
+        logger.warning(
+            "interview-worker.consent_user_lookup_failed room=%s err=%s",
+            room_name, type(exc).__name__,
+        )
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -764,22 +812,32 @@ async def entrypoint(ctx: JobContext) -> None:
     # Shared close logic — fires exactly once regardless of trigger path.
     # ------------------------------------------------------------------
 
-    async def _on_close(*, timed_out: bool) -> None:
-        """Warm close: say goodbye, update DB, fire scorer. Best-effort."""
+    async def _on_close(*, timed_out: bool, consent_withdrawn: bool = False) -> None:
+        """Warm close: say goodbye, update DB, fire scorer. Best-effort.
+
+        consent_withdrawn=True (DPDP §11 right-to-withdraw): the candidate revoked
+        recording consent mid-session. We end IMMEDIATELY — skip the spoken closing
+        pleasantry (no further TTS) and DO NOT score, because scoring is fresh
+        processing of the recording the candidate just withdrew consent for. The
+        transcript captured while consent WAS valid is still persisted for audit,
+        and the session is marked 'abandoned'.
+        """
         if state.close_triggered:
             return
         state.mark_close_triggered()
 
-        # Speak the closing line before shutting the agent down.
-        try:
-            closing_text = _get_closing_msg(language, timed_out=timed_out)
-            handle = session.say(closing_text, allow_interruptions=False)
-            await handle
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "interview-worker: closing say() failed room=%s err=%s",
-                session_id, type(exc).__name__,
-            )
+        # Speak the closing line before shutting the agent down — but NOT on a
+        # consent withdrawal, where we stop processing at once.
+        if not consent_withdrawn:
+            try:
+                closing_text = _get_closing_msg(language, timed_out=timed_out)
+                handle = session.say(closing_text, allow_interruptions=False)
+                await handle
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "interview-worker: closing say() failed room=%s err=%s",
+                    session_id, type(exc).__name__,
+                )
 
         # Shutdown the agent session (clean, drain=True by default).
         try:
@@ -793,9 +851,10 @@ async def entrypoint(ctx: JobContext) -> None:
         # DB: mark session completed/abandoned + timing.
         now = datetime.now(tz=UTC)
         elapsed = int((now - session_started_at).total_seconds())
+        final_status = "abandoned" if consent_withdrawn else state.final_status()
         await _update_session_status(
             session_id,
-            state.final_status(),
+            final_status,
             completed_at=now,
             duration_seconds=elapsed,
         )
@@ -805,10 +864,16 @@ async def entrypoint(ctx: JobContext) -> None:
         # abandoned sessions, so the DB always has whatever was said.
         await _persist_turns(session_id, state.transcript)
 
-        # Score only if we have enough answers. We AWAIT it (not fire-and-forget)
-        # so the scorecard row exists BEFORE we delete the room below — deleting
-        # the room tears this job down and would cancel a background task.
-        if state.should_score():
+        # Score only if we have enough answers AND consent was not withdrawn. We
+        # AWAIT it (not fire-and-forget) so the scorecard row exists BEFORE we
+        # delete the room below — deleting the room tears this job down and would
+        # cancel a background task.
+        if consent_withdrawn:
+            logger.warning(
+                "interview-worker.consent_withdrawn.closed room=%s answers=%d — scoring skipped",
+                session_id, state.candidate_answer_count,
+            )
+        elif state.should_score():
             logger.info(
                 "interview-worker.score.firing room=%s answers=%d turns=%d",
                 session_id, state.candidate_answer_count, len(state.transcript),
@@ -893,10 +958,58 @@ async def entrypoint(ctx: JobContext) -> None:
             )
             await _on_close(timed_out=True)
 
+    async def _consent_watchdog(user_id: str | None) -> None:
+        """DPDP §11 — end the interview if recording consent is withdrawn mid-session.
+
+        Polls the consent ledger every CONSENT_RECHECK_INTERVAL_SECONDS. Consent was
+        already validated at session-create and WS-connect; this closes the gap where
+        a withdrawal DURING a live session would otherwise keep recording until the
+        session ends.
+
+        FAILS OPEN: on any DB/query error we keep the interview running and retry on
+        the next tick — a transient DB blip must never kill a valid, consented
+        interview. We act ONLY on a definitive 'consent is no longer active'.
+        """
+        if not user_id:
+            return  # guest/legacy session with no bound candidate — nothing to poll
+
+        import contextlib as _contextlib
+
+        from app.consent_guard import has_active_consent
+        from app.database import get_session_factory, init_engine
+
+        with _contextlib.suppress(Exception):
+            init_engine()
+
+        while not state.close_triggered:
+            await asyncio.sleep(CONSENT_RECHECK_INTERVAL_SECONDS)
+            if state.close_triggered:
+                return
+            try:
+                factory = get_session_factory()
+                async with factory() as db:
+                    active = await has_active_consent(db, user_id)
+            except Exception as exc:  # noqa: BLE001 — fail open, retry next tick
+                logger.warning(
+                    "interview-worker.consent_recheck_failed room=%s err=%s",
+                    session_id, type(exc).__name__,
+                )
+                continue
+            if not active:
+                logger.warning(
+                    "interview-worker.consent_withdrawn room=%s — ending session", session_id
+                )
+                await _on_close(timed_out=False, consent_withdrawn=True)
+                return
+
     # cap_task MUST be assigned before _on_session_close is registered (next block)
     # and before avatar.start() below — otherwise the "close" handler could fire
     # during avatar startup and reference an unbound name. (Fix for UnboundLocalError.)
     cap_task = asyncio.create_task(_wall_clock_cap())
+    # The consent watchdog is started AFTER session.start() (needs the candidate
+    # resolved); this holder lets _on_session_close cancel it without an ordering
+    # hazard (it reads None until the task is actually created).
+    consent_task_holder: dict[str, asyncio.Task[None] | None] = {"task": None}
 
     # ------------------------------------------------------------------
     # "close" event handler — fires on ANY session close (normal or abrupt).
@@ -934,8 +1047,11 @@ async def entrypoint(ctx: JobContext) -> None:
             )
 
     def _on_session_close(_event: Any) -> None:
-        """Handle session close: cancel cap task; run DB+scoring if not done."""
+        """Handle session close: cancel background tasks; run DB+scoring if not done."""
         cap_task.cancel()
+        consent_task = consent_task_holder["task"]
+        if consent_task is not None:
+            consent_task.cancel()
         if not state.close_triggered:
             # Candidate disconnected abruptly — schedule teardown as a task.
             asyncio.create_task(_abrupt_close())
@@ -991,6 +1107,14 @@ async def entrypoint(ctx: JobContext) -> None:
         )
     )
     logger.info("interview-worker: session started room=%s", session_id)
+
+    # Start the DPDP consent watchdog now that the session is live. Resolving the
+    # candidate is best-effort; a None user_id makes the watchdog a no-op.
+    candidate_user_id = await _lookup_candidate_user_id(session_id)
+    consent_task_holder["task"] = asyncio.create_task(
+        _consent_watchdog(candidate_user_id)
+    )
+
     # The LiveKit framework keeps the session alive after the entrypoint returns.
     # Teardown is handled via the "close" event listener registered above.
 
@@ -1000,12 +1124,19 @@ def run() -> None:
     # created. Each interview is its own room (named after session_id), so this
     # is the correct + proven model. (Explicit agent_name dispatch did not
     # connect reliably in testing 2026-05-31.)
+    #
+    # drain_timeout (graceful shutdown): on SIGTERM the worker deregisters (takes
+    # no new jobs) and waits up to this long for active interviews to finish
+    # before terminating them — so a redeploy/restart doesn't cut a live interview
+    # mid-turn. Keep this <= the interview_worker stop_grace_period in
+    # docker-compose.prod.yml so Docker doesn't SIGKILL mid-drain.
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
             ws_url=settings.livekit_url,
             api_key=settings.livekit_api_key,
             api_secret=settings.livekit_api_secret,
+            drain_timeout=settings.worker_drain_timeout_seconds,
         )
     )
 

@@ -106,6 +106,19 @@ class AuthProvider(ABC):
         skipped (logged as a warning) to prevent cross-user token invalidation.
         """
 
+    async def logout_all(self, user_id: str) -> int:
+        """Revoke ALL active sessions for *user_id* ("log out all devices").
+
+        Concrete (non-abstract) so providers that don't manage their own session
+        store (e.g. external SSO) inherit a safe no-op instead of failing to
+        instantiate. Implementations that own the session store (LocalAuthProvider)
+        override this to purge every refresh token and invalidate outstanding
+        access tokens.
+
+        Returns the number of sessions revoked (0 for the default no-op).
+        """
+        return 0
+
     @abstractmethod
     async def get_user(self, user_id: str) -> User:
         """Return user profile for a given user_id.

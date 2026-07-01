@@ -11,8 +11,10 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
 from shared.auth.base import AuthProvider, User
 from shared.auth.jwt import verify_access_token
+from shared.auth.local import USER_TOKEN_EPOCH_PREFIX
 
 from app.config import settings
+from app.redis_client import get_redis
 
 log = structlog.get_logger(__name__)
 
@@ -47,6 +49,20 @@ _UNAUTHORIZED = HTTPException(
 )
 
 
+async def _token_epoch(user_id: str) -> int | None:
+    """Return the user's revocation epoch (Unix seconds), or None.
+
+    Fails OPEN: any Redis error returns None (no revocation applied) so a cache
+    hiccup can never lock every user out. Set by ``AuthProvider.logout_all``.
+    """
+    try:
+        raw = await get_redis().get(USER_TOKEN_EPOCH_PREFIX + user_id)
+        return int(raw) if raw is not None else None
+    except Exception as exc:  # noqa: BLE001 — fail open on any Redis/parse error
+        log.warning("auth.token_epoch.check_skipped", error_type=type(exc).__name__)
+        return None
+
+
 async def get_current_user(
     credentials: Annotated[
         HTTPAuthorizationCredentials | None,
@@ -55,7 +71,8 @@ async def get_current_user(
 ) -> User:
     """Extract Bearer token, verify JWT, return User.
 
-    Raises HTTP 401 if token is missing, malformed, or expired.
+    Raises HTTP 401 if token is missing, malformed, expired, or has been revoked
+    by a "log out all devices" (its ``iat`` predates the user's token epoch).
     """
     if credentials is None:
         raise _UNAUTHORIZED
@@ -77,6 +94,14 @@ async def get_current_user(
 
     if not user_id:
         raise _UNAUTHORIZED
+
+    # Revocation check: reject tokens issued before a "log out all devices".
+    epoch = await _token_epoch(user_id)
+    if epoch is not None:
+        iat = payload.get("iat")
+        if iat is not None and int(iat) < epoch:
+            log.info("auth.token_revoked", user_id=user_id)
+            raise _UNAUTHORIZED
 
     return User(
         user_id=user_id,

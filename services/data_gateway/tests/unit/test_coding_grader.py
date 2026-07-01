@@ -5,6 +5,7 @@ Pure scoring + the test runner with execution mocked (no Piston, no network).
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -97,6 +98,32 @@ async def test_run_tests_samples_only_skips_hidden(monkeypatch: pytest.MonkeyPat
         time_limit_ms=2000, include_hidden=False,
     )
     assert len(results) == 1 and results[0].is_sample is True
+
+
+@pytest.mark.asyncio
+async def test_run_tests_preserves_order_under_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With concurrency > 1, results must still map to the right test case even
+    when cases finish out of order. The fake delays EARLIER cases longer, so
+    completion order is the reverse of input order — if gather ordering were wrong
+    the indices/pass-fail would scramble."""
+
+    async def fake_run_code(*, language: str, source: str, stdin: str, time_limit_ms: int) -> ExecResult:
+        await asyncio.sleep(0.01 * (5 - int(stdin)))  # case "0" finishes last
+        return ExecResult(stdout=stdin, stderr="", exit_code=0, timed_out=False)
+
+    monkeypatch.setattr("app.coding_grader.run_code", fake_run_code)
+    test_cases = [
+        {"stdin": str(i), "expected_output": str(i), "is_sample": False, "weight": 1}
+        for i in range(5)
+    ]
+    results = await run_tests(
+        language="python", source="x", test_cases=test_cases,
+        time_limit_ms=2000, include_hidden=True,
+    )
+    assert [r.index for r in results] == [0, 1, 2, 3, 4]
+    assert all(r.passed for r in results)  # each case's echo matched its expected
 
 
 @pytest.mark.asyncio

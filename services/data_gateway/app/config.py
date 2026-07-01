@@ -153,15 +153,20 @@ class Settings(BaseSettings):
     piston_api_url: str = "https://emkc.org/api/v2/piston"
     # Per-run wall-clock cap (ms) passed to the runner; also our own client timeout.
     code_run_timeout_ms: int = 5000
-    # DoS guards. NOTE: grading runs these SYNCHRONOUSLY (N Piston calls per submit),
-    # so the test-case cap also bounds submit latency. Keep it low until grading
-    # moves to a background task (Tier-2). max test cases / question, max questions
-    # / coding exam, max submitted source size.
+    # DoS guards. Grading runs each round's test cases with BOUNDED concurrency
+    # (code_grade_concurrency) rather than fully sequentially, so the test-case cap
+    # bounds cost but no longer serialises the whole submit. max test cases /
+    # question, max questions / coding exam, max submitted source size.
     code_max_test_cases: int = 20
     code_max_questions_per_exam: int = 20
     code_max_source_bytes: int = 64_000
     # Cap on candidate-supplied stdin for the "Run with custom input" feature.
     code_max_stdin_bytes: int = 20_000
+    # Max concurrent execution-provider calls per grading pass. >1 grades a round's
+    # test cases in parallel (cutting the time the submit holds its DB row-lock +
+    # connection); kept modest so we stay within JDoodle's free-tier rate limits.
+    # Set to 1 to restore the old strictly-sequential behaviour.
+    code_grade_concurrency: int = 4
 
     # --- Interview invite magic-link (HR workflow Phase 3) ---
     # SEPARATE signing secret — NEVER reuse jwt_secret OR exam_link_secret. A

@@ -100,6 +100,13 @@ class Settings(BaseSettings):
     livekit_url: str = ""
     livekit_api_key: str = ""
     livekit_api_secret: str = ""
+    # Graceful shutdown: on SIGTERM (deploy/restart), the LiveKit worker stops
+    # accepting NEW interviews and DRAINS in-flight ones for up to this many
+    # seconds before terminating them — so a redeploy doesn't drop a live
+    # interview mid-turn. Terminated-at-drain jobs still run their close hooks
+    # (status update + transcript persist + scoring). MUST be <= the worker's
+    # compose stop_grace_period, else Docker SIGKILLs before the drain finishes.
+    worker_drain_timeout_seconds: int = 120
 
     # AVATAR_PROVIDER selects the real-time avatar renderer injected into the
     # LiveKit worker. Valid values:

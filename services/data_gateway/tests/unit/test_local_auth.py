@@ -10,7 +10,7 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 import pytest
-from shared.auth.local import LocalAuthProvider
+from shared.auth.local import USER_TOKEN_EPOCH_PREFIX, LocalAuthProvider
 
 # ---------------------------------------------------------------------------
 # Minimal settings stub
@@ -30,23 +30,47 @@ class _FakeSettings:
 
 
 class _FakeRedis:
-    """Minimal async Redis fake for tests."""
+    """Minimal async Redis fake for tests (strings + sets)."""
 
     def __init__(self) -> None:
-        self._store: dict[str, tuple[str, int]] = {}  # key → (value, ttl)
+        self._store: dict[str, tuple[Any, int]] = {}  # key → (value, ttl)
+        self._sets: dict[str, set[str]] = {}
 
-    async def setex(self, key: str, ttl: int, value: str) -> None:
+    async def setex(self, key: str, ttl: int, value: Any) -> None:
         self._store[key] = (value, ttl)
 
-    async def get(self, key: str) -> str | None:
+    async def get(self, key: str) -> Any | None:
         entry = self._store.get(key)
         return entry[0] if entry else None
 
-    async def delete(self, key: str) -> int:
-        if key in self._store:
-            del self._store[key]
-            return 1
-        return 0
+    async def delete(self, *keys: str) -> int:
+        n = 0
+        for key in keys:
+            if self._store.pop(key, None) is not None:
+                n += 1
+            if self._sets.pop(key, None) is not None:
+                n += 1
+        return n
+
+    async def sadd(self, key: str, *members: str) -> int:
+        s = self._sets.setdefault(key, set())
+        before = len(s)
+        s.update(members)
+        return len(s) - before
+
+    async def srem(self, key: str, *members: str) -> int:
+        s = self._sets.get(key)
+        if not s:
+            return 0
+        removed = sum(1 for m in members if m in s)
+        s.difference_update(members)
+        return removed
+
+    async def smembers(self, key: str) -> set[str]:
+        return set(self._sets.get(key, set()))
+
+    async def expire(self, key: str, ttl: int) -> bool:
+        return key in self._store or key in self._sets
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +276,48 @@ async def test_logout_invalidates_refresh(provider: LocalAuthProvider) -> None:
 
     with pytest.raises(ValueError, match="invalid or expired"):
         await provider.refresh(tokens.refresh_token)
+
+
+@pytest.mark.asyncio
+async def test_logout_all_revokes_every_session(
+    provider: LocalAuthProvider, fake_redis: _FakeRedis
+) -> None:
+    """logout_all purges all of a user's refresh tokens (across devices) and
+    bumps the access-token epoch so outstanding access tokens are rejected."""
+    # Two "devices": register (1st session) + a fresh login (2nd session).
+    t1 = await provider.register("multi@example.com", "pw12345678", "Multi")
+    t2 = await provider.authenticate("multi@example.com", "pw12345678")
+    assert t1.refresh_token != t2.refresh_token
+
+    revoked = await provider.logout_all(t1.user_id)
+    assert revoked == 2  # both live refresh tokens were purged
+
+    # Neither refresh token can be rotated anymore.
+    for tok in (t1, t2):
+        with pytest.raises(ValueError, match="invalid or expired"):
+            await provider.refresh(tok.refresh_token)
+
+    # The access-token epoch is now set (drives get_current_user's rejection).
+    assert await fake_redis.get(USER_TOKEN_EPOCH_PREFIX + t1.user_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_logout_all_no_sessions_is_safe(provider: LocalAuthProvider) -> None:
+    """logout_all on a user with no tracked sessions returns 0 and still sets the
+    epoch (idempotent, never raises)."""
+    revoked = await provider.logout_all(str(uuid.uuid4()))
+    assert revoked == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_rotation_keeps_session_index_consistent(
+    provider: LocalAuthProvider, fake_redis: _FakeRedis
+) -> None:
+    """After rotation, logout_all still finds exactly the one current session."""
+    t1 = await provider.register("rot@example.com", "pw12345678", "Rot")
+    t2 = await provider.refresh(t1.refresh_token)  # rotates; old key untracked
+    revoked = await provider.logout_all(t2.user_id)
+    assert revoked == 1  # only the rotated-in token remained in the index
 
 
 @pytest.mark.asyncio
