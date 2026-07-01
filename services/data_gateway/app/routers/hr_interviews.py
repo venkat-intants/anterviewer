@@ -521,6 +521,18 @@ async def list_invites(
     rows = (await db.execute(stmt)).all()
 
     # Lazy completion: a scorecard exists -> flip consumed -> completed (frees the slot).
+    #
+    # NOTE (idempotency): the status flip from "consumed" → "completed" happens AT MOST
+    # ONCE per invite — once the status is "completed" the condition
+    # ``inv.status == "consumed"`` is false on subsequent GETs, so no further
+    # notification is enqueued.  The notification (in-app feed only, no email) is
+    # therefore fire-once.
+    #
+    # Email delivery for "interview_completed" has been MOVED OUT of this GET handler
+    # entirely to prevent a per-refresh email storm (each list refresh would re-send
+    # the email to the HR manager).  The email is now sent by the interview_take
+    # completion path (where it fires exactly once when the session completes).  This
+    # GET only flips the status and creates the in-app notification (email=False).
     now = datetime.now(tz=UTC)
     dirty = False
     out: list[InviteOut] = []
@@ -529,8 +541,7 @@ async def list_invites(
             inv.status = "completed"
             inv.updated_at = now
             dirty = True
-            # Notify the inviting HR that the interview finished + is scored —
-            # in the app feed AND by email (kept consistent via notify()).
+            # In-app notification only — NO email here (see note above).
             await notify(
                 db,
                 user_id=inv.created_by_user_id,
@@ -538,7 +549,7 @@ async def list_invites(
                 title="Interview completed",
                 body=f"{name} finished their interview — scorecard ready",
                 link="/hr/interviews",
-                email=True,
+                email=False,  # email=False: fire-once email is sent at completion, not on list poll
                 company_id=company_id,
             )
         # A non-completed invite past its expiry is effectively dead (redeem

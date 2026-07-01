@@ -218,3 +218,104 @@ class Job(Base):
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# turns — interview transcript turns (erasure: hard-delete when session erased)
+#
+# Only the columns needed by the erasure executor are mapped here.
+# text_content holds candidate speech — it is PII.
+# ---------------------------------------------------------------------------
+
+
+class Turn(Base):
+    """Mirrors the turns table.  Erasure executor uses this for bulk hard-delete."""
+
+    __tablename__ = "turns"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    turn_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    speaker: Mapped[str] = mapped_column(Text, nullable=False)
+    text_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    audio_s3_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+
+
+# ---------------------------------------------------------------------------
+# resumes — resume version history (erasure: hard-delete all versions)
+# ---------------------------------------------------------------------------
+
+
+class Resume(Base):
+    """Mirrors the resumes table.  Erasure executor hard-deletes all versions."""
+
+    __tablename__ = "resumes"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("users.id", name="fk_resumes_user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    resume_text: Mapped[str] = mapped_column(Text, nullable=False)
+    resume_s3_key: Mapped[str] = mapped_column(Text, nullable=False)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    uploaded_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+
+
+# ---------------------------------------------------------------------------
+# applicants — ATS applicant rows that may link to this user_id
+#              (erasure: anonymise PII columns where user_id matches)
+# ---------------------------------------------------------------------------
+
+
+class Applicant(Base):
+    """Mirrors the applicants table (HR workflow).
+
+    When a user is erased, applicant rows with user_id = erased user are
+    anonymised: full_name → '[redacted]', email → NULL, resume_text → NULL,
+    resume_s3_key → NULL.  The applicant row itself is NOT deleted — it is
+    structural data for the HR pipeline.
+    """
+
+    __tablename__ = "applicants"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    full_name: Mapped[str] = mapped_column(Text, nullable=False)
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_job_title: Mapped[str] = mapped_column(Text, nullable=False)
+    resume_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resume_s3_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, default="new", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# companies — needed as FK parent for Applicant
+# ---------------------------------------------------------------------------
+
+
+class Company(Base):
+    """Minimal mirror of the companies table — required as FK parent for Applicant."""
+
+    __tablename__ = "companies"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    slug: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))

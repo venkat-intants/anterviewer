@@ -21,7 +21,6 @@ mock async session factories.
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any
@@ -31,7 +30,6 @@ import pytest
 
 import app.worker.interview_worker as wk
 from app.worker.interview_worker import (
-    CONSENT_RECHECK_INTERVAL_SECONDS,
     InterviewState,
     resolve_consent_user_id,
 )
@@ -148,17 +146,34 @@ async def test_resolve_consent_user_id_missing_row() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resolve_consent_user_id_db_error_returns_none() -> None:
-    """Returns None (and logs) on a transient DB error — never raises."""
+async def test_resolve_consent_user_id_db_error_returns_sentinel() -> None:
+    """On a transient DB error that exhausts all retries, the sentinel
+    _CONSENT_RESOLVE_DB_ERROR is returned (NOT None).
+
+    This distinguishes a genuine DB failure (consent watchdog must fail-closed)
+    from a legit no-op (orphaned room, returns None).  Returning None on a DB
+    error was the original bug: it caused the watchdog to silently skip
+    DPDP §11 enforcement for the entire session.
+    """
+    from app.worker.interview_worker import _CONSENT_RESOLVE_DB_ERROR
+
     factory = _make_raising_factory(RuntimeError("connection pool exhausted"))
 
     with (
         patch("app.database.init_engine"),
         patch("app.database.get_session_factory", return_value=factory),
+        patch("app.worker.interview_worker.asyncio.sleep", new=AsyncMock()),
     ):
         result = await resolve_consent_user_id(_VALID_SESSION_ID)
 
-    assert result is None
+    assert result == _CONSENT_RESOLVE_DB_ERROR, (
+        "DB error must return _CONSENT_RESOLVE_DB_ERROR (fail-closed sentinel), "
+        "not None (which would silently disable DPDP §11 enforcement)"
+    )
+    assert result is not None, (
+        "_CONSENT_RESOLVE_DB_ERROR must be non-None to be distinguishable from "
+        "a legit no-op (orphaned room)"
+    )
 
 
 @pytest.mark.asyncio
@@ -416,4 +431,93 @@ def test_lookup_candidate_user_id_alias_exists() -> None:
     assert wk._lookup_candidate_user_id is wk.resolve_consent_user_id, (
         "_lookup_candidate_user_id must be an alias for resolve_consent_user_id "
         "to avoid breaking any callers still using the old name"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Finding 2: DB-error sentinel → watchdog fail-closed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_watchdog_db_error_sentinel_triggers_fail_closed() -> None:
+    """When resolve_consent_user_id returns _CONSENT_RESOLVE_DB_ERROR, the
+    watchdog must end the session immediately (fail-closed) rather than
+    silently skipping DPDP §11 enforcement.
+
+    This test drives the REAL _run_consent_watchdog module-level function with
+    the sentinel value and asserts that on_close is called with
+    consent_withdrawn=True.  It would FAIL if the sentinel branch were deleted
+    or changed to a no-op, because then close_calls would be empty.
+
+    A DB outage at session start must never disable right-to-withdraw
+    protection for the duration of the interview.
+    """
+    from app.worker.interview_worker import (
+        _CONSENT_RESOLVE_DB_ERROR,
+        _run_consent_watchdog,
+    )
+
+    state = InterviewState()
+    close_calls: list[dict[str, Any]] = []
+
+    async def fake_on_close(*, timed_out: bool, consent_withdrawn: bool = False) -> None:
+        if state.close_triggered:
+            return
+        state.mark_close_triggered()
+        close_calls.append({"timed_out": timed_out, "consent_withdrawn": consent_withdrawn})
+
+    # Drive the REAL watchdog function with the DB-error sentinel.
+    # If the sentinel branch is removed or made a no-op, this call will return
+    # without invoking fake_on_close, and the assertions below WILL FAIL.
+    await _run_consent_watchdog(
+        user_id=_CONSENT_RESOLVE_DB_ERROR,
+        on_close=fake_on_close,
+        state=state,
+        session_id=_VALID_SESSION_ID,
+    )
+
+    assert len(close_calls) == 1, (
+        "DB-error sentinel must trigger exactly one fail-closed close. "
+        "If this fails, the _CONSENT_RESOLVE_DB_ERROR branch in "
+        "_run_consent_watchdog has been deleted or is a no-op."
+    )
+    assert close_calls[0]["consent_withdrawn"] is True, (
+        "Session closed due to DB-error sentinel must be flagged consent_withdrawn=True "
+        "so scoring is suppressed (no scorecard for an unverified consent state)"
+    )
+    assert close_calls[0]["timed_out"] is False
+    assert state.close_triggered, (
+        "state.close_triggered must be set after fail-closed watchdog fires"
+    )
+
+
+@pytest.mark.asyncio
+async def test_watchdog_none_user_id_does_not_fail_closed() -> None:
+    """None user_id must remain a legit no-op (unrecognised room / CI dispatch).
+
+    Only _CONSENT_RESOLVE_DB_ERROR should trigger fail-closed, not None.
+    The two must be distinguished so orphaned-room no-ops don't end real sessions.
+    """
+    from app.worker.interview_worker import _CONSENT_RESOLVE_DB_ERROR
+
+    state = InterviewState()
+    close_calls: list[dict[str, Any]] = []
+
+    await _run_watchdog_logic(
+        user_id=None,
+        consent_active_responses=[False],  # would fire if polled
+        state=state,
+        close_calls=close_calls,
+    )
+
+    assert close_calls == [], (
+        "None user_id must be a no-op — it is NOT the DB-error sentinel"
+    )
+    assert not state.close_triggered
+
+    # Verify that None != _CONSENT_RESOLVE_DB_ERROR so the sentinel is distinct.
+    assert _CONSENT_RESOLVE_DB_ERROR != None, (  # noqa: E711
+        "_CONSENT_RESOLVE_DB_ERROR must be a non-None sentinel distinguishable "
+        "from the legit no-op (None)"
     )

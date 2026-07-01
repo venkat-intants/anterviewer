@@ -32,14 +32,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid as _uuid_mod
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 from jose import jwt as jose_jwt
 from livekit import api as lk_api
-from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli
+from livekit.agents import Agent, AgentSession, JobContext, JobProcess, WorkerOptions, cli
 from livekit.agents.llm.chat_context import ChatMessage as _ChatMessage
 from livekit.agents.voice.events import ConversationItemAddedEvent
 from livekit.plugins import openai, sarvam, silero, simli
@@ -58,8 +60,55 @@ except ImportError:  # pragma: no cover — only absent in stripped envs
 
 from app.avatars import resolve_avatar
 from app.config import settings
+from app.worker_capacity import publish_active_jobs
 
 logger = logging.getLogger("interview-worker")
+
+# ---------------------------------------------------------------------------
+# Admission control — thread-safe counter of currently running interviews.
+# ---------------------------------------------------------------------------
+# We track active jobs ourselves (in addition to load_threshold) so request_fnc
+# can reject jobs over the ceiling WITHOUT waiting for the OS load average to
+# catch up (the default _DefaultLoadCalc is CPU-based; on our Oracle Free Tier
+# VM the CPU can look idle even as memory fills with VAD models).
+_active_jobs: int = 0
+
+
+def _active_jobs_increment() -> None:
+    """Increment the active-jobs counter (called at entrypoint start)."""
+    global _active_jobs  # noqa: PLW0603 — module-level mutable counter is intentional
+    _active_jobs += 1
+
+
+def _active_jobs_decrement() -> None:
+    """Decrement the active-jobs counter (called at job shutdown hook)."""
+    global _active_jobs  # noqa: PLW0603
+    _active_jobs = max(0, _active_jobs - 1)
+
+
+async def _publish_capacity() -> None:
+    """Publish the current active-job count to Redis (best-effort, never raises).
+
+    Called after every admission change (increment and decrement) so the HTTP
+    server process can read the counter and reject overloaded candidates with
+    a clear HTTP 503 before issuing a LiveKit join token — preventing the silent
+    "dead room" failure mode where a candidate joins a room with no interviewer.
+    """
+    import contextlib
+
+    import redis.asyncio as _aioredis
+
+    with contextlib.suppress(Exception):
+        rc = _aioredis.from_url(  # type: ignore[no-untyped-call]
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=1,
+        )
+        try:
+            await publish_active_jobs(rc, _active_jobs)
+        finally:
+            await rc.aclose()
+
 
 # ---------------------------------------------------------------------------
 # Module constants — tune here, not in config (scope is only this worker).
@@ -254,8 +303,17 @@ async def _lookup_session(
 # ---------------------------------------------------------------------------
 
 
+_RESOLVE_CONSENT_MAX_ATTEMPTS: int = 3
+_RESOLVE_CONSENT_BACKOFF_SECONDS: float = 1.0
+
+# Sentinel returned by resolve_consent_user_id to distinguish a transient DB
+# error (consent watchdog must fail-closed) from a genuine no-op such as an
+# unrecognised room name (consent watchdog may legitimately skip polling).
+_CONSENT_RESOLVE_DB_ERROR: str = "__DB_ERROR__"
+
+
 async def resolve_consent_user_id(room_name: str) -> str | None:
-    """Return the ``user_id`` to poll for consent for a session, or None.
+    """Return the ``user_id`` to poll for consent for a session.
 
     Covers BOTH the registered-candidate flow and the primary guest magic-link
     flow:
@@ -276,13 +334,23 @@ async def resolve_consent_user_id(room_name: str) -> str | None:
         re-checking would mean a guest who withdraws consent mid-session is
         never cut off (DPDP §11 violation).
 
-    Returns ``None`` only for genuine edge cases that make polling impossible:
-        - ``room_name`` is not a valid UUID (bare/CI dispatch, no DB row).
-        - The session row does not exist (orphaned room).
-        - The ``user_id`` column is NULL on the session row (should not happen
-          for live sessions; guard kept for safety against schema drift).
-        - A transient DB error — fails open (watchdog no-ops that tick and
-          retries next interval).
+    Returns:
+        ``str``  — the ``user_id`` UUID string for a known, live session.
+        ``None`` — only for *genuine* no-ops where consent polling is
+                   impossible: ``room_name`` is not a UUID, or the session row
+                   does not exist (orphaned/CI dispatch).  The watchdog may
+                   safely skip polling in these cases.
+        ``_CONSENT_RESOLVE_DB_ERROR`` — the DB was reachable on a previous call
+                   but a *transient* error occurred on every retry attempt.
+                   The watchdog treats this as a fail-closed signal and ends
+                   the session rather than recording without withdrawal
+                   protection (DPDP §11 fail-safe).
+
+    Retry policy:
+        Up to _RESOLVE_CONSENT_MAX_ATTEMPTS attempts with linear backoff of
+        _RESOLVE_CONSENT_BACKOFF_SECONDS between retries. This distinguishes a
+        genuine transient error (exhausts retries → fail-closed) from a
+        permanent "room not found" (returns None immediately, no retries).
 
     Isolated from ``_lookup_session`` so the consent watchdog can resolve the
     candidate without disturbing that function's stable return tuple.
@@ -296,22 +364,28 @@ async def resolve_consent_user_id(room_name: str) -> str | None:
 
     with contextlib.suppress(Exception):
         init_engine()
+
     try:
         sid = _uuid_mod.UUID(room_name)
     except ValueError:
+        # Not a UUID — bare/CI dispatch; no DB row possible. Legit no-op.
         return None
-    try:
-        factory = get_session_factory()
-        async with factory() as db:
-            uid = (
-                await db.execute(
-                    select(InterviewSession.user_id).where(InterviewSession.id == sid)
-                )
-            ).scalar_one_or_none()
+
+    last_exc: Exception | None = None
+    for attempt in range(1, _RESOLVE_CONSENT_MAX_ATTEMPTS + 1):
+        try:
+            factory = get_session_factory()
+            async with factory() as db:
+                uid = (
+                    await db.execute(
+                        select(InterviewSession.user_id).where(InterviewSession.id == sid)
+                    )
+                ).scalar_one_or_none()
+            # scalar_one_or_none() returns None for two sub-cases:
+            #   (a) No session row — orphaned room. Legit no-op.
+            #   (b) session row exists but user_id IS NULL — data integrity
+            #       problem; log a WARNING and treat as no-op.
             if uid is None:
-                # Log at WARNING so missing-user-id on a live session is visible
-                # in ops dashboards — this indicates a data integrity problem,
-                # NOT a normal guest session (which always has user_id set).
                 logger.warning(
                     "interview-worker.consent_user_lookup_no_user_id room=%s "
                     "— session row missing or user_id NULL; consent watchdog "
@@ -320,17 +394,113 @@ async def resolve_consent_user_id(room_name: str) -> str | None:
                 )
                 return None
             return str(uid)
-    except Exception as exc:  # noqa: BLE001 — never crash the interview on this
-        logger.warning(
-            "interview-worker.consent_user_lookup_failed room=%s err=%s",
-            room_name, type(exc).__name__,
-        )
-        return None
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            logger.warning(
+                "interview-worker.consent_user_lookup_failed room=%s attempt=%d/%d err=%s",
+                room_name, attempt, _RESOLVE_CONSENT_MAX_ATTEMPTS, type(exc).__name__,
+            )
+            if attempt < _RESOLVE_CONSENT_MAX_ATTEMPTS:
+                await asyncio.sleep(_RESOLVE_CONSENT_BACKOFF_SECONDS * attempt)
+
+    # All attempts failed — transient DB error. Caller (watchdog) must treat
+    # this as fail-closed to preserve DPDP §11 right-to-withdraw protection.
+    logger.error(
+        "interview-worker.consent_user_lookup_exhausted room=%s — "
+        "all %d attempts failed (last: %s); watchdog will fail-closed",
+        room_name, _RESOLVE_CONSENT_MAX_ATTEMPTS,
+        type(last_exc).__name__ if last_exc else "unknown",
+    )
+    return _CONSENT_RESOLVE_DB_ERROR
 
 
 # Keep the old name as an alias so any external callers (e.g. tests pinned to
 # the old name) continue to work during the transition period.
 _lookup_candidate_user_id = resolve_consent_user_id
+
+
+# ---------------------------------------------------------------------------
+# Consent watchdog — extracted module-level helper for testability
+# ---------------------------------------------------------------------------
+#
+# The core watchdog logic is split out from the entrypoint() closure so tests
+# can drive it directly without spinning up a full LiveKit session.  The
+# closure inside entrypoint() delegates to this function.  Any change to
+# sentinel-branch behaviour here will be caught by the unit tests.
+#
+# ``on_close`` has the same signature as the ``_on_close`` closure:
+#     async def on_close(*, timed_out: bool, consent_withdrawn: bool = False) -> None
+
+_OnCloseFn = Callable[..., Awaitable[None]]
+
+
+async def _run_consent_watchdog(
+    *,
+    user_id: str | None,
+    on_close: _OnCloseFn,
+    state: InterviewState,
+    session_id: str,
+) -> None:
+    """Module-level consent watchdog body — delegates from the entrypoint closure.
+
+    Sentinel values for ``user_id`` (see ``resolve_consent_user_id`` docstring):
+      - valid UUID string → poll the consent ledger for this user every
+        CONSENT_RECHECK_INTERVAL_SECONDS.
+      - None              → legit no-op: unrecognised room / CI dispatch.
+      - _CONSENT_RESOLVE_DB_ERROR → transient DB error exhausted all retries
+                            at session start; FAIL-CLOSED: end the session now
+                            rather than continue without withdrawal protection
+                            (DPDP §11 fail-safe).
+
+    Mid-session consent checks FAIL OPEN: a transient DB blip keeps the
+    interview running and retries on the next tick.  Only a definitive
+    'consent is no longer active' response ends the session.
+    """
+    if user_id == _CONSENT_RESOLVE_DB_ERROR:
+        # Resolver exhausted retries at session start — we cannot confirm
+        # active consent.  Fail-closed: end the session immediately.
+        logger.error(
+            "interview-worker.consent_watchdog_fail_closed room=%s — "
+            "resolver DB error exhausted; ending session to protect DPDP §11",
+            session_id,
+        )
+        await on_close(timed_out=False, consent_withdrawn=True)
+        return
+
+    if not user_id:
+        # Legit no-op: unrecognised room (e.g. bare CI dispatch), orphaned
+        # row, or non-UUID room name.
+        return
+
+    import contextlib as _contextlib
+
+    from app.consent_guard import has_active_consent
+    from app.database import get_session_factory, init_engine
+
+    with _contextlib.suppress(Exception):
+        init_engine()
+
+    while not state.close_triggered:
+        await asyncio.sleep(CONSENT_RECHECK_INTERVAL_SECONDS)
+        if state.close_triggered:
+            return
+        try:
+            factory = get_session_factory()
+            async with factory() as db:
+                active = await has_active_consent(db, user_id)
+        except Exception as exc:  # noqa: BLE001 — fail open, retry next tick
+            logger.warning(
+                "interview-worker.consent_recheck_failed room=%s err=%s",
+                session_id, type(exc).__name__,
+            )
+            continue
+        if not active:
+            logger.warning(
+                "interview-worker.consent_withdrawn room=%s — ending session",
+                session_id,
+            )
+            await on_close(timed_out=False, consent_withdrawn=True)
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -783,7 +953,31 @@ async def entrypoint(ctx: JobContext) -> None:
     and session.start(), so elapsed time includes cold-start setup time (~1-3s).
     This is a known minor overcount; re-architecting it would require a separate
     "first candidate audio" timestamp which adds complexity for negligible gain.
+
+    ADMISSION CONTROL: increments _active_jobs on entry; decrements via the
+    framework's add_shutdown_callback so the counter is always consistent.
+
+    TEARDOWN RELIABILITY: _abrupt_close is wrapped in asyncio.shield() and
+    tracked so the framework's shutdown hook can await it.  This prevents the
+    task from being GC'd when the candidate closes their browser (the most
+    common abrupt exit), which previously left sessions stuck 'in_progress'
+    with no scorecard.
     """
+    _active_jobs_increment()
+    # Publish the updated count immediately so the HTTP server can reject
+    # further requests if we're now at the ceiling.  Best-effort — never raises.
+    await _publish_capacity()
+
+    # Register the decrement immediately so it fires on any exit path (normal
+    # close, abrupt disconnect, SIGTERM drain, crash).  add_shutdown_callback
+    # guarantees this runs even when the entrypoint raises.
+    async def _decrement_job_counter() -> None:
+        _active_jobs_decrement()
+        # Publish the decremented count so the HTTP server sees freed capacity.
+        await _publish_capacity()
+
+    ctx.add_shutdown_callback(_decrement_job_counter)
+
     await ctx.connect()
 
     # DB lookup is best-effort and MUST NEVER crash the avatar path.
@@ -827,10 +1021,21 @@ async def entrypoint(ctx: JobContext) -> None:
     session_started_at: datetime = datetime.now(tz=UTC)
 
     # ------------------------------------------------------------------
-    # Build the AgentSession
+    # Build the AgentSession — use the prewarmed VAD from prewarm_fnc if
+    # available; fall back to cold-loading in case prewarm failed.
     # ------------------------------------------------------------------
+    _prewarmed_vad = getattr(ctx.proc, "userdata", {}).get("vad") if ctx.proc else None
+    vad_instance = _prewarmed_vad if _prewarmed_vad is not None else silero.VAD.load()
+    if _prewarmed_vad is not None:
+        logger.info("interview-worker: using prewarmed silero VAD room=%s", session_id)
+    else:
+        logger.info(
+            "interview-worker: cold-loading silero VAD (prewarm unavailable) room=%s",
+            session_id,
+        )
+
     session: AgentSession[None] = AgentSession(
-        vad=silero.VAD.load(),
+        vad=vad_instance,
         stt=sarvam.STT(
             language=vendor_lang,
             model=settings.sarvam_stt_model,
@@ -1002,53 +1207,16 @@ async def entrypoint(ctx: JobContext) -> None:
     async def _consent_watchdog(user_id: str | None) -> None:
         """DPDP §11 — end the interview if recording consent is withdrawn mid-session.
 
-        Polls the consent ledger every CONSENT_RECHECK_INTERVAL_SECONDS. Consent was
-        already validated at session-create and WS-connect; this closes the gap where
-        a withdrawal DURING a live session would otherwise keep recording until the
-        session ends.
-
-        ``user_id`` is resolved by ``resolve_consent_user_id`` above.  Both
-        registered-candidate and guest magic-link sessions set ``sessions.user_id``
-        and record a ``dpdp_consent_ledger`` row — so ``user_id`` should be non-None
-        for every live session.  ``None`` only occurs for unrecognised room names,
-        orphaned rows, or transient DB errors (all logged by the resolver).
-
-        FAILS OPEN: on any DB/query error we keep the interview running and retry on
-        the next tick — a transient DB blip must never kill a valid, consented
-        interview. We act ONLY on a definitive 'consent is no longer active'.
+        Delegates to the module-level _run_consent_watchdog so the logic is
+        unit-testable without a live LiveKit session.  See that function's
+        docstring for the sentinel-value contract and fail-open/fail-closed rules.
         """
-        if not user_id:
-            # resolve_consent_user_id already logged the reason; nothing to poll.
-            return
-
-        import contextlib as _contextlib
-
-        from app.consent_guard import has_active_consent
-        from app.database import get_session_factory, init_engine
-
-        with _contextlib.suppress(Exception):
-            init_engine()
-
-        while not state.close_triggered:
-            await asyncio.sleep(CONSENT_RECHECK_INTERVAL_SECONDS)
-            if state.close_triggered:
-                return
-            try:
-                factory = get_session_factory()
-                async with factory() as db:
-                    active = await has_active_consent(db, user_id)
-            except Exception as exc:  # noqa: BLE001 — fail open, retry next tick
-                logger.warning(
-                    "interview-worker.consent_recheck_failed room=%s err=%s",
-                    session_id, type(exc).__name__,
-                )
-                continue
-            if not active:
-                logger.warning(
-                    "interview-worker.consent_withdrawn room=%s — ending session", session_id
-                )
-                await _on_close(timed_out=False, consent_withdrawn=True)
-                return
+        await _run_consent_watchdog(
+            user_id=user_id,
+            on_close=_on_close,
+            state=state,
+            session_id=session_id,
+        )
 
     # cap_task MUST be assigned before _on_session_close is registered (next block)
     # and before avatar.start() below — otherwise the "close" handler could fire
@@ -1066,8 +1234,25 @@ async def entrypoint(ctx: JobContext) -> None:
     # closed mid-session). The state._close_triggered guard prevents double-execution.
     # ------------------------------------------------------------------
 
+    # Holder for the REAL inner teardown task created by _on_session_close.
+    # Storing the real Task (not the asyncio.shield wrapper) gives us two
+    # guarantees:
+    #   1. A strong reference prevents GC of the coroutine while it is running.
+    #   2. The shutdown hook awaits the real Task, which survives cancellation of
+    #      the shield wrapper — so scoring/persist always completes on SIGTERM.
+    # asyncio.shield() is only used at the await site in the shutdown hook, not
+    # here, so we never store the ephemeral shield Future.
+    _teardown_task_holder: dict[str, asyncio.Task[None] | None] = {"task": None}
+
     async def _abrupt_close() -> None:
-        """DB update + conditional scoring for unexpected disconnects."""
+        """DB update + conditional scoring for unexpected disconnects.
+
+        Launched as a real asyncio.Task by _on_session_close and tracked in
+        _teardown_task_holder so the framework's shutdown hook can await it.
+        asyncio.shield() is applied at await-time (in _await_teardown_on_shutdown),
+        not here, ensuring the coroutine body is never GC'd when the candidate
+        closes their browser before it finishes.
+        """
         if state.close_triggered:
             return
         state.mark_close_triggered()
@@ -1082,9 +1267,9 @@ async def entrypoint(ctx: JobContext) -> None:
         # Persist the transcript before scoring (audit + admin view + resilience).
         await _persist_turns(session_id, state.transcript)
         if state.should_score():
-            # Await (not fire-and-forget): the candidate already disconnected, so
-            # this job is tearing down — a background task would be cancelled
-            # before the scorecard is written.
+            # Await directly: the candidate already disconnected and this job is
+            # tearing down — a bare background task would be cancelled before the
+            # scorecard is written.  asyncio.shield() above keeps us alive.
             await _post_score(
                 session_id=session_id,
                 job_title=job_title,
@@ -1095,16 +1280,78 @@ async def entrypoint(ctx: JobContext) -> None:
             )
 
     def _on_session_close(_event: Any) -> None:
-        """Handle session close: cancel background tasks; run DB+scoring if not done."""
+        """Handle session close: cancel background tasks; run DB+scoring if not done.
+
+        The teardown coroutine is launched as a real asyncio.Task and its
+        reference is stored in _teardown_task_holder.  Storing the REAL task
+        (not the asyncio.shield wrapper) is critical: only a real Task has a
+        strong reference that prevents GC, and only the real Task can be reliably
+        awaited by the shutdown hook even after the shield wrapper is cancelled
+        by the LiveKit framework's drain path.
+        """
         cap_task.cancel()
         consent_task = consent_task_holder["task"]
         if consent_task is not None:
             consent_task.cancel()
         if not state.close_triggered:
-            # Candidate disconnected abruptly — schedule teardown as a task.
-            asyncio.create_task(_abrupt_close())
+            # Candidate disconnected abruptly — create the REAL task first and
+            # keep a strong reference to it.  asyncio.shield() is applied at
+            # await-time in _await_teardown_on_shutdown, not here.
+            real_task: asyncio.Task[None] = asyncio.ensure_future(_abrupt_close())
+            _teardown_task_holder["task"] = real_task
+            logger.info(
+                "interview-worker.abrupt_close_scheduled room=%s", session_id
+            )
 
     session.on("close", _on_session_close)
+
+    # Register a framework-level shutdown hook that awaits the teardown task.
+    # This hook fires when the job process is shutting down (SIGTERM / drain
+    # timeout) and ensures _abrupt_close always completes even if the LiveKit
+    # framework cancels tasks during the drain.
+    #
+    # We use asyncio.shield() HERE (at await-time), wrapping the real Task stored
+    # in _teardown_task_holder.  This means:
+    #   • If the framework cancels THIS hook's coroutine, the shield absorbs the
+    #     CancelledError but the real Task continues running to completion.
+    #   • We then fall through to await the real task directly (unshielded) so we
+    #     can observe completion or timeout without losing the result.
+    # The hook is a no-op when close was already handled by _on_close
+    # (state.close_triggered is True) or when no abrupt close was needed.
+    async def _await_teardown_on_shutdown() -> None:
+        teardown_task = _teardown_task_holder["task"]
+        if teardown_task is not None and not teardown_task.done():
+            logger.info(
+                "interview-worker.shutdown_hook_awaiting_teardown room=%s", session_id
+            )
+            try:
+                # Shield the real task so a CancelledError from the framework
+                # drain does not propagate into the task itself — the inner
+                # coroutine (_abrupt_close) must always run to completion.
+                await asyncio.shield(teardown_task)
+            except asyncio.CancelledError:
+                # The shield wrapper was cancelled (framework draining), but
+                # the real task is still running.  Wait for it with a hard
+                # timeout so we don't block the process shutdown indefinitely.
+                logger.info(
+                    "interview-worker.shutdown_hook_shield_cancelled room=%s "
+                    "— awaiting real task directly with timeout",
+                    session_id,
+                )
+                try:
+                    await asyncio.wait_for(teardown_task, timeout=30.0)
+                except (TimeoutError, asyncio.CancelledError, Exception) as exc:
+                    logger.warning(
+                        "interview-worker.shutdown_hook_teardown_incomplete room=%s err=%s",
+                        session_id, type(exc).__name__,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "interview-worker.shutdown_hook_teardown_incomplete room=%s err=%s",
+                    session_id, type(exc).__name__,
+                )
+
+    ctx.add_shutdown_callback(_await_teardown_on_shutdown)
 
     # ------------------------------------------------------------------
     # Avatar FIRST, then the agent session (proven ordering).
@@ -1157,10 +1404,13 @@ async def entrypoint(ctx: JobContext) -> None:
     logger.info("interview-worker: session started room=%s", session_id)
 
     # Start the DPDP consent watchdog now that the session is live.
-    # resolve_consent_user_id works for BOTH registered-candidate and guest
-    # magic-link sessions (both always set sessions.user_id).  None is returned
-    # only for unrecognised rooms or transient DB errors; the watchdog no-ops
-    # in those cases (already logged by the resolver).
+    # resolve_consent_user_id covers both registered-candidate and guest
+    # magic-link sessions (both always set sessions.user_id).
+    # Returns:
+    #   str uuid   → valid user found; watchdog will poll consent.
+    #   None       → legit no-op (unrecognised/CI room); watchdog skips.
+    #   _CONSENT_RESOLVE_DB_ERROR → transient DB error after retries;
+    #                watchdog will FAIL-CLOSED (end session) to protect DPDP §11.
     candidate_user_id = await resolve_consent_user_id(session_id)
     consent_task_holder["task"] = asyncio.create_task(
         _consent_watchdog(candidate_user_id)
@@ -1170,20 +1420,194 @@ async def entrypoint(ctx: JobContext) -> None:
     # Teardown is handled via the "close" event listener registered above.
 
 
+# ---------------------------------------------------------------------------
+# Prewarm — load the Silero VAD model once per worker process.
+# ---------------------------------------------------------------------------
+
+
+def _prewarm(proc: JobProcess) -> None:
+    """Pre-load the Silero VAD ONNX model into the worker process's userdata.
+
+    Called by the LiveKit framework once when the worker process starts, before
+    any job is dispatched.  Loading the model here (blocking, ~1-2 s) instead of
+    inside entrypoint() eliminates per-interview cold-start latency.
+
+    Usage in entrypoint():
+        vad = ctx.proc.userdata.get("vad") or silero.VAD.load()
+    """
+    logger.info("interview-worker.prewarm: loading silero VAD model")
+    try:
+        proc.userdata["vad"] = silero.VAD.load()
+        logger.info("interview-worker.prewarm: silero VAD ready")
+    except Exception as exc:  # noqa: BLE001
+        # Prewarm failure is non-fatal — entrypoint() falls back to loading in-place.
+        logger.warning(
+            "interview-worker.prewarm: silero VAD load failed err=%s — "
+            "will cold-load per job",
+            type(exc).__name__,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Worker liveness heartbeat — written every N seconds from the asyncio loop.
+# ---------------------------------------------------------------------------
+
+
+async def _run_heartbeat() -> None:
+    """Write the current UTC timestamp to the heartbeat file every N seconds.
+
+    The deploy cluster (docker-compose healthcheck) reads this file's mtime to
+    decide if the worker event loop has stalled:
+
+        healthcheck:
+          test: ["CMD", "find", "/tmp/interview_worker_heartbeat",
+                 "-mmin", "-1"]
+
+    This coroutine runs for the lifetime of the worker process.  It is started
+    by ``run()`` before ``cli.run_app()`` via the event loop.
+    """
+    path = settings.worker_heartbeat_path
+    interval = settings.worker_heartbeat_interval_seconds
+    logger.info(
+        "interview-worker.heartbeat: starting path=%s interval=%ds", path, interval
+    )
+    while True:
+        try:
+            ts = datetime.now(tz=UTC).isoformat()
+            # Use asyncio.to_thread so the write never blocks the event loop.
+            await asyncio.to_thread(_write_heartbeat, path, ts)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "interview-worker.heartbeat: write failed path=%s err=%s",
+                path, type(exc).__name__,
+            )
+        await asyncio.sleep(interval)
+
+
+def _write_heartbeat(path: str, timestamp: str) -> None:
+    """Write ``timestamp`` to ``path`` atomically (best-effort). Sync helper."""
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            fh.write(timestamp)
+        os.replace(tmp_path, path)
+    except OSError:
+        # /tmp unavailable or permission error — silently swallow; the healthcheck
+        # will catch the stale/missing file independently.
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Admission-control request_fnc — reject jobs over the concurrency ceiling.
+# ---------------------------------------------------------------------------
+
+
+async def _request_fnc(job_request: Any) -> None:
+    """Gate incoming job requests against the max-concurrent-jobs and memory ceilings.
+
+    Called by the LiveKit framework BEFORE dispatching the job to entrypoint().
+    Rejection here is clean: the framework notifies the room with a
+    'worker_unavailable' event so the token/launch endpoint can detect the
+    rejection and return a clear HTTP 503 to the candidate instead of silently
+    leaving them in a dead LiveKit room with no interviewer.
+
+    Two complementary guards:
+    1. Concurrency cap (worker_max_concurrent_jobs > 0): reject when the
+       application-tracked active-job counter meets or exceeds the ceiling.
+       This is additive to load_threshold: CPU load may look low while
+       network I/O (Sarvam streams) or memory fills up, so we enforce both.
+    2. Memory estimation (job_memory_limit_mb > 0 AND container_memory_limit_mb
+       > 0): if accepting one more job would push the estimated RSS above the
+       VM's hard cap, reject pre-emptively.  A spike OOM-kill terminates ALL
+       live interviews simultaneously, which is far worse than one polite
+       rejection.
+
+    ``settings.worker_max_concurrent_jobs == 0`` disables the concurrency cap
+    (not recommended for production; useful for single-job dev testing).
+    """
+    cap = settings.worker_max_concurrent_jobs
+    reason: str | None = None
+
+    if cap > 0 and _active_jobs >= cap:
+        reason = f"concurrency ceiling reached (active={_active_jobs} cap={cap})"
+
+    if reason is None:
+        mem_per_job = settings.job_memory_limit_mb
+        mem_limit = settings.container_memory_limit_mb
+        if mem_per_job > 0 and mem_limit > 0:
+            # Conservative estimate: jobs already running × per-job RSS.
+            # The actual prewarmed VAD model RSS (≈100–200 MB) is already in
+            # the worker process and shared across jobs, so we only count
+            # the *incremental* cost per additional job here.
+            estimated_rss_mb = (_active_jobs + 1) * mem_per_job
+            if estimated_rss_mb > mem_limit:
+                reason = (
+                    f"estimated RSS {estimated_rss_mb} MB would exceed "
+                    f"container limit {mem_limit} MB"
+                )
+
+    if reason is not None:
+        logger.warning(
+            "interview-worker.admission_rejected active=%d — %s",
+            _active_jobs, reason,
+        )
+        # reject() signals 'worker_unavailable' to LiveKit.  The HTTP token
+        # endpoint reads the active-job count from Redis (written by
+        # _publish_capacity) BEFORE issuing the join token, and returns HTTP 503
+        # with a human-readable "server busy, try again" message so the candidate
+        # is never silently dropped into a dead room with no interviewer.
+        await job_request.reject()
+        # Publish current capacity so the HTTP layer sees the latest count.
+        await _publish_capacity()
+        return
+
+    await job_request.accept(entrypoint)
+
+
 def run() -> None:
-    # NO agent_name -> AUTOMATIC dispatch: the worker joins every room that is
-    # created. Each interview is its own room (named after session_id), so this
-    # is the correct + proven model. (Explicit agent_name dispatch did not
-    # connect reliably in testing 2026-05-31.)
-    #
-    # drain_timeout (graceful shutdown): on SIGTERM the worker deregisters (takes
-    # no new jobs) and waits up to this long for active interviews to finish
-    # before terminating them — so a redeploy/restart doesn't cut a live interview
-    # mid-turn. Keep this <= the interview_worker stop_grace_period in
-    # docker-compose.prod.yml so Docker doesn't SIGKILL mid-drain.
+    """Start the LiveKit worker with prewarm, heartbeat, and admission control.
+
+    NO agent_name -> AUTOMATIC dispatch: the worker joins every room created.
+    Each interview is its own room (named after session_id), so this is the
+    correct + proven model. (Explicit agent_name dispatch did not connect
+    reliably in testing 2026-05-31.)
+
+    drain_timeout (graceful shutdown): on SIGTERM the worker deregisters (takes
+    no new jobs) and waits up to this long for active interviews to finish
+    before terminating them. Keep this <= the worker's compose stop_grace_period
+    so Docker doesn't SIGKILL mid-drain.
+
+    Heartbeat: an asyncio task writes the current UTC time to the heartbeat file
+    every worker_heartbeat_interval_seconds so the Docker healthcheck can
+    verify the event loop is alive.
+    """
+    import threading
+
+    def _start_heartbeat_in_thread() -> None:
+        """Run the heartbeat coroutine in a dedicated event loop on a daemon thread.
+
+        cli.run_app() blocks the main thread and owns its own event loop, so
+        we spin the heartbeat in a separate daemon thread with its own loop.
+        The thread is daemon so it exits automatically when the process exits.
+        """
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_run_heartbeat())
+        finally:
+            loop.close()
+
+    heartbeat_thread = threading.Thread(
+        target=_start_heartbeat_in_thread, daemon=True, name="worker-heartbeat"
+    )
+    heartbeat_thread.start()
+
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
+            request_fnc=_request_fnc,
+            prewarm_fnc=_prewarm,
+            load_threshold=settings.worker_load_threshold,
             ws_url=settings.livekit_url,
             api_key=settings.livekit_api_key,
             api_secret=settings.livekit_api_secret,

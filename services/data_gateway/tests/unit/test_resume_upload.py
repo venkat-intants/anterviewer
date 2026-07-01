@@ -41,8 +41,14 @@ def _make_minimal_pdf() -> bytes:
 
 
 def test_pdf_text_extraction() -> None:
-    """_extract_pdf_text must join text from multiple pages with newlines."""
-    from app.routers.resume import _extract_pdf_text
+    """_extract_pdf_text_sync must join text from multiple pages with newlines.
+
+    NOTE: _extract_pdf_text (no _sync suffix) is now the async wrapper that runs
+    _extract_pdf_text_sync via asyncio.to_thread.  Unit tests for the pure text-
+    extraction logic should call _extract_pdf_text_sync directly to avoid needing
+    an event loop.  The async wrapper itself is tested in test_security_fixes.py.
+    """
+    from app.routers.resume import _extract_pdf_text_sync
 
     page1 = MagicMock()
     page1.extract_text.return_value = "Hello from page one"
@@ -53,7 +59,7 @@ def test_pdf_text_extraction() -> None:
     mock_reader.pages = [page1, page2]
 
     with patch("app.routers.resume.PdfReader", return_value=mock_reader):
-        result = _extract_pdf_text(b"fake-pdf-bytes")
+        result = _extract_pdf_text_sync(b"fake-pdf-bytes")
 
     assert result == "Hello from page one\nHello from page two"
 
@@ -148,7 +154,8 @@ async def test_resume_upload_happy_path() -> None:
 
     with (
         patch("app.routers.resume._upload_to_s3", new=AsyncMock()),
-        patch("app.routers.resume._extract_pdf_text", return_value=extracted_text),
+        # _extract_pdf_text is now async (asyncio.to_thread wrapper) — use AsyncMock.
+        patch("app.routers.resume._extract_pdf_text", new=AsyncMock(return_value=extracted_text)),
     ):
         response = await upload_resume(
             file=mock_file, current_user=mock_user, db=mock_db
@@ -196,7 +203,8 @@ async def test_storage_failure_returns_502() -> None:
     )
 
     with (
-        patch("app.routers.resume._extract_pdf_text", return_value="text"),
+        # _extract_pdf_text is now async — use AsyncMock.
+        patch("app.routers.resume._extract_pdf_text", new=AsyncMock(return_value="text")),
         patch("app.routers.resume._upload_to_s3", new=AsyncMock(side_effect=storage_error)),
         pytest.raises(HTTPException) as exc_info,
     ):
@@ -229,9 +237,10 @@ async def test_corrupt_pdf_returns_400() -> None:
     mock_db = AsyncMock()
 
     with (
+        # _extract_pdf_text is now async — use AsyncMock with side_effect.
         patch(
             "app.routers.resume._extract_pdf_text",
-            side_effect=Exception("PdfReadError: EOF marker not found"),
+            new=AsyncMock(side_effect=Exception("PdfReadError: EOF marker not found")),
         ),
         pytest.raises(HTTPException) as exc_info,
     ):
@@ -269,7 +278,8 @@ async def test_commit_failure_returns_503() -> None:
     delete_mock = AsyncMock()
 
     with (
-        patch("app.routers.resume._extract_pdf_text", return_value="text"),
+        # _extract_pdf_text is now async — use AsyncMock.
+        patch("app.routers.resume._extract_pdf_text", new=AsyncMock(return_value="text")),
         patch("app.routers.resume._upload_to_s3", new=AsyncMock()),
         patch("app.routers.resume._delete_from_s3", new=delete_mock),
         pytest.raises(HTTPException) as exc_info,
@@ -305,7 +315,8 @@ async def test_db_demote_failure_returns_503() -> None:
     delete_mock = AsyncMock()
 
     with (
-        patch("app.routers.resume._extract_pdf_text", return_value="text"),
+        # _extract_pdf_text is now async — use AsyncMock.
+        patch("app.routers.resume._extract_pdf_text", new=AsyncMock(return_value="text")),
         patch("app.routers.resume._upload_to_s3", new=AsyncMock()),
         patch(
             "app.routers.resume._demote_current_resumes",
@@ -345,7 +356,8 @@ async def test_malformed_user_id_returns_400() -> None:
     s3_mock = AsyncMock()
 
     with (
-        patch("app.routers.resume._extract_pdf_text", return_value="text"),
+        # _extract_pdf_text is now async — use AsyncMock.
+        patch("app.routers.resume._extract_pdf_text", new=AsyncMock(return_value="text")),
         patch("app.routers.resume._upload_to_s3", new=s3_mock),
         pytest.raises(HTTPException) as exc_info,
     ):

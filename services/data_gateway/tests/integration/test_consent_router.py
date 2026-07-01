@@ -3,7 +3,7 @@
 Runs against the real local Postgres (port 5433) and Redis (port 6379).
 Each test that needs an authenticated user registers a throw-away account.
 
-Test matrix (7 + 4 + 2 + 4 cases):
+Test matrix (7 + 4 + 2 + 4 + 5 cases):
   S3-011 original (7):
   1. POST /consent without JWT → 401
   2. POST /consent with valid JWT, purpose="interview", version=1 → 201 + row written
@@ -18,7 +18,7 @@ Test matrix (7 + 4 + 2 + 4 cases):
   9.  Unique index ix_dpdp_consent_active_unique exists in pg_indexes
 
   S4-010 DELETE /consent revocation (4):
-  10. POST then DELETE → 200, revoked_at populated, response shape correct
+  10. POST then DELETE → 200, items list populated, DB rows have revoked_at set
   11. DELETE with no prior POST → 404
   12. POST → DELETE → DELETE → second DELETE returns 404 (idempotent)
   13. POST session → DELETE consent → POST session → 403 (consent gate cross-service)
@@ -28,6 +28,13 @@ Test matrix (7 + 4 + 2 + 4 cases):
   15. trusted_proxy_count=1 + XFF="1.2.3.4, 10.0.0.1" → hash matches "1.2.3.4"
   16. trusted_proxy_count=1 + XFF="attacker, real-client, 10.0.0.1" → hash matches "real-client"
   17. trusted_proxy_count=1 + no XFF header → falls back to request.client.host
+
+  Video-capture full-withdrawal (5):
+  18. POST voice+video → DELETE → both rows revoked; response items list covers both types
+  19. DELETE with ONLY voice active → only voice row in items; video never touched
+  20. DELETE with ONLY video_capture active → only video row in items
+  21. After DELETE of both, GET /consent/status for each type returns consented=false
+  22. video_capture revocation is reflected immediately (same query consent_guard uses)
 """
 
 from __future__ import annotations
@@ -444,17 +451,18 @@ _CONSENT_DELETE_URL = "/consent"
 async def test_delete_consent_active_returns_200_and_sets_revoked_at(
     client: AsyncClient, auth_data: dict[str, str]
 ) -> None:
-    """POST consent → DELETE consent → 200; row's revoked_at is populated.
+    """POST voice consent → DELETE → 200; response has items list; DB row revoked_at set.
 
     Verifies:
       - HTTP 200 response code.
-      - Response body shape: {revoked: true, consent_id: str, revoked_at: str}.
+      - Response body shape: {revoked: true, items: [{consent_type, consent_id, revoked_at}]}.
+      - The items list contains the voice-recording row.
       - DB row's revoked_at is now non-null.
       - The revoked_at in the response matches (within seconds) the DB value.
     """
     token = auth_data["access_token"]
 
-    # Grant consent.
+    # Grant voice consent only.
     post_resp = await client.post(
         _CONSENT_URL,
         json={"purpose": "interview", "version": 1},
@@ -473,8 +481,17 @@ async def test_delete_consent_active_returns_200_and_sets_revoked_at(
 
     # Response shape.
     assert body["revoked"] is True
-    assert body["consent_id"] == consent_id
-    assert body["revoked_at"]  # non-empty ISO timestamp
+    assert "items" in body, "Response must have 'items' list"
+    items = body["items"]
+    assert isinstance(items, list), "'items' must be a list"
+    assert len(items) >= 1, "At least the voice consent must be in items"
+
+    # Find the voice item.
+    voice_items = [i for i in items if i["consent_type"] == "interview_voice_recording"]
+    assert len(voice_items) == 1, "Exactly one voice-recording item expected"
+    voice_item = voice_items[0]
+    assert voice_item["consent_id"] == consent_id
+    assert voice_item["revoked_at"]  # non-empty ISO timestamp
 
     # DB must reflect the revocation.
     session_factory = get_session_factory()
@@ -486,10 +503,10 @@ async def test_delete_consent_active_returns_200_and_sets_revoked_at(
     assert row.revoked_at is not None, "revoked_at must be set after DELETE /consent"
     # The ISO string in the response must correspond to the DB value (ignoring TZ
     # format variations — compare seconds-level truncation).
-    assert body["revoked_at"].startswith(
+    assert voice_item["revoked_at"].startswith(
         row.revoked_at.strftime("%Y-%m-%dT%H:%M:%S")[:16]  # YYYY-MM-DDTHH:MM
     ), (
-        f"revoked_at in response '{body['revoked_at']}' "
+        f"revoked_at in response '{voice_item['revoked_at']}' "
         f"does not match DB value '{row.revoked_at.isoformat()}'"
     )
 
@@ -818,3 +835,251 @@ async def test_get_status_invalid_type_returns_400(
         headers={"Authorization": f"Bearer {auth_token}"},
     )
     assert resp.status_code == 400, resp.text
+
+
+# ---------------------------------------------------------------------------
+# Video-capture full withdrawal (DPDP §11 — both consent types revoked)
+# ---------------------------------------------------------------------------
+# These tests verify that DELETE /consent revokes ALL active consent types,
+# not just the original interview_voice_recording. A candidate must be able
+# to fully withdraw — including biometric (webcam / proctoring) consent —
+# in a single call. If these tests fail it means the revoke endpoint is
+# still only revoking voice consent and leaving video_capture active, which
+# violates DPDP §11's requirement that withdrawal is unconditional.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_revokes_both_voice_and_video_when_both_active(
+    client: AsyncClient, auth_data: dict[str, str]
+) -> None:
+    """POST voice + video consents → DELETE → both rows revoked atomically.
+
+    The items list in the response must contain one entry per consent type,
+    and both DB rows must have revoked_at set. This is the core DPDP §11
+    full-withdrawal test — if this test is reverted (or the fix is removed),
+    the video_capture row would remain active while only voice was revoked.
+    """
+    token = auth_data["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Grant both consent types.
+    voice_resp = await client.post(
+        _CONSENT_URL,
+        json={"purpose": "interview", "version": 1, "consent_type": "interview_voice_recording"},
+        headers=headers,
+    )
+    assert voice_resp.status_code == 201, voice_resp.text
+    voice_id = voice_resp.json()["consent_id"]
+
+    video_resp = await client.post(
+        _CONSENT_URL,
+        json={"purpose": "interview", "version": 1, "consent_type": "video_capture"},
+        headers=headers,
+    )
+    assert video_resp.status_code == 201, video_resp.text
+    video_id = video_resp.json()["consent_id"]
+
+    # Revoke all consents.
+    del_resp = await client.delete(_CONSENT_DELETE_URL, headers=headers)
+    assert del_resp.status_code == 200, del_resp.text
+    body = del_resp.json()
+
+    assert body["revoked"] is True
+    items = body["items"]
+    assert isinstance(items, list)
+
+    # Both consent types must appear in the items list.
+    item_types = {i["consent_type"] for i in items}
+    assert "interview_voice_recording" in item_types, (
+        "voice consent type missing from revocation items — DELETE /consent did NOT "
+        "revoke interview_voice_recording"
+    )
+    assert "video_capture" in item_types, (
+        "video_capture consent type missing from revocation items — DELETE /consent "
+        "did NOT revoke video_capture. This is the bug this test guards against."
+    )
+
+    # The consent_ids in the response must match what was granted.
+    item_by_type = {i["consent_type"]: i for i in items}
+    assert item_by_type["interview_voice_recording"]["consent_id"] == voice_id
+    assert item_by_type["video_capture"]["consent_id"] == video_id
+
+    # Both DB rows must have revoked_at set.
+    session_factory = get_session_factory()
+    async with session_factory() as db:
+        voice_row = (
+            await db.execute(select(DpdpConsent).where(DpdpConsent.id == uuid.UUID(voice_id)))
+        ).scalar_one()
+        video_row = (
+            await db.execute(select(DpdpConsent).where(DpdpConsent.id == uuid.UUID(video_id)))
+        ).scalar_one()
+
+    assert voice_row.revoked_at is not None, (
+        "voice_recording DB row must have revoked_at set after DELETE /consent"
+    )
+    assert video_row.revoked_at is not None, (
+        "video_capture DB row must have revoked_at set after DELETE /consent — "
+        "this is the regression this fix addresses"
+    )
+
+
+@pytest.mark.asyncio
+async def test_delete_with_only_voice_active_revokes_voice_only(
+    client: AsyncClient, auth_data: dict[str, str]
+) -> None:
+    """Only voice consent granted → DELETE → only voice in items; no error for missing video.
+
+    Proves that the revoke loop handles the partial-grant case gracefully —
+    the absence of a video_capture row must not cause a 500 or a 404.
+    """
+    token = auth_data["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Grant only voice consent.
+    voice_resp = await client.post(
+        _CONSENT_URL,
+        json={"purpose": "interview", "version": 1},
+        headers=headers,
+    )
+    assert voice_resp.status_code == 201, voice_resp.text
+
+    del_resp = await client.delete(_CONSENT_DELETE_URL, headers=headers)
+    assert del_resp.status_code == 200, del_resp.text
+    body = del_resp.json()
+
+    assert body["revoked"] is True
+    item_types = {i["consent_type"] for i in body["items"]}
+    assert "interview_voice_recording" in item_types
+    # video_capture was never granted — it must NOT appear in items
+    assert "video_capture" not in item_types, (
+        "video_capture must not appear in revocation items when it was never granted"
+    )
+
+
+@pytest.mark.asyncio
+async def test_delete_with_only_video_active_revokes_video_only(
+    client: AsyncClient, auth_data: dict[str, str]
+) -> None:
+    """Only video_capture consent granted → DELETE → only video in items.
+
+    Guards the case where a candidate consented to webcam proctoring but
+    never consented to voice recording (e.g. written-exam only flow).
+    DELETE /consent must still honour their withdrawal request.
+    """
+    token = auth_data["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Grant only video consent.
+    video_resp = await client.post(
+        _CONSENT_URL,
+        json={"purpose": "interview", "version": 1, "consent_type": "video_capture"},
+        headers=headers,
+    )
+    assert video_resp.status_code == 201, video_resp.text
+    video_id = video_resp.json()["consent_id"]
+
+    del_resp = await client.delete(_CONSENT_DELETE_URL, headers=headers)
+    assert del_resp.status_code == 200, del_resp.text
+    body = del_resp.json()
+
+    assert body["revoked"] is True
+    item_types = {i["consent_type"] for i in body["items"]}
+    assert "video_capture" in item_types, (
+        "video_capture must be in revocation items when only video was active"
+    )
+    assert "interview_voice_recording" not in item_types
+
+    # DB row must be revoked.
+    session_factory = get_session_factory()
+    async with session_factory() as db:
+        video_row = (
+            await db.execute(select(DpdpConsent).where(DpdpConsent.id == uuid.UUID(video_id)))
+        ).scalar_one()
+    assert video_row.revoked_at is not None
+
+
+@pytest.mark.asyncio
+async def test_after_full_withdrawal_status_is_false_for_both_types(
+    client: AsyncClient, auth_data: dict[str, str]
+) -> None:
+    """POST voice+video → DELETE → GET status for both types returns consented=false.
+
+    Verifies the end-to-end DPDP withdrawal: after a single DELETE call,
+    the consent gate (same predicate used by has_active_consent in interview_core)
+    reports no active consent for either processing type.
+    """
+    token = auth_data["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Grant both.
+    await client.post(
+        _CONSENT_URL,
+        json={"purpose": "interview", "version": 1, "consent_type": "interview_voice_recording"},
+        headers=headers,
+    )
+    await client.post(
+        _CONSENT_URL,
+        json={"purpose": "interview", "version": 1, "consent_type": "video_capture"},
+        headers=headers,
+    )
+
+    # Full withdrawal.
+    del_resp = await client.delete(_CONSENT_DELETE_URL, headers=headers)
+    assert del_resp.status_code == 200, del_resp.text
+
+    # Both status checks must reflect withdrawal.
+    voice_status = await client.get(_CONSENT_STATUS_URL, headers=headers)
+    video_status = await client.get(
+        f"{_CONSENT_STATUS_URL}?consent_type=video_capture", headers=headers
+    )
+
+    assert voice_status.json()["consented"] is False, (
+        "voice consent must show consented=false after full withdrawal"
+    )
+    assert video_status.json()["consented"] is False, (
+        "video_capture consent must show consented=false after full withdrawal — "
+        "this is the regression this fix addresses"
+    )
+
+
+@pytest.mark.asyncio
+async def test_video_capture_revocation_blocks_future_interview(
+    client: AsyncClient, auth_data: dict[str, str]
+) -> None:
+    """POST voice+video → DELETE → video consent status is immediately false.
+
+    The consent guard in interview_core re-reads the row on every session
+    create. This test confirms the DB state is consistent immediately after
+    the DELETE call — no async lag or caching can leave the guard stale.
+    """
+    token = auth_data["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Grant video consent.
+    video_resp = await client.post(
+        _CONSENT_URL,
+        json={"purpose": "interview", "version": 1, "consent_type": "video_capture"},
+        headers=headers,
+    )
+    assert video_resp.status_code == 201, video_resp.text
+
+    # Verify it's active.
+    status_before = await client.get(
+        f"{_CONSENT_STATUS_URL}?consent_type=video_capture", headers=headers
+    )
+    assert status_before.json()["consented"] is True
+
+    # Full withdrawal (via DELETE /consent — covers all types).
+    del_resp = await client.delete(_CONSENT_DELETE_URL, headers=headers)
+    assert del_resp.status_code == 200, del_resp.text
+
+    # video_capture consent must be immediately inactive.
+    status_after = await client.get(
+        f"{_CONSENT_STATUS_URL}?consent_type=video_capture", headers=headers
+    )
+    assert status_after.json()["consented"] is False, (
+        "video_capture consent must be immediately inactive after DELETE /consent. "
+        "The consent guard in interview_core uses the same DB predicate and would "
+        "therefore also return False — blocking webcam-proctored sessions."
+    )

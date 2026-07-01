@@ -47,11 +47,8 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
-from shared.auth.jwt import (
-    generate_refresh_token,
-    hash_refresh_token,
-    issue_access_token,
-)
+from shared.auth.jwt import issue_access_token
+from shared.auth.local import mint_refresh_session
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -142,11 +139,6 @@ def _build_authorize_url(state: str) -> str:
 def _state_redis_key(state_token: str) -> str:
     """Return the Redis key for the given OAuth state token."""
     return f"{_STATE_KEY_PREFIX}{state_token}"
-
-
-# Redis key prefix for refresh tokens — must match shared.auth.local._RT_PREFIX
-# (the /auth/refresh endpoint reads tokens written under this prefix).
-_RT_PREFIX = "refresh:"
 
 
 def _set_session_cookies(response: Response, raw_refresh: str) -> str:
@@ -568,14 +560,13 @@ async def callback(
     # persists past the 15-min access token (silently refreshed via /auth/refresh,
     # exactly like local login). sso.ts sends this exchange with
     # credentials:'include' so the Set-Cookie headers are stored by the browser.
+    #
+    # AUTH-01 fix: mint_refresh_session writes "<user_id>:<created_at_unix>" and
+    # adds the key to the user_sessions:<uid> index so logout_all, admin
+    # delete, and password-reset all revoke this SSO session correctly.
     # ------------------------------------------------------------------
-    raw_refresh = generate_refresh_token()
     refresh_ttl = settings.jwt_refresh_expiry_days * 86400
-    await redis.set(
-        _RT_PREFIX + hash_refresh_token(raw_refresh),
-        str(final_user_id),
-        ex=refresh_ttl,
-    )
+    raw_refresh = await mint_refresh_session(redis, str(final_user_id), refresh_ttl)
     _set_session_cookies(response, raw_refresh)
 
     return SsoTokenResponse(

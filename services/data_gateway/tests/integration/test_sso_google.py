@@ -156,12 +156,21 @@ def _override_db(
 
 
 class _FakeRedis:
-    """In-memory fake for the Redis async client."""
+    """In-memory fake for the Redis async client.
+
+    Supports both ``set`` (used by state-key storage in initiate) and ``setex``
+    (used by mint_refresh_session for refresh token storage), plus the minimal
+    session-index ops (sadd, expire) so AUTH-01 tracked-format writes succeed.
+    """
 
     def __init__(self) -> None:
         self._store: dict[str, str] = {}
+        self._sets: dict[str, set[str]] = {}
 
     async def set(self, key: str, value: str, ex: int | None = None) -> None:  # noqa: ARG002
+        self._store[key] = value
+
+    async def setex(self, key: str, ttl: int, value: str) -> None:  # noqa: ARG002
         self._store[key] = value
 
     async def get(self, key: str) -> str | None:
@@ -169,6 +178,13 @@ class _FakeRedis:
 
     async def delete(self, key: str) -> int:
         return self._store.pop(key, None) and 1 or 0  # type: ignore[return-value]
+
+    async def sadd(self, key: str, member: str) -> int:
+        self._sets.setdefault(key, set()).add(member)
+        return 1
+
+    async def expire(self, key: str, ttl: int) -> bool:  # noqa: ARG002
+        return True
 
 
 def _make_redis_override(fake: _FakeRedis) -> Any:
@@ -351,6 +367,19 @@ async def test_callback_valid_code_returns_jwt(client: AsyncClient) -> None:
     assert "csrf_token" in resp.cookies
     # A refresh token must have been stored in Redis under the refresh: prefix.
     assert any(k.startswith("refresh:") for k in fake_redis._store)
+
+    # AUTH-01: the stored value must be in the tracked "<user_id>:<created_at>"
+    # format so that logout_all / epoch check can revoke SSO sessions.
+    refresh_keys = [k for k in fake_redis._store if k.startswith("refresh:")]
+    assert len(refresh_keys) == 1, "exactly one refresh token must be stored"
+    stored_rt_value = fake_redis._store[refresh_keys[0]]
+    user_id_from_body = body["user_id"]
+    assert stored_rt_value.startswith(f"{user_id_from_body}:"), (
+        f"AUTH-01 REGRESSION: stored value must be '<user_id>:<ts>' — "
+        f"got {stored_rt_value!r}"
+    )
+    ts_part = stored_rt_value[len(user_id_from_body) + 1:]
+    assert ts_part.isdigit(), f"created_at must be a digit string — got {ts_part!r}"
 
     # Cookie ATTRIBUTES must match local login (httpx hides these on resp.cookies,
     # so parse the raw Set-Cookie headers — same approach as the auth-endpoint tests).

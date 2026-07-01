@@ -40,6 +40,7 @@ from app.coding_grader import run_tests, weighted_raw
 from app.config import settings
 from app.exam_grading import GradeInput, GradeQuestion, grade_exam
 from app.exam_link import hash_exam_token
+from app.execution import run_code
 from app.models import (
     Applicant,
     CodingQuestion,
@@ -51,7 +52,6 @@ from app.models import (
     ExamRound,
     ExamSection,
 )
-from app.execution import run_code
 from app.rate_limit import rate_limit
 from app.redis_client import get_redis
 from app.routers.hr_applicants import DbSessionDep
@@ -852,7 +852,11 @@ async def _grade_and_finalize(
             fresh_attempt.score_max = total_max
             fresh_attempt.score_percent = percent
             fresh_attempt.passed = passed
-            fresh_attempt.status = "expired" if expired else "submitted"
+            # Only transition from 'in_progress' — never overwrite a 'submitted'
+            # result (double-submit guard at DB write level, complementing the
+            # Redis claim and the uix_exam_attempts_one_live partial index).
+            if fresh_attempt.status == "in_progress":
+                fresh_attempt.status = "expired" if expired else "submitted"
             fresh_attempt.submitted_at = now
             fresh_attempt.updated_at = now
 

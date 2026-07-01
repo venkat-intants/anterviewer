@@ -22,8 +22,10 @@ PII rules:
 
 from __future__ import annotations
 
+import asyncio
 import io
 from datetime import date
+from functools import partial
 from typing import Any
 
 import structlog
@@ -424,7 +426,12 @@ async def render_scorecard_pdf(
     s3_key = f"{_SCORECARD_PREFIX}/{scorecard_id}/report.pdf"
 
     try:
-        pdf_bytes = _build_pdf_bytes(
+        # _build_pdf_bytes is CPU-bound (ReportLab calls doc.build() which is
+        # purely synchronous and can hold the event loop for 200-400 ms on a
+        # typical scorecard).  Run it in the default thread-pool executor so
+        # the event loop remains responsive to other concurrent requests.
+        _build_fn = partial(
+            _build_pdf_bytes,
             scorecard_id=scorecard_id,
             candidate_name=candidate_name,
             job_title=job_title,
@@ -435,6 +442,7 @@ async def render_scorecard_pdf(
             improvements=improvements,
             summary=summary,
         )
+        pdf_bytes = await asyncio.to_thread(_build_fn)
     except Exception as exc:  # broad catch — non-raising by design
         log.error(
             "pdf_render.build_failed",
