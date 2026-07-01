@@ -828,6 +828,23 @@ async def _grade_and_finalize(
         if fresh_attempt is not None and fresh_attempt.status in ("submitted", "expired"):
             return _stored_result(fresh_attempt)
 
+        # The attempt row must still exist here. If it vanished between the early
+        # commit and this persist (concurrent delete / DB fault), grading RAN but
+        # cannot be saved — fail LOUDLY instead of returning a "success" the DB
+        # never recorded (which would show the candidate a pass with no scorecard).
+        # The Redis claim is released in `finally`, so a retry can re-grade.
+        if fresh_attempt is None:
+            log.error(
+                "exam.grade.attempt_missing_on_persist",
+                attempt_id=str(attempt.id),
+                round_id=str(ctx.exam_round.id),
+                company_id=str(ctx.company_id),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Your answers were graded but could not be saved. Please submit again.",
+            )
+
         if fresh_attempt is not None:
             fresh_attempt.answers = {"mcq": mcq_answers, "coding": coding_sanitized}
             fresh_attempt.graded_snapshot = {"mcq": mcq_snapshot, "coding": coding_snapshot}

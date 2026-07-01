@@ -41,17 +41,21 @@ You will use 2 files that are already in this repo:
 
 ## Step 2 — Open the ports (do this in the Oracle website)
 
-The app uses ports **8001, 8002, 8003, 8004**. Open them:
+Open **only 80 and 443** — the Caddy TLS reverse proxy is the single public
+entrypoint. **Do NOT open 8001–8004**: those are the internal service ports and
+exposing them serves candidate PII + JWTs in **cleartext**, bypassing TLS.
 
 1. Open your instance → click its **Virtual Cloud Network (VCN)** → **Security Lists**
    → **Default Security List**.
-2. **Add Ingress Rules** → for each rule:
+2. **Add Ingress Rules** → one rule each for **80** and **443**:
    - Source CIDR: `0.0.0.0/0`
    - IP Protocol: **TCP**
-   - Destination Port Range: `8001-8004`
+   - Destination Port Range: `80` (then a second rule for `443`)
 3. Save.
 
-(The setup script opens the same ports *inside* the VM. You need **both**.)
+(The setup script opens the same two ports *inside* the VM. You need **both**.)
+Caddy needs a domain (`PUBLIC_API_DOMAIN`) resolving to this VM's IP for HTTPS,
+and your Vercel rewrites must point at `https://<that-domain>` — see Step 7.
 
 ## Step 3 — Connect to the VM
 

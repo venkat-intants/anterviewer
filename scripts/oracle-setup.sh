@@ -42,13 +42,18 @@ apt-get update -y
 apt-get install -y iptables-persistent
 
 # --- 2. Host firewall (Oracle Ubuntu blocks everything but SSH by default) --
-echo "==> Opening host firewall for 8001-8004 ..."
-for p in 8001 8002 8003 8004; do
+# ONLY Caddy (the TLS reverse proxy) is public: ports 80 + 443. The four app
+# services (8001-8004) are INTERNAL to the Docker network and must NEVER be
+# opened to the internet — doing so serves candidate PII + JWTs in CLEARTEXT,
+# bypassing TLS and Caddy. (Older versions of this script opened 8001-8004; that
+# was a security bug — do not reinstate it.)
+echo "==> Opening host firewall for 80 + 443 (Caddy TLS proxy only) ..."
+for p in 80 443; do
   iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null \
     || iptables -I INPUT -p tcp --dport "$p" -j ACCEPT
 done
 netfilter-persistent save || true
-echo "    (Also open 8001-8004 in the OCI Console Security List — see the guide.)"
+echo "    (Also open ONLY 80 + 443 in the OCI Console Security List — NOT 8001-8004.)"
 
 # --- 3. deploy.env ---------------------------------------------------------
 if [ ! -f deploy.env ]; then
