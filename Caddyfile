@@ -1,0 +1,130 @@
+# ---------------------------------------------------------------------------
+# Caddyfile — Intants AI Voice Interview Platform (production, single-VM)
+#
+# Caddy is the ONLY publicly reachable process (ports 80 + 443).
+# All four FastAPI services are on the internal Docker network only.
+#
+# REQUIRED env var (set in deploy.env or the host environment):
+#   PUBLIC_API_DOMAIN   e.g. api.yourdomain.com
+#
+# Caddy obtains a TLS certificate automatically via ACME (Let's Encrypt).
+# The domain MUST resolve to this VM's public IP before you start the stack,
+# otherwise ACME will fail and Caddy will refuse to start.
+#
+# Vercel rewrites that previously pointed at :8001-:8004 must be updated
+# to point to https://{PUBLIC_API_DOMAIN} — see docs/DEPLOYMENT.md.
+# ---------------------------------------------------------------------------
+
+{$PUBLIC_API_DOMAIN} {
+
+    # ------------------------------------------------------------------
+    # data_gateway  :8002  — auth, user management, ATS, exams
+    # ------------------------------------------------------------------
+    handle /api/v1/auth/* {
+        reverse_proxy data_gateway:8002
+    }
+    handle /api/v1/users/* {
+        reverse_proxy data_gateway:8002
+    }
+    handle /api/v1/companies/* {
+        reverse_proxy data_gateway:8002
+    }
+    handle /api/v1/candidates/* {
+        reverse_proxy data_gateway:8002
+    }
+    handle /api/v1/jobs/* {
+        reverse_proxy data_gateway:8002
+    }
+    handle /api/v1/hr/* {
+        reverse_proxy data_gateway:8002
+    }
+    handle /api/v1/exams/* {
+        reverse_proxy data_gateway:8002
+    }
+    handle /api/v1/admin/* {
+        reverse_proxy data_gateway:8002
+    }
+    handle /api/v1/platform/* {
+        reverse_proxy data_gateway:8002
+    }
+    handle /api/v1/superadmin/* {
+        reverse_proxy data_gateway:8002
+    }
+    handle /api/v1/consent/* {
+        reverse_proxy data_gateway:8002
+    }
+    # data_gateway health/metrics
+    handle /health/gateway* {
+        reverse_proxy data_gateway:8002 {
+            rewrite /health/live
+        }
+    }
+
+    # ------------------------------------------------------------------
+    # interview_core  :8001  — LiveKit / real-time interview API
+    # ------------------------------------------------------------------
+    handle /api/v1/interview/* {
+        reverse_proxy interview_core:8001
+    }
+    handle /api/v1/sessions/* {
+        reverse_proxy interview_core:8001
+    }
+    handle /api/v1/livekit/* {
+        reverse_proxy interview_core:8001
+    }
+    handle /ws/* {
+        reverse_proxy interview_core:8001
+    }
+
+    # ------------------------------------------------------------------
+    # feedback_billing  :8003  — scoring, PDF scorecards, billing
+    # ------------------------------------------------------------------
+    handle /api/v1/feedback/* {
+        reverse_proxy feedback_billing:8003
+    }
+    handle /api/v1/scorecards/* {
+        reverse_proxy feedback_billing:8003
+    }
+    handle /api/v1/billing/* {
+        reverse_proxy feedback_billing:8003
+    }
+    handle /api/v1/reports/* {
+        reverse_proxy feedback_billing:8003
+    }
+
+    # ------------------------------------------------------------------
+    # admin_ops  :8004  — analytics + ops dashboard APIs
+    # ------------------------------------------------------------------
+    handle /api/v1/ops/* {
+        reverse_proxy admin_ops:8004
+    }
+    handle /api/v1/analytics/* {
+        reverse_proxy admin_ops:8004
+    }
+
+    # ------------------------------------------------------------------
+    # Catch-all health probe (used by load-balancer / uptime monitors)
+    # ------------------------------------------------------------------
+    handle /health {
+        respond "OK" 200
+    }
+
+    # ------------------------------------------------------------------
+    # Security headers on every response
+    # ------------------------------------------------------------------
+    header {
+        Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    # ------------------------------------------------------------------
+    # Logging — structured JSON for Loki scraping
+    # ------------------------------------------------------------------
+    log {
+        output stdout
+        format json
+    }
+}

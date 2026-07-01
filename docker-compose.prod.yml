@@ -1,14 +1,19 @@
 # ---------------------------------------------------------------------------
 # PRODUCTION compose — full backend on ONE host (e.g. an Oracle VM or any box).
 #
-# Runs 5 containers:
-#   data_gateway, interview_core (API), interview_worker, feedback_billing, admin_ops
+# Runs 6 containers:
+#   caddy (TLS termination), data_gateway, interview_core (API),
+#   interview_worker, feedback_billing, admin_ops
+#
+# Caddy is the ONLY published service (ports 80 + 443).
+# The 4 FastAPI services are INTERNAL to the Docker network — they are NOT
+# accessible from the public internet.
 #
 # Coding exams run via JDoodle (hosted API) — NO Piston, NO privileged
 # container, NO VM-specific setup. JDoodle credentials come from
 # services/data_gateway/.env (JDOODLE_CLIENT_ID / JDOODLE_CLIENT_SECRET).
 #
-# Frontend is NOT here — it goes on Vercel and proxies to this host's ports.
+# Frontend is NOT here — it goes on Vercel and proxies to Caddy (HTTPS).
 # DB (Neon) + Redis (Upstash) + storage (R2) + LiveKit/Sarvam/Gemini stay cloud;
 # their keys come from each services/<name>/.env (copy those onto the host).
 #
@@ -17,6 +22,8 @@
 #
 # deploy.env must define (see scripts/oracle-setup.sh which creates it):
 #   PUBLIC_WEB_ORIGIN=https://your-app.vercel.app
+#   PUBLIC_API_DOMAIN=api.yourdomain.com   <-- REQUIRED for Caddy auto-HTTPS
+#                                              must resolve to this VM's IP
 # ---------------------------------------------------------------------------
 name: intants-prod
 
@@ -25,6 +32,38 @@ x-common-env: &common-env
   LOG_LEVEL: INFO
 
 services:
+  # --------------------------------------------------------------------------
+  # Caddy — TLS termination and reverse proxy (the ONLY public-facing service)
+  # --------------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      PUBLIC_API_DOMAIN: ${PUBLIC_API_DOMAIN}
+    depends_on:
+      data_gateway:
+        condition: service_healthy
+      interview_core:
+        condition: service_healthy
+      feedback_billing:
+        condition: service_healthy
+      admin_ops:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: "0.5"
+    networks:
+      - intants
+
+  # --------------------------------------------------------------------------
+  # data_gateway — auth, user management, ATS, exams
+  # --------------------------------------------------------------------------
   data_gateway:
     build:
       context: .
@@ -42,15 +81,29 @@ services:
       APP_BASE_URL: ${PUBLIC_WEB_ORIGIN}
       EXAM_LINK_BASE_URL: ${PUBLIC_WEB_ORIGIN}
       INTERVIEW_LINK_BASE_URL: ${PUBLIC_WEB_ORIGIN}
-      # Behind the Vercel proxy.
+      # Behind the Caddy proxy which sets X-Forwarded-Proto: https
       AUTH_COOKIE_SECURE: "true"
       AUTH_COOKIE_SAMESITE: none
       TRUSTED_PROXY_COUNT: "1"
-    ports: ["8002:8002"]
+    expose:
+      - "8002"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8002/health/live', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     restart: unless-stopped
-    # Let uvicorn drain in-flight requests on SIGTERM before Docker SIGKILLs it.
     stop_grace_period: 30s
+    mem_limit: 1g
+    cpus: "1.0"
+    networks:
+      - intants
 
+  # --------------------------------------------------------------------------
+  # interview_core — LiveKit real-time interview API
+  # --------------------------------------------------------------------------
   interview_core:
     build:
       context: .
@@ -62,15 +115,33 @@ services:
       PORT: "8001"
       CORS_ALLOWED_ORIGINS: ${PUBLIC_WEB_ORIGIN}
       FEEDBACK_BILLING_URL: http://feedback_billing:8003
-    ports: ["8001:8001"]
+    expose:
+      - "8001"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8001/health/live', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     restart: unless-stopped
-    # Let uvicorn drain in-flight requests on SIGTERM before Docker SIGKILLs it.
     stop_grace_period: 30s
+    mem_limit: 1536m
+    cpus: "1.5"
+    networks:
+      - intants
 
-  # Same image as interview_core, but runs the LiveKit worker (no HTTP port).
+  # --------------------------------------------------------------------------
+  # interview_worker — LiveKit agent worker (same image as interview_core)
+  # Depends on both interview_core AND feedback_billing being healthy.
+  # --------------------------------------------------------------------------
   interview_worker:
     image: intants/interview_core:prod
-    depends_on: [interview_core, feedback_billing]
+    depends_on:
+      interview_core:
+        condition: service_healthy
+      feedback_billing:
+        condition: service_healthy
     env_file: [services/interview_core/.env]
     environment:
       <<: *common-env
@@ -82,7 +153,14 @@ services:
     # finish/close active interviews (running their DB + scoring hooks) before
     # Docker SIGKILLs the container. Bumped well above the 10s default for this.
     stop_grace_period: 150s
+    mem_limit: 2g
+    cpus: "2.0"
+    networks:
+      - intants
 
+  # --------------------------------------------------------------------------
+  # feedback_billing — scoring, PDF scorecards, billing pipeline
+  # --------------------------------------------------------------------------
   feedback_billing:
     build:
       context: .
@@ -93,11 +171,25 @@ services:
       <<: *common-env
       PORT: "8003"
       CORS_ALLOWED_ORIGINS: ${PUBLIC_WEB_ORIGIN}
-    ports: ["8003:8003"]
+    expose:
+      - "8003"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8003/health/live', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     restart: unless-stopped
-    # Let uvicorn drain in-flight requests on SIGTERM before Docker SIGKILLs it.
     stop_grace_period: 30s
+    mem_limit: 1g
+    cpus: "1.0"
+    networks:
+      - intants
 
+  # --------------------------------------------------------------------------
+  # admin_ops — analytics and ops dashboard APIs
+  # --------------------------------------------------------------------------
   admin_ops:
     build:
       context: .
@@ -111,7 +203,26 @@ services:
       INTERVIEW_CORE_URL: http://interview_core:8001
       DATA_GATEWAY_URL: http://data_gateway:8002
       FEEDBACK_BILLING_URL: http://feedback_billing:8003
-    ports: ["8004:8004"]
+    expose:
+      - "8004"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8004/health/live', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     restart: unless-stopped
-    # Let uvicorn drain in-flight requests on SIGTERM before Docker SIGKILLs it.
     stop_grace_period: 30s
+    mem_limit: 512m
+    cpus: "0.5"
+    networks:
+      - intants
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  intants:
+    driver: bridge

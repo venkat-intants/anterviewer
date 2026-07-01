@@ -257,3 +257,115 @@ def test_internal_score_gemini_failure_returns_502(client: TestClient) -> None:
         app.dependency_overrides.pop(get_db_session, None)
 
     assert resp.status_code == 502
+
+
+# ---------------------------------------------------------------------------
+# BC-2: /internal/* service-role gate
+# Only tokens with roles=["service"] may call /internal/score.
+# ---------------------------------------------------------------------------
+
+
+def test_internal_score_rejects_candidate_token(client: TestClient) -> None:
+    """A candidate JWT (no 'service' role) → 403 Forbidden."""
+    token = _make_jwt(sub="candidate123", roles=["candidate"])
+    resp = client.post(
+        "/internal/score",
+        json=_VALID_BODY,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 403
+
+
+def test_internal_score_rejects_guest_token(client: TestClient) -> None:
+    """A guest_candidate JWT → 403 Forbidden (stops denial-of-wallet attacks)."""
+    token = _make_jwt(sub="guest123", roles=["guest_candidate"])
+    resp = client.post(
+        "/internal/score",
+        json=_VALID_BODY,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 403
+
+
+def test_internal_score_rejects_hr_token(client: TestClient) -> None:
+    """An HR manager JWT — valid user token but not a service token → 403."""
+    token = _make_jwt(sub="hr123", roles=["hr_manager"])
+    resp = client.post(
+        "/internal/score",
+        json=_VALID_BODY,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 403
+
+
+def test_internal_score_accepts_service_token(client: TestClient) -> None:
+    """A service JWT (roles=['service'], sub='interview_core') → proceeds to scoring."""
+    token = _make_jwt(sub="interview_core", roles=["service"])
+    mock_db = _mock_db_session()
+
+    async def _override_db() -> AsyncSession:  # type: ignore[misc]
+        yield mock_db  # type: ignore[misc]
+
+    from app.database import get_db_session  # noqa: PLC0415
+
+    app.dependency_overrides[get_db_session] = _override_db
+
+    try:
+        with patch(
+            "app.routers.score.score_session",
+            new_callable=AsyncMock,
+            return_value=_GOOD_SCORE_SESSION_RETURN,
+        ):
+            resp = client.post(
+                "/internal/score",
+                json=_VALID_BODY,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+
+    assert resp.status_code == 201
+
+
+# ---------------------------------------------------------------------------
+# BC-3: token-epoch check on /internal/score
+# ---------------------------------------------------------------------------
+
+
+def test_internal_score_rejects_revoked_service_token(client: TestClient) -> None:
+    """A service token whose iat predates the epoch → 401 (token revoked)."""
+    from datetime import timedelta
+    from unittest.mock import patch as _patch  # noqa: PLC0415
+
+    # Issue a token with iat = now - 10 min
+    old_iat = datetime.now(tz=UTC) - timedelta(minutes=10)
+    claims: dict[str, Any] = {
+        "sub": "interview_core",
+        "roles": ["service"],
+        "iat": old_iat,
+        "exp": datetime.now(tz=UTC) + timedelta(minutes=5),
+        "iss": settings.jwt_issuer,
+        "aud": settings.jwt_audience,
+        "jti": uuid.uuid4().hex,
+    }
+    from jose import jwt as jose_jwt  # noqa: PLC0415
+    token = str(jose_jwt.encode(claims, settings.jwt_secret, algorithm=settings.jwt_algorithm))
+
+    # Simulate epoch set 5 minutes ago (after the iat), so the token is stale.
+    stale_epoch = int((datetime.now(tz=UTC) - timedelta(minutes=5)).timestamp())
+
+    async def _mock_redis_get(key: str) -> str | None:
+        return str(stale_epoch)
+
+    with _patch("app.routers.score.get_redis") as mock_get_redis:
+        mock_redis = AsyncMock()
+        mock_redis.get = AsyncMock(side_effect=_mock_redis_get)
+        mock_get_redis.return_value = mock_redis
+
+        resp = client.post(
+            "/internal/score",
+            json=_VALID_BODY,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert resp.status_code == 401

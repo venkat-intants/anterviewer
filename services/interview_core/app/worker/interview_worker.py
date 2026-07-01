@@ -254,14 +254,39 @@ async def _lookup_session(
 # ---------------------------------------------------------------------------
 
 
-async def _lookup_candidate_user_id(room_name: str) -> str | None:
-    """Return the candidate ``user_id`` for a session (room == session_id), or None.
+async def resolve_consent_user_id(room_name: str) -> str | None:
+    """Return the ``user_id`` to poll for consent for a session, or None.
+
+    Covers BOTH the registered-candidate flow and the primary guest magic-link
+    flow:
+
+    Registered-candidate flow
+        ``POST /api/sessions`` creates a session with ``user_id`` set to the
+        authenticated candidate's id.  The consent ledger entry was recorded
+        when the candidate accepted the DPDP modal (``POST /consent``).
+
+    Guest magic-link flow (primary invite path — ``interview_take.py``)
+        ``POST /interview-invite/redeem`` always lazy-provisions a real ``users``
+        row for the applicant (``role='guest_candidate'``) and writes
+        ``sessions.user_id = guest_user_id`` in the same transaction.  It also
+        records a ``dpdp_consent_ledger`` entry for that ``guest_user_id``
+        (the applicant's landing-page checkbox tick).  Therefore the ``user_id``
+        column is NEVER NULL for live guest sessions and the watchdog CAN and
+        SHOULD poll it — returning ``None`` here and silently skipping consent
+        re-checking would mean a guest who withdraws consent mid-session is
+        never cut off (DPDP §11 violation).
+
+    Returns ``None`` only for genuine edge cases that make polling impossible:
+        - ``room_name`` is not a valid UUID (bare/CI dispatch, no DB row).
+        - The session row does not exist (orphaned room).
+        - The ``user_id`` column is NULL on the session row (should not happen
+          for live sessions; guard kept for safety against schema drift).
+        - A transient DB error — fails open (watchdog no-ops that tick and
+          retries next interval).
 
     Isolated from ``_lookup_session`` so the consent watchdog can resolve the
-    candidate without disturbing that function's stable return tuple. Best-effort:
-    any failure (bad UUID, missing row, DB error) returns None, which makes the
-    watchdog a no-op (a session with no bound user — guest/legacy — has nothing to
-    poll)."""
+    candidate without disturbing that function's stable return tuple.
+    """
     import contextlib
 
     from sqlalchemy import select
@@ -283,13 +308,29 @@ async def _lookup_candidate_user_id(room_name: str) -> str | None:
                     select(InterviewSession.user_id).where(InterviewSession.id == sid)
                 )
             ).scalar_one_or_none()
-            return str(uid) if uid is not None else None
+            if uid is None:
+                # Log at WARNING so missing-user-id on a live session is visible
+                # in ops dashboards — this indicates a data integrity problem,
+                # NOT a normal guest session (which always has user_id set).
+                logger.warning(
+                    "interview-worker.consent_user_lookup_no_user_id room=%s "
+                    "— session row missing or user_id NULL; consent watchdog "
+                    "will be a no-op for this session",
+                    room_name,
+                )
+                return None
+            return str(uid)
     except Exception as exc:  # noqa: BLE001 — never crash the interview on this
         logger.warning(
             "interview-worker.consent_user_lookup_failed room=%s err=%s",
             room_name, type(exc).__name__,
         )
         return None
+
+
+# Keep the old name as an alias so any external callers (e.g. tests pinned to
+# the old name) continue to work during the transition period.
+_lookup_candidate_user_id = resolve_consent_user_id
 
 
 # ---------------------------------------------------------------------------
@@ -966,12 +1007,19 @@ async def entrypoint(ctx: JobContext) -> None:
         a withdrawal DURING a live session would otherwise keep recording until the
         session ends.
 
+        ``user_id`` is resolved by ``resolve_consent_user_id`` above.  Both
+        registered-candidate and guest magic-link sessions set ``sessions.user_id``
+        and record a ``dpdp_consent_ledger`` row — so ``user_id`` should be non-None
+        for every live session.  ``None`` only occurs for unrecognised room names,
+        orphaned rows, or transient DB errors (all logged by the resolver).
+
         FAILS OPEN: on any DB/query error we keep the interview running and retry on
         the next tick — a transient DB blip must never kill a valid, consented
         interview. We act ONLY on a definitive 'consent is no longer active'.
         """
         if not user_id:
-            return  # guest/legacy session with no bound candidate — nothing to poll
+            # resolve_consent_user_id already logged the reason; nothing to poll.
+            return
 
         import contextlib as _contextlib
 
@@ -1108,9 +1156,12 @@ async def entrypoint(ctx: JobContext) -> None:
     )
     logger.info("interview-worker: session started room=%s", session_id)
 
-    # Start the DPDP consent watchdog now that the session is live. Resolving the
-    # candidate is best-effort; a None user_id makes the watchdog a no-op.
-    candidate_user_id = await _lookup_candidate_user_id(session_id)
+    # Start the DPDP consent watchdog now that the session is live.
+    # resolve_consent_user_id works for BOTH registered-candidate and guest
+    # magic-link sessions (both always set sessions.user_id).  None is returned
+    # only for unrecognised rooms or transient DB errors; the watchdog no-ops
+    # in those cases (already logged by the resolver).
+    candidate_user_id = await resolve_consent_user_id(session_id)
     consent_task_holder["task"] = asyncio.create_task(
         _consent_watchdog(candidate_user_id)
     )
