@@ -34,10 +34,11 @@ from app.main import app
 # ---------------------------------------------------------------------------
 
 
-def _make_jwt(sub: str = "test_user", roles: list[str] | None = None) -> str:
+def _make_jwt(sub: str | None = None, roles: list[str] | None = None) -> str:
+    """Mint a JWT. Default sub is the scorecard owner so ownership check passes."""
     now = datetime.now(tz=UTC)
     claims: dict[str, Any] = {
-        "sub": sub,
+        "sub": sub if sub is not None else _OWNER_USER_ID,
         "roles": roles or ["candidate"],
         "iat": now,
         "exp": now + timedelta(minutes=5),
@@ -50,6 +51,8 @@ def _make_jwt(sub: str = "test_user", roles: list[str] | None = None) -> str:
 
 _SCORECARD_ID = str(uuid.uuid4())
 _SESSION_ID = str(uuid.uuid4())
+_OWNER_USER_ID = str(uuid.uuid4())
+_COMPANY_ID = str(uuid.uuid4())
 
 _GOOD_ROW: dict[str, Any] = {
     "scorecard_id": _SCORECARD_ID,
@@ -75,6 +78,9 @@ _GOOD_ROW: dict[str, Any] = {
     ),
     "summary": "Solid candidate. Meets tier expectations.",
     "report_pdf_key": None,
+    # Fields added by the IDOR-fix JOIN on sessions + users
+    "session_owner_id": _OWNER_USER_ID,
+    "owner_company_id": _COMPANY_ID,
 }
 
 
@@ -280,3 +286,136 @@ def test_get_scorecard_pdf_url_null_when_no_key(client: TestClient) -> None:
 
     assert resp.status_code == 200
     assert resp.json()["report_pdf_url"] is None
+
+
+# ---------------------------------------------------------------------------
+# BC-1: IDOR tests — ownership enforcement
+# ---------------------------------------------------------------------------
+
+
+def test_get_scorecard_different_user_returns_404(client: TestClient) -> None:
+    """A different candidate (not the owner) sees 404 — existence is not leaked."""
+    # JWT sub is a random user — NOT the scorecard owner.
+    token = _make_jwt(sub=str(uuid.uuid4()), roles=["candidate"])
+    mock_db = _mock_db_row(_GOOD_ROW)
+
+    async def _override_db() -> AsyncSession:  # type: ignore[misc]
+        yield mock_db  # type: ignore[misc]
+
+    from app.database import get_db_session  # noqa: PLC0415
+
+    app.dependency_overrides[get_db_session] = _override_db
+
+    try:
+        resp = client.get(
+            f"/api/scorecards/{_SCORECARD_ID}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+
+    assert resp.status_code == 404
+
+
+def test_get_scorecard_hr_same_company_returns_200(client: TestClient) -> None:
+    """An HR manager in the same company as the candidate may read the scorecard."""
+    hr_user_id = str(uuid.uuid4())
+    token = _make_jwt(sub=hr_user_id, roles=["hr_manager"])
+
+    # DB: first execute returns the scorecard row; second scalar returns the
+    # HR's company_id (matching the candidate's company_id in _GOOD_ROW).
+    mock_db = AsyncMock()
+    mock_result = MagicMock()
+    mock_mappings = MagicMock()
+    mock_mappings.first.return_value = _GOOD_ROW
+    mock_result.mappings.return_value = mock_mappings
+    mock_db.execute = AsyncMock(return_value=mock_result)
+    # scalar is called to get the HR's company_id.
+    mock_db.scalar = AsyncMock(return_value=uuid.UUID(_COMPANY_ID))
+
+    from app.database import get_db_session  # noqa: PLC0415
+    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
+
+    async def _override_db() -> AsyncSession:  # type: ignore[misc]
+        yield mock_db  # type: ignore[misc]
+
+    app.dependency_overrides[get_db_session] = _override_db
+
+    try:
+        with patch(
+            "app.routers.scorecard._generate_presigned_url",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            resp = client.get(
+                f"/api/scorecards/{_SCORECARD_ID}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+
+    assert resp.status_code == 200, resp.text
+
+
+def test_get_scorecard_hr_different_company_returns_404(client: TestClient) -> None:
+    """An HR from a DIFFERENT company sees 404 — cross-tenant IDOR blocked."""
+    hr_user_id = str(uuid.uuid4())
+    different_company_id = uuid.UUID(str(uuid.uuid4()))  # guaranteed different
+    token = _make_jwt(sub=hr_user_id, roles=["hr_manager"])
+
+    mock_db = AsyncMock()
+    mock_result = MagicMock()
+    mock_mappings = MagicMock()
+    mock_mappings.first.return_value = _GOOD_ROW
+    mock_result.mappings.return_value = mock_mappings
+    mock_db.execute = AsyncMock(return_value=mock_result)
+    # The HR belongs to a DIFFERENT company.
+    mock_db.scalar = AsyncMock(return_value=different_company_id)
+
+    from app.database import get_db_session  # noqa: PLC0415
+    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
+
+    async def _override_db() -> AsyncSession:  # type: ignore[misc]
+        yield mock_db  # type: ignore[misc]
+
+    app.dependency_overrides[get_db_session] = _override_db
+
+    try:
+        resp = client.get(
+            f"/api/scorecards/{_SCORECARD_ID}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+
+    assert resp.status_code == 404
+
+
+def test_get_scorecard_platform_owner_can_read_any(client: TestClient) -> None:
+    """A platform_owner may read any scorecard regardless of company."""
+    token = _make_jwt(sub=str(uuid.uuid4()), roles=["platform_owner"])
+    # Row where owner_company_id is set (platform owner has no company_id — NULL).
+    row_with_company = {**_GOOD_ROW, "owner_company_id": uuid.UUID(_COMPANY_ID)}
+    mock_db = _mock_db_row(row_with_company)
+
+    from app.database import get_db_session  # noqa: PLC0415
+
+    async def _override_db() -> AsyncSession:  # type: ignore[misc]
+        yield mock_db  # type: ignore[misc]
+
+    app.dependency_overrides[get_db_session] = _override_db
+
+    try:
+        with patch(
+            "app.routers.scorecard._generate_presigned_url",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            resp = client.get(
+                f"/api/scorecards/{_SCORECARD_ID}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+
+    assert resp.status_code == 200, resp.text

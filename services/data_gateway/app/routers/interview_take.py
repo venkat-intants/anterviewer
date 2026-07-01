@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.interview_link import hash_interview_token
 from app.models import Applicant, InterviewInvite, Job
+from app.rate_limit import rate_limit
 from app.routers.hr_applicants import DbSessionDep
 
 log = structlog.get_logger(__name__)
@@ -160,7 +161,7 @@ def _issue_guest_token(
     )
 
 
-@router.get("", response_model=InviteInfoOut)
+@router.get("", response_model=InviteInfoOut, dependencies=[rate_limit("interview_preview", 30)])
 async def preview_invite(
     db: DbSessionDep,
     x_interview_token: Annotated[str | None, Header(alias="X-Interview-Token")] = None,
@@ -196,7 +197,11 @@ async def preview_invite(
     )
 
 
-@router.post("/redeem", response_model=RedeemOut)
+@router.post(
+    "/redeem",
+    response_model=RedeemOut,
+    dependencies=[rate_limit("interview_redeem", settings.rate_limit_login_per_minute)],
+)
 async def redeem_invite(
     body: RedeemIn,
     db: DbSessionDep,
@@ -403,7 +408,11 @@ async def redeem_invite(
     return result
 
 
-@router.post("/resume", response_model=RedeemOut)
+@router.post(
+    "/resume",
+    response_model=RedeemOut,
+    dependencies=[rate_limit("interview_resume", 30)],
+)
 async def resume_invite(
     db: DbSessionDep,
     response: Response,

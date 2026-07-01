@@ -23,7 +23,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.config import settings as _app_settings
 from app.database import get_db_session
+from app.redis_client import get_redis
 from app.scorer import ScoringError, score_session
+
+# Redis key prefix for per-user token revocation epochs.
+# Kept in sync with shared.auth.local.USER_TOKEN_EPOCH_PREFIX — do not change.
+_TOKEN_EPOCH_PREFIX = "auth_epoch:"
 
 
 def _get_settings() -> Settings:
@@ -94,18 +99,48 @@ _UNAUTHORIZED = HTTPException(
     headers={"WWW-Authenticate": "Bearer"},
 )
 
+_FORBIDDEN = HTTPException(
+    status_code=status.HTTP_403_FORBIDDEN,
+    detail="Service role required for internal endpoints.",
+)
 
-async def _require_jwt(
+# The set of sub claims that are permitted to call /internal/* endpoints.
+# Extend this tuple if a second internal service needs to call scoring.
+_ALLOWED_SERVICE_SUBS = frozenset({"interview_core"})
+
+
+async def _token_epoch_check(user_id: str, iat: Any) -> None:
+    """Raise HTTP 401 if the token's iat predates the user's revocation epoch.
+
+    Fails OPEN: any Redis error is logged and silently ignored so a cache
+    hiccup never blocks legitimate internal service calls.
+    """
+    try:
+        raw = await get_redis().get(_TOKEN_EPOCH_PREFIX + user_id)
+        if raw is not None and iat is not None and int(iat) < int(raw):
+            log.info("score.auth.token_revoked", user_id=user_id)
+            raise _UNAUTHORIZED
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — fail open on Redis/parse errors
+        log.warning("score.auth.epoch_check_skipped", error_type=type(exc).__name__)
+
+
+async def _require_service_jwt(
     credentials: Annotated[
         HTTPAuthorizationCredentials | None,
         Depends(_bearer_scheme),
     ],
 ) -> dict[str, Any]:
-    """Verify Bearer JWT; return decoded payload.
+    """Verify Bearer JWT and enforce the ``service`` role for /internal/* endpoints.
 
-    Raises HTTP 401 on any auth failure. No role restriction — this is an
-    internal endpoint; the JWT itself (signed by jwt_secret) proves the caller
-    is a trusted internal service.
+    Legitimate caller: the interview worker, which mints a JWT with
+    ``roles=["service"]`` and ``sub="interview_core"``.
+
+    Raises:
+        HTTP 401 — token absent, malformed, expired, or revoked.
+        HTTP 403 — token is valid but the caller is not a service account
+                   (prevents normal user / guest tokens from reaching Gemini).
     """
     if credentials is None:
         raise _UNAUTHORIZED
@@ -122,7 +157,32 @@ async def _require_jwt(
         log.warning("score.auth.jwt_failed", error_type=type(exc).__name__)
         raise _UNAUTHORIZED from exc
 
+    user_id: str | None = payload.get("sub")
+    if not user_id:
+        raise _UNAUTHORIZED
+
+    roles: list[str] = payload.get("roles") or []
+    if "service" not in roles:
+        log.warning(
+            "score.auth.non_service_rejected",
+            sub=user_id,
+            roles=roles,
+        )
+        raise _FORBIDDEN
+
+    # Token-epoch check: reject service tokens that predate a logout_all
+    # (e.g. after a compromised service credential is rotated).
+    await _token_epoch_check(user_id, payload.get("iat"))
+
     return payload
+
+
+# ---------------------------------------------------------------------------
+# Keep the old name as an alias so existing callers outside this module
+# (e.g. tests that patch "app.routers.score._require_jwt") still work.
+# New code should use _require_service_jwt directly.
+# ---------------------------------------------------------------------------
+_require_jwt = _require_service_jwt
 
 
 # ---------------------------------------------------------------------------

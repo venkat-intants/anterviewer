@@ -12,8 +12,13 @@ Introduces the platform-owner tier above the (now company-scoped) super-admin:
 
 Changes:
   - Seed role 'platform_owner'.
-  - Create/ensure support@intants.com as a platform_owner (default pw 12345678,
-    NOT forced to change — it is the bootstrap owner credential).
+  - Create/ensure support@intants.com as a platform_owner.  The bootstrap
+    password is read from env PLATFORM_OWNER_PASSWORD; if unset a strong random
+    credential is generated and printed once to stdout.  must_change_password is
+    set TRUE on first seed so the owner is forced to rotate it at first login.
+  - On re-run (ON CONFLICT) the existing owner's password_hash and
+    must_change_password are NEVER overwritten — only is_active and role
+    membership are ensured, preventing an accidental credential reset.
   - Migrate every EXISTING platform-level super_admin (company_id IS NULL) to
     'platform_owner' and strip their now-misscoped 'super_admin' role. This
     covers admin@intants.com and any seeded platform super-admin.
@@ -24,6 +29,8 @@ Revises:     b2d4f6a8c0e2
 Create Date: 2026-06-25 00:02:00.000000
 """
 
+import os
+import secrets
 from collections.abc import Sequence
 
 import bcrypt
@@ -37,9 +44,44 @@ down_revision: str | None = "b2d4f6a8c0e2"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-# Bootstrap platform-owner credential (see CLAUDE.md product spec).
+# Bootstrap platform-owner e-mail (never changes).
 _PLATFORM_OWNER_EMAIL = "support@intants.com"
-_PLATFORM_OWNER_PASSWORD = "12345678"  # noqa: S105 — bootstrap default, owner-chosen
+
+
+def _bootstrap_password() -> tuple[str, str]:
+    """Return (plaintext_password, bcrypt_hash).
+
+    Priority:
+      1. PLATFORM_OWNER_PASSWORD env var (set by the operator).
+      2. Randomly generated secrets.token_urlsafe(24) — printed once to stdout.
+
+    The plaintext is used only here for hashing; it is never stored.
+    """
+    env_pw = os.environ.get("PLATFORM_OWNER_PASSWORD", "").strip()
+    if env_pw:
+        plaintext = env_pw
+        generated = False
+    else:
+        plaintext = secrets.token_urlsafe(24)
+        generated = True
+
+    pw_hash = bcrypt.hashpw(plaintext.encode(), bcrypt.gensalt(rounds=12)).decode()
+
+    if generated:
+        # Print directly to stdout — intentionally NOT via structlog so operators
+        # see it even when JSON logging is active, and so it is never captured in
+        # structured log sinks that might ship to external collectors.
+        print(  # noqa: T201
+            "\n"
+            "================================================================\n"
+            "  PLATFORM OWNER BOOTSTRAP PASSWORD (one-time, rotate immediately)\n"
+            f"  Email   : {_PLATFORM_OWNER_EMAIL}\n"
+            f"  Password: {plaintext}\n"
+            "  Set PLATFORM_OWNER_PASSWORD in your .env to supply your own.\n"
+            "================================================================\n"
+        )
+
+    return plaintext, pw_hash
 
 
 def upgrade() -> None:
@@ -60,21 +102,26 @@ def upgrade() -> None:
     )
 
     # --- 2. create/ensure the platform owner (support@intants.com) ---
-    pw_hash = bcrypt.hashpw(
-        _PLATFORM_OWNER_PASSWORD.encode(), bcrypt.gensalt(rounds=12)
-    ).decode()
+    # The password hash is only used in the INSERT path (new account).
+    # ON CONFLICT we deliberately do NOT touch password_hash or
+    # must_change_password so re-running the migration never resets credentials.
+    _plaintext, pw_hash = _bootstrap_password()
     op.execute(
         sa.text(
             "INSERT INTO users "
             "(id, email, password_hash, full_name, preferred_language, is_active, "
             " must_change_password, company_id, created_at, updated_at) "
             "VALUES (gen_random_uuid(), :email, :pw, 'Intants Platform Owner', 'en', "
-            " true, false, NULL, now(), now()) "
+            " true, true, NULL, now(), now()) "
             "ON CONFLICT (email) DO UPDATE SET "
-            " password_hash = EXCLUDED.password_hash, "
-            " full_name = EXCLUDED.full_name, "
-            " is_active = true, must_change_password = false, company_id = NULL, "
-            " deleted_at = NULL, updated_at = now()"
+            " full_name = COALESCE(users.full_name, EXCLUDED.full_name), "
+            " is_active = true, "
+            " company_id = NULL, "
+            " deleted_at = NULL, "
+            " updated_at = now()"
+            # NOTE: password_hash and must_change_password are intentionally
+            # excluded from the UPDATE clause — existing credentials must never
+            # be clobbered by a migration re-run.
         ).bindparams(email=_PLATFORM_OWNER_EMAIL, pw=pw_hash)
     )
     # Grant platform_owner AND the existing 'admin' analytics role, so the core

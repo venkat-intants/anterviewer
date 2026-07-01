@@ -23,6 +23,7 @@ HARD SECURITY GUARANTEES (unchanged):
 
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -51,6 +52,8 @@ from app.models import (
     ExamSection,
 )
 from app.execution import run_code
+from app.rate_limit import rate_limit
+from app.redis_client import get_redis
 from app.routers.hr_applicants import DbSessionDep
 from app.routers.hr_interviews import advance_applicant_to_interview
 
@@ -607,9 +610,9 @@ async def start_attempt(ctx: ExamTakeCtxDep, db: DbSessionDep) -> AttemptStartOu
 async def _load_attempt(
     db: AsyncSession, ctx: ExamTakeCtx, attempt_id: uuid.UUID
 ) -> ExamAttempt:
-    # FOR UPDATE: serialize concurrent submits of the SAME attempt (a network
-    # retry) so the idempotency check can't be raced into two expensive Piston
-    # grading passes. Single-row PK-scoped lock — no hot-spot.
+    # No FOR UPDATE here: concurrent submit serialization is now handled by a
+    # short-lived Redis SET NX EX claim in _grade_and_finalize, which avoids
+    # holding a DB connection + row lock for the entire JDoodle round-trip.
     attempt: ExamAttempt | None = await db.scalar(
         select(ExamAttempt)
         .where(
@@ -619,7 +622,6 @@ async def _load_attempt(
             ExamAttempt.company_id == ctx.company_id,
             ExamAttempt.deleted_at.is_(None),
         )
-        .with_for_update()
     )
     if attempt is None:
         raise _NOT_AVAILABLE
@@ -646,112 +648,256 @@ async def _grade_and_finalize(
     submissions: dict[str, CodingAnswer],
 ) -> ExamResultOut:
     """Grade the whole round (all sections), store the result, close the link, and
-    auto-advance to interview when the terminal round is passed. Idempotent: a
-    finished attempt returns its stored result without re-grading (coding execution
-    is expensive — a re-submit must never trigger a second Piston run)."""
+    auto-advance to interview when the terminal round is passed.
+
+    Idempotency + pool safety:
+    - A Redis SET NX EX claim (keyed by attempt_id) serializes concurrent submits of
+      the SAME attempt so the slow JDoodle/Piston round-trip is never duplicated.
+    - The DB connection is released (via an early commit) BEFORE the outbound grading
+      calls, so a 5-30 s JDoodle round-trip no longer exhausts the connection pool.
+    - A re-submit of an already-finished attempt returns the stored result instantly
+      (no re-grade, no Redis claim needed).
+    """
+    # Fast path: already done — return stored without claiming Redis or re-grading.
     if attempt.status in ("submitted", "expired"):
         return _stored_result(attempt)
 
-    now = datetime.now(tz=UTC)
-    deadline = _deadline(ctx.exam_round, attempt.started_at)
-    expired = bool(
-        deadline and now > deadline + timedelta(seconds=settings.exam_submit_grace_seconds)
-    )
-
-    sections = await _round_sections(db, ctx)
-    mcq_section_ids = [s.id for s in sections if s.kind == "mcq"]
-    coding_section_ids = [s.id for s in sections if s.kind == "coding"]
-    mcq_questions = await _mcq_for_sections(db, ctx, mcq_section_ids)
-    coding_questions = await _coding_for_sections(db, ctx, coding_section_ids)
-
-    # --- MCQ portion (instant, server-side) ---
-    mcq_answers = {k: int(v) for k, v in answers.items()}
-    mcq_result = grade_exam(
-        GradeInput(
-            questions=[
-                GradeQuestion(question_id=str(q.id), correct_index=q.correct_index, points=q.points)
-                for q in mcq_questions
-            ],
-            answers=mcq_answers,
-        ),
-        ctx.exam_round.pass_threshold,
-    )
-    total_raw = mcq_result.score_raw
-    total_max = mcq_result.score_max
-    mcq_snapshot = {
-        str(q.id): {"correct_index": q.correct_index, "points": q.points}
-        for q in mcq_questions
-    }
-
-    # --- Coding portion (Piston, all test cases incl. hidden) ---
-    coding_snapshot: dict[str, object] = {}
-    coding_sanitized: dict[str, object] = {}
-    for q in coding_questions:
-        total_max += q.points
-        qid = str(q.id)
-        sub = submissions.get(qid)
-        if sub is None:
-            coding_snapshot[qid] = {"points": q.points, "submitted": False, "raw": 0, "tests": []}
-            continue
-        coding_sanitized[qid] = {"language": sub.language, "source": sub.source}
-        if sub.language not in (q.allowed_languages or []):
-            coding_snapshot[qid] = {
-                "points": q.points, "language": sub.language,
-                "error": "language not allowed", "raw": 0, "tests": [],
-            }
-            continue
-        results = await run_tests(
-            language=sub.language, source=sub.source,
-            test_cases=list(q.test_cases or []),
-            time_limit_ms=q.time_limit_ms, include_hidden=True,
+    # ---------------------------------------------------------------------------
+    # Serialize concurrent submits of the SAME attempt via a short-lived Redis
+    # claim. SET NX EX 180 — 3-minute window (well beyond any grading round-trip).
+    # A second concurrent submit sees NX fail and either returns the stored result
+    # (if grading finished) or a 409 (still in flight). Fails OPEN on Redis error
+    # (same posture as rate_limit) so a cache hiccup never blocks a submit.
+    # ---------------------------------------------------------------------------
+    claim_key = f"exam:grading:{attempt.id}"
+    # Resolve the client outside the try so the finally block can always DEL.
+    try:
+        redis = get_redis()
+    except Exception as redis_init_exc:  # noqa: BLE001
+        log.warning(
+            "exam.grading_claim.redis_unavailable",
+            attempt_id=str(attempt.id), error=str(redis_init_exc),
         )
-        raw = weighted_raw(results, q.points)
-        total_raw += raw
-        coding_snapshot[qid] = {
-            "points": q.points, "language": sub.language, "raw": raw,
-            "tests": [
-                {
-                    "index": r.index, "is_sample": r.is_sample, "weight": r.weight,
-                    "passed": r.passed, "timed_out": r.timed_out, "error": r.error,
-                    "actual_output": r.actual_output, "stderr": r.stderr,
-                }
-                for r in results
-            ],
+        redis = None  # type: ignore[assignment]
+
+    claimed = False
+    if redis is not None:
+        try:
+            claimed = bool(await redis.set(claim_key, "1", nx=True, ex=180))
+        except Exception as redis_exc:  # noqa: BLE001
+            log.warning(
+                "exam.grading_claim.skipped", attempt_id=str(attempt.id), error=str(redis_exc),
+            )
+            claimed = True  # fail open — let this request grade
+    else:
+        claimed = True  # Redis not available → fail open
+
+    if not claimed:
+        # Another submit is in flight (or just finished). Re-fetch from DB to check.
+        refreshed: ExamAttempt | None = await db.scalar(
+            select(ExamAttempt).where(ExamAttempt.id == attempt.id)
+        )
+        if refreshed is not None and refreshed.status in ("submitted", "expired"):
+            return _stored_result(refreshed)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Grading is already in progress for this attempt. Please retry shortly.",
+        )
+
+    # Initialise result variables before the try block so the finally can always log.
+    now = datetime.now(tz=UTC)
+    expired = False
+    total_raw = 0
+    total_max = 0
+    percent = 0
+    passed = False
+    fresh_attempt: ExamAttempt | None = None
+
+    try:
+        deadline = _deadline(ctx.exam_round, attempt.started_at)
+        expired = bool(
+            deadline and now > deadline + timedelta(seconds=settings.exam_submit_grace_seconds)
+        )
+
+        # --- Load question data while still in the same session (fast DB reads). ---
+        sections = await _round_sections(db, ctx)
+        mcq_section_ids = [s.id for s in sections if s.kind == "mcq"]
+        coding_section_ids = [s.id for s in sections if s.kind == "coding"]
+        mcq_questions = await _mcq_for_sections(db, ctx, mcq_section_ids)
+        coding_questions = await _coding_for_sections(db, ctx, coding_section_ids)
+
+        # --- MCQ portion (instant, server-side) ---
+        mcq_answers = {k: int(v) for k, v in answers.items()}
+        mcq_result = grade_exam(
+            GradeInput(
+                questions=[
+                    GradeQuestion(
+                        question_id=str(q.id), correct_index=q.correct_index, points=q.points
+                    )
+                    for q in mcq_questions
+                ],
+                answers=mcq_answers,
+            ),
+            ctx.exam_round.pass_threshold,
+        )
+        total_raw = mcq_result.score_raw
+        total_max = mcq_result.score_max
+        mcq_snapshot = {
+            str(q.id): {"correct_index": q.correct_index, "points": q.points}
+            for q in mcq_questions
         }
 
-    percent = round(100 * total_raw / total_max) if total_max > 0 else 0
-    passed = percent >= ctx.exam_round.pass_threshold
+        # Snapshot the coding question metadata before releasing the DB connection.
+        coding_meta = [
+            {
+                "id": str(q.id),
+                "points": q.points,
+                "allowed_languages": list(q.allowed_languages or []),
+                "test_cases": list(q.test_cases or []),
+                "time_limit_ms": q.time_limit_ms,
+            }
+            for q in coding_questions
+        ]
 
-    attempt.answers = {"mcq": mcq_answers, "coding": coding_sanitized}
-    attempt.graded_snapshot = {"mcq": mcq_snapshot, "coding": coding_snapshot}
-    attempt.score_raw = total_raw
-    attempt.score_max = total_max
-    attempt.score_percent = percent
-    attempt.passed = passed
-    attempt.status = "expired" if expired else "submitted"
-    attempt.submitted_at = now
-    attempt.updated_at = now
+        # ---------------------------------------------------------------------------
+        # EARLY COMMIT — release the DB connection BEFORE the slow outbound calls.
+        # The Redis claim above serializes concurrent submits so no second request
+        # can race past this point to double-grade.
+        # ---------------------------------------------------------------------------
+        await db.commit()
 
-    # Close the assignment (single-use): the link is consumed.
-    ctx.assignment.status = "completed"
-    ctx.assignment.consumed_at = now
-    ctx.assignment.updated_at = now
-
-    # Auto-advance: passing the terminal round can create a scheduled interview
-    # invite + email the candidate (per-exam opt-in). Best-effort + idempotent.
-    if passed and ctx.exam_round.advances_to_interview and ctx.exam.auto_advance_on_pass:
-        try:
-            await advance_applicant_to_interview(
-                db,
-                company_id=ctx.company_id,
-                applicant=ctx.applicant,
-                created_by_user_id=ctx.exam.created_by_user_id,
-                notify_user_id=ctx.exam.created_by_user_id,
+        # --- Coding portion (JDoodle/Piston) — runs WITHOUT a DB connection held. ---
+        coding_snapshot: dict[str, object] = {}
+        coding_sanitized: dict[str, object] = {}
+        coding_total_raw = 0
+        for qmeta in coding_meta:
+            qid = str(qmeta["id"])
+            total_max += int(qmeta["points"])
+            sub = submissions.get(qid)
+            if sub is None:
+                coding_snapshot[qid] = {
+                    "points": qmeta["points"], "submitted": False, "raw": 0, "tests": [],
+                }
+                continue
+            coding_sanitized[qid] = {"language": sub.language, "source": sub.source}
+            if sub.language not in qmeta["allowed_languages"]:
+                coding_snapshot[qid] = {
+                    "points": qmeta["points"], "language": sub.language,
+                    "error": "language not allowed", "raw": 0, "tests": [],
+                }
+                continue
+            results = await run_tests(
+                language=sub.language, source=sub.source,
+                test_cases=list(qmeta["test_cases"]),
+                time_limit_ms=int(qmeta["time_limit_ms"]), include_hidden=True,
             )
-        except Exception as exc:  # noqa: BLE001 - never fail a submit on advance error
-            log.warning("exam.auto_advance_failed", exam_id=str(ctx.exam.id), error=str(exc))
+            raw = weighted_raw(results, int(qmeta["points"]))
+            coding_total_raw += raw
+            coding_snapshot[qid] = {
+                "points": qmeta["points"], "language": sub.language, "raw": raw,
+                "tests": [
+                    {
+                        "index": r.index, "is_sample": r.is_sample, "weight": r.weight,
+                        "passed": r.passed, "timed_out": r.timed_out, "error": r.error,
+                        "actual_output": r.actual_output, "stderr": r.stderr,
+                    }
+                    for r in results
+                ],
+            }
+        total_raw += coding_total_raw
 
-    await db.commit()
+        # FIX: use math.floor (same as grade_exam/MCQ path) so a boundary candidate
+        # is never rounded up across the pass_threshold.
+        percent = math.floor(100 * total_raw / total_max) if total_max > 0 else 0
+        passed = percent >= ctx.exam_round.pass_threshold
+
+        # ---------------------------------------------------------------------------
+        # Persist results in a NEW transaction on the same session object. Re-fetch
+        # the attempt and assignment by PK so SQLAlchemy tracks them in this new
+        # transaction (the old ORM objects were detached when we committed above).
+        # ---------------------------------------------------------------------------
+        fresh_attempt = await db.scalar(
+            select(ExamAttempt).where(ExamAttempt.id == attempt.id)
+        )
+        fresh_assignment: ExamAssignment | None = await db.scalar(
+            select(ExamAssignment).where(ExamAssignment.id == ctx.assignment.id)
+        )
+        # Guard against a race where a concurrent submit finished first while we were
+        # grading (e.g. Redis failed open for both). Return stored result without
+        # overwriting it.
+        if fresh_attempt is not None and fresh_attempt.status in ("submitted", "expired"):
+            return _stored_result(fresh_attempt)
+
+        # The attempt row must still exist here. If it vanished between the early
+        # commit and this persist (concurrent delete / DB fault), grading RAN but
+        # cannot be saved — fail LOUDLY instead of returning a "success" the DB
+        # never recorded (which would show the candidate a pass with no scorecard).
+        # The Redis claim is released in `finally`, so a retry can re-grade.
+        if fresh_attempt is None:
+            log.error(
+                "exam.grade.attempt_missing_on_persist",
+                attempt_id=str(attempt.id),
+                round_id=str(ctx.exam_round.id),
+                company_id=str(ctx.company_id),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Your answers were graded but could not be saved. Please submit again.",
+            )
+
+        if fresh_attempt is not None:
+            fresh_attempt.answers = {"mcq": mcq_answers, "coding": coding_sanitized}
+            fresh_attempt.graded_snapshot = {"mcq": mcq_snapshot, "coding": coding_snapshot}
+            fresh_attempt.score_raw = total_raw
+            fresh_attempt.score_max = total_max
+            fresh_attempt.score_percent = percent
+            fresh_attempt.passed = passed
+            fresh_attempt.status = "expired" if expired else "submitted"
+            fresh_attempt.submitted_at = now
+            fresh_attempt.updated_at = now
+
+        # Close the assignment (single-use): the link is consumed.
+        if fresh_assignment is not None:
+            fresh_assignment.status = "completed"
+            fresh_assignment.consumed_at = now
+            fresh_assignment.updated_at = now
+
+        # Auto-advance: best-effort + idempotent (advance_applicant_to_interview
+        # guards duplicate invites). Staged on the SAME transaction so the invite
+        # row is only written iff the attempt commit also succeeds — atomic.
+        if passed and ctx.exam_round.advances_to_interview and ctx.exam.auto_advance_on_pass:
+            try:
+                await advance_applicant_to_interview(
+                    db,
+                    company_id=ctx.company_id,
+                    applicant=ctx.applicant,
+                    created_by_user_id=ctx.exam.created_by_user_id,
+                    notify_user_id=ctx.exam.created_by_user_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - never fail a submit on advance error
+                log.warning(
+                    "exam.auto_advance_failed", exam_id=str(ctx.exam.id), error=str(exc)
+                )
+
+        # Single commit — attempt + assignment + optional invite in one transaction.
+        await db.commit()
+
+    finally:
+        # Always release the Redis claim so a retry after an unexpected error
+        # can re-enter grading rather than waiting for the 180-second TTL.
+        if redis is not None and claimed:
+            try:
+                await redis.delete(claim_key)
+            except Exception as del_exc:  # noqa: BLE001
+                log.warning(
+                    "exam.grading_claim.delete_failed",
+                    attempt_id=str(attempt.id), error=str(del_exc),
+                )
+
+    status_val = (
+        fresh_attempt.status if fresh_attempt is not None
+        else ("expired" if expired else "submitted")
+    )
     log.info(
         "exam.round.submitted",
         exam_id=str(ctx.exam.id), round_id=str(ctx.exam_round.id),
@@ -759,26 +905,38 @@ async def _grade_and_finalize(
     )
     return ExamResultOut(
         attempt_id=str(attempt.id), score_raw=total_raw, score_max=total_max,
-        score_percent=percent, passed=passed, status=attempt.status,
+        score_percent=percent, passed=passed, status=status_val,
         submitted_at=now.isoformat(),
     )
 
 
-@router.post("/submit", response_model=ExamResultOut)
+@router.post(
+    "/submit",
+    response_model=ExamResultOut,
+    dependencies=[rate_limit("exam_submit", settings.rate_limit_api_per_minute)],
+)
 async def submit_attempt(body: SubmitIn, ctx: ExamTakeCtxDep, db: DbSessionDep) -> ExamResultOut:
     """Submit a round (MCQ answers + optional coding submissions)."""
     attempt = await _load_attempt(db, ctx, body.attempt_id)
     return await _grade_and_finalize(db, ctx, attempt, body.answers, body.submissions)
 
 
-@router.post("/submit-round", response_model=ExamResultOut)
+@router.post(
+    "/submit-round",
+    response_model=ExamResultOut,
+    dependencies=[rate_limit("exam_submit", settings.rate_limit_api_per_minute)],
+)
 async def submit_round(body: SubmitIn, ctx: ExamTakeCtxDep, db: DbSessionDep) -> ExamResultOut:
     """Explicit round submit (alias of /submit) — the round-aware UI's primary path."""
     attempt = await _load_attempt(db, ctx, body.attempt_id)
     return await _grade_and_finalize(db, ctx, attempt, body.answers, body.submissions)
 
 
-@router.post("/submit-coding", response_model=ExamResultOut)
+@router.post(
+    "/submit-coding",
+    response_model=ExamResultOut,
+    dependencies=[rate_limit("exam_submit", settings.rate_limit_api_per_minute)],
+)
 async def submit_coding(
     body: CodingSubmitIn, ctx: ExamTakeCtxDep, db: DbSessionDep
 ) -> ExamResultOut:
@@ -809,7 +967,11 @@ async def _round_coding_question(
     return q
 
 
-@router.post("/run-code", response_model=RunCodeOut)
+@router.post(
+    "/run-code",
+    response_model=RunCodeOut,
+    dependencies=[rate_limit("exam_run_code", 20)],
+)
 async def run_code_samples(body: RunCodeIn, ctx: ExamTakeCtxDep, db: DbSessionDep) -> RunCodeOut:
     """Candidate 'Run' — execute against the SAMPLE tests only. No score, no save."""
     # Require an open attempt — no anonymous Piston runs before /start (DoS guard).
@@ -837,7 +999,11 @@ async def run_code_samples(body: RunCodeIn, ctx: ExamTakeCtxDep, db: DbSessionDe
     )
 
 
-@router.post("/run-code-custom", response_model=RunCodeCustomOut)
+@router.post(
+    "/run-code-custom",
+    response_model=RunCodeCustomOut,
+    dependencies=[rate_limit("exam_run_code_custom", 20)],
+)
 async def run_code_custom(
     body: RunCodeCustomIn, ctx: ExamTakeCtxDep, db: DbSessionDep
 ) -> RunCodeCustomOut:

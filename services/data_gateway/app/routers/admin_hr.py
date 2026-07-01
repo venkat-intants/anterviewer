@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
@@ -32,7 +33,7 @@ import bcrypt
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, EmailStr, Field
-from shared.auth.base import User
+from shared.auth.base import AuthProvider, User
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,7 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth_tokens import hash_token, mint_token, ttl_hours_for
 from app.config import settings
 from app.database import get_db_session
-from app.dependencies import require_role
+from app.dependencies import get_auth_provider_dep, require_role
 from app.mailer import enqueue_email
 
 log = structlog.get_logger(__name__)
@@ -49,6 +50,7 @@ router = APIRouter(prefix="/admin", tags=["admin-hr"])
 
 PlatformOwnerDep = Annotated[User, Depends(require_role("platform_owner"))]
 DbSessionDep = Annotated[AsyncSession, Depends(get_db_session)]
+AuthProviderDep = Annotated[AuthProvider, Depends(get_auth_provider_dep)]
 
 
 # ---------------------------------------------------------------------------
@@ -114,8 +116,15 @@ class CreateUserBody(BaseModel):
 
     email: EmailStr
     full_name: str = Field(min_length=1, max_length=200)
-    # Default per product spec; the user is forced to change it on first login.
-    password: str = Field(default="12345678", min_length=8, max_length=128)
+    # A RANDOM bootstrap password is generated per account when none is supplied.
+    # The user never uses it — a "set your password" link is emailed and they
+    # choose their own (see _send_credentials_email). It only exists so the row
+    # has a hash before that link is consumed. NEVER default to a known/published
+    # value: with must_change_password=true an attacker who logs in first with a
+    # known default (during the pre-reset window) takes over the account.
+    password: str = Field(
+        default_factory=lambda: secrets.token_urlsafe(16), min_length=8, max_length=128
+    )
 
 
 class CompanyAdminResponse(BaseModel):
@@ -400,7 +409,10 @@ async def list_companies(
 
 @router.delete("/companies/{company_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_company(
-    company_id: uuid.UUID, current_user: PlatformOwnerDep, db: DbSessionDep
+    company_id: uuid.UUID,
+    current_user: PlatformOwnerDep,
+    db: DbSessionDep,
+    auth: AuthProviderDep,
 ) -> Response:
     """Soft-delete a company and ALL its member users — its super admin and HR
     managers (platform_owner only).
@@ -408,6 +420,10 @@ async def delete_company(
     The company's applicants / exams / interview records are retained in the DB
     but become inaccessible (the company and every login into it are gone).
     Member emails are released so they can be re-used for new accounts.
+
+    All active sessions for every deleted member are immediately revoked via
+    ``auth.logout_all`` so their tokens stop working within the access-token
+    window rather than expiring naturally (up to 15 minutes later).
     """
     locked = await db.scalar(
         text("SELECT 1 FROM companies WHERE id = :cid AND deleted_at IS NULL FOR UPDATE"),
@@ -418,6 +434,17 @@ async def delete_company(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Company {company_id} not found.",
         )
+    # Collect all active member user IDs before the soft-delete so we can
+    # revoke their sessions after the DB commit (revocation is best-effort and
+    # must not roll back the company deletion if it fails).
+    member_rows = (
+        await db.execute(
+            text("SELECT id FROM users WHERE company_id = :cid AND deleted_at IS NULL"),
+            {"cid": company_id},
+        )
+    ).fetchall()
+    member_ids = [str(r[0]) for r in member_rows]
+
     # Soft-delete + tombstone every member user (super admin + HR managers).
     await db.execute(
         text(
@@ -439,7 +466,24 @@ async def delete_company(
         resource_type="company", resource_id=company_id,
     )
     await db.commit()
-    log.info("admin_hr.company_deleted", company_id=str(company_id))
+
+    # Revoke sessions for all former members (best-effort — individual failures
+    # are logged but must not prevent the 204 response).
+    for uid in member_ids:
+        try:
+            await auth.logout_all(uid)
+        except Exception as exc:  # noqa: BLE001 — best-effort revocation
+            log.warning(
+                "admin_hr.company_deleted.session_revoke_failed",
+                user_id=uid,
+                error_type=type(exc).__name__,
+            )
+
+    log.info(
+        "admin_hr.company_deleted",
+        company_id=str(company_id),
+        members_revoked=len(member_ids),
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -505,8 +549,9 @@ async def create_company_admin(
     """Create the company super admin (platform_owner only).
 
     A company has at most ONE super admin — a second attempt returns 409. The
-    account is created with the given (default '12345678') password and
-    must_change_password=true, forcing a reset on first login.
+    account is created with a random bootstrap password (or a supplied one) and
+    must_change_password=true; a "set your password" link is emailed, so the
+    bootstrap value is never used or disclosed.
 
     Concurrency: the company row is locked FOR UPDATE before the existence
     check, so two simultaneous requests for the same company serialize — the
@@ -581,12 +626,17 @@ async def get_company_admin(
     "/companies/{company_id}/admin", status_code=status.HTTP_204_NO_CONTENT
 )
 async def delete_company_admin(
-    company_id: uuid.UUID, current_user: PlatformOwnerDep, db: DbSessionDep
+    company_id: uuid.UUID,
+    current_user: PlatformOwnerDep,
+    db: DbSessionDep,
+    auth: AuthProviderDep,
 ) -> Response:
     """Remove a company's super admin (platform_owner only).
 
     Afterwards the company has no super admin and a fresh one can be created
     (this is also how you 'replace' a company's super admin). 404 if none.
+
+    All active sessions for the removed admin are immediately revoked.
     """
     await _company_or_404(db, company_id)
     uid = await db.scalar(
@@ -610,6 +660,17 @@ async def delete_company_admin(
         resource_type="user", resource_id=uid,
     )
     await db.commit()
+
+    # Revoke all sessions for the removed admin immediately (best-effort).
+    try:
+        await auth.logout_all(str(uid))
+    except Exception as exc:  # noqa: BLE001 — best-effort revocation
+        log.warning(
+            "admin_hr.company_admin_deleted.session_revoke_failed",
+            user_id=str(uid),
+            error_type=type(exc).__name__,
+        )
+
     log.info("admin_hr.company_admin_deleted", user_id=str(uid), company_id=str(company_id))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -673,8 +734,9 @@ async def create_my_hr_manager(
 ) -> HrManagerResponse:
     """Create an HR manager in the caller's own company (super_admin only).
 
-    The HR is created with the given (default '12345678') password and
-    must_change_password=true, forcing a reset on first login.
+    The HR is created with a random bootstrap password (or a supplied one) and
+    must_change_password=true; a "set your password" link is emailed, so the
+    bootstrap value is never used or disclosed.
     """
     _, company_id = ctx
     user_id, now = await _create_company_user(
@@ -689,13 +751,19 @@ async def create_my_hr_manager(
 
 @router.delete("/hr-managers/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_my_hr_manager(
-    user_id: uuid.UUID, ctx: CompanyAdminCtxDep, db: DbSessionDep
+    user_id: uuid.UUID,
+    ctx: CompanyAdminCtxDep,
+    db: DbSessionDep,
+    auth: AuthProviderDep,
 ) -> Response:
     """Soft-delete an HR manager in the caller's OWN company (super_admin only).
 
     Tenant-scoped: the target must be an hr_manager belonging to the caller's
     company, else 404 — a super admin can never remove another company's HR.
     The HR's email is released so it can be re-used for a new account.
+
+    All active sessions for the removed HR are immediately revoked so their
+    tokens stop working without waiting for the natural 15-minute expiry.
     """
     caller_uid, company_id = ctx
     target = await db.scalar(
@@ -718,6 +786,17 @@ async def delete_my_hr_manager(
         resource_type="user", resource_id=user_id,
     )
     await db.commit()
+
+    # Revoke all sessions for the removed HR immediately (best-effort).
+    try:
+        await auth.logout_all(str(user_id))
+    except Exception as exc:  # noqa: BLE001 — best-effort revocation
+        log.warning(
+            "admin_hr.hr_deleted.session_revoke_failed",
+            user_id=str(user_id),
+            error_type=type(exc).__name__,
+        )
+
     log.info("admin_hr.hr_deleted", user_id=str(user_id), company_id=str(company_id))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

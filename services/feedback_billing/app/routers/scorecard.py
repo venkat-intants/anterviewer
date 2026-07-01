@@ -2,6 +2,12 @@
 
 Auth: JWT required (same _require_jwt pattern as score.py).
 Returns scorecard data including a 30-day pre-signed S3 URL for the PDF.
+
+Access control (IDOR fix):
+  - The scorecard's owner (sessions.user_id == caller sub) may always read it.
+  - An hr_manager / super_admin / platform_owner whose company_id matches the
+    candidate's company_id may also read it.
+  - Any other caller receives 404 (not 403 — do not leak existence).
 """
 
 from __future__ import annotations
@@ -21,6 +27,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.config import settings as _app_settings
 from app.database import get_db_session
+from app.redis_client import get_redis
+
+# Redis key prefix for per-user token revocation epochs.
+# Kept in sync with shared.auth.local.USER_TOKEN_EPOCH_PREFIX — do not change.
+_TOKEN_EPOCH_PREFIX = "auth_epoch:"
 
 log = structlog.get_logger(__name__)
 
@@ -93,6 +104,26 @@ def _get_settings() -> Settings:
     return _app_settings
 
 
+async def _token_epoch_check(user_id: str, iat: Any) -> None:
+    """Raise HTTP 401 if the token was issued before the user's revocation epoch.
+
+    Fails OPEN: any Redis error is logged and silently ignored so a cache
+    hiccup never locks every user out.
+    """
+    try:
+        raw = await get_redis().get(_TOKEN_EPOCH_PREFIX + user_id)
+        if raw is not None and iat is not None and int(iat) < int(raw):
+            log.info("scorecard.auth.token_revoked", user_id=user_id)
+            raise _UNAUTHORIZED
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — fail open on Redis/parse errors
+        log.warning(
+            "scorecard.auth.epoch_check_skipped",
+            error_type=type(exc).__name__,
+        )
+
+
 async def _require_jwt(
     credentials: Annotated[
         HTTPAuthorizationCredentials | None,
@@ -101,7 +132,8 @@ async def _require_jwt(
 ) -> dict[str, Any]:
     """Verify Bearer JWT; return decoded payload.
 
-    Raises HTTP 401 on any auth failure.
+    Raises HTTP 401 on any auth failure, including tokens revoked by a
+    "log out all devices" whose ``iat`` predates the user's token epoch.
     """
     if credentials is None:
         raise _UNAUTHORIZED
@@ -117,6 +149,12 @@ async def _require_jwt(
     except JWTError as exc:
         log.warning("scorecard.auth.jwt_failed", error_type=type(exc).__name__)
         raise _UNAUTHORIZED from exc
+
+    user_id: str | None = payload.get("sub")
+    if not user_id:
+        raise _UNAUTHORIZED
+
+    await _token_epoch_check(user_id, payload.get("iat"))
 
     return payload
 
@@ -172,6 +210,10 @@ async def _generate_presigned_url(
 # ---------------------------------------------------------------------------
 
 
+# Roles that may read scorecards belonging to candidates in their company.
+_PRIVILEGED_ROLES = frozenset({"hr_manager", "super_admin", "admin", "platform_owner"})
+
+
 @router.get(
     "/scorecards/{scorecard_id}",
     response_model=ScorecardResponse,
@@ -179,29 +221,46 @@ async def _generate_presigned_url(
     description=(
         "Returns the scorecard data for the given scorecard_id, including a "
         "30-day pre-signed S3 URL for the PDF report if the PDF has been generated. "
-        "JWT required."
+        "JWT required. "
+        "Only the scorecard owner or an HR/admin from the same company may read it."
     ),
 )
 async def get_scorecard(
     scorecard_id: str,
-    _jwt_payload: Annotated[dict[str, Any], Depends(_require_jwt)],
+    jwt_payload: Annotated[dict[str, Any], Depends(_require_jwt)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
     app_settings: Annotated[Settings, Depends(_get_settings)],
 ) -> ScorecardResponse:
     """Retrieve a scorecard row and return structured data with a pre-signed PDF URL.
 
+    Access control (IDOR):
+        - The candidate whose session produced this scorecard (sessions.user_id ==
+          caller sub) may always read it.
+        - An hr_manager / super_admin / platform_owner whose users.company_id matches
+          the candidate's users.company_id may also read it.
+        - Any other caller receives 404 — existence is not revealed.
+
     Returns:
         200 ScorecardResponse on success.
-        401 if JWT is missing or invalid.
-        404 if no scorecard exists for the given scorecard_id.
+        401 if JWT is missing, invalid, or revoked.
+        404 if no scorecard exists or the caller is not authorised to read it.
     """
+    caller_sub: str = str(jwt_payload.get("sub") or "")
+    caller_roles: list[str] = jwt_payload.get("roles") or []
+
+    # Fetch the scorecard + the owning session's user_id in one query.
     result = await db.execute(
         sa_text(
             """
-            SELECT scorecard_id, session_id, scores, composite_score,
-                   rationale, strengths, improvements, summary, report_pdf_key
-            FROM scorecards
-            WHERE scorecard_id = :scorecard_id
+            SELECT sc.scorecard_id, sc.session_id, sc.scores, sc.composite_score,
+                   sc.rationale, sc.strengths, sc.improvements, sc.summary,
+                   sc.report_pdf_key,
+                   s.user_id AS session_owner_id,
+                   owner.company_id AS owner_company_id
+            FROM scorecards sc
+            JOIN sessions s ON s.id = sc.session_id
+            JOIN users owner ON owner.id = s.user_id
+            WHERE sc.scorecard_id = :scorecard_id
             """
         ),
         {"scorecard_id": scorecard_id},
@@ -214,6 +273,49 @@ async def get_scorecard(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Scorecard {scorecard_id!r} not found.",
         )
+
+    # ------------------------------------------------------------------
+    # Ownership / company-scope check (IDOR fix)
+    # Return 404 (not 403) to avoid leaking existence to unauthorized callers.
+    # ------------------------------------------------------------------
+    session_owner_id = str(row["session_owner_id"])
+    owner_company_id = row["owner_company_id"]  # may be None for platform users
+
+    caller_is_owner = caller_sub == session_owner_id
+    if not caller_is_owner:
+        # platform_owner is the global super-admin: unrestricted cross-company access.
+        is_platform_owner = "platform_owner" in caller_roles
+
+        if not is_platform_owner:
+            # Scoped privileged users (HR / super_admin / admin) may read scorecards
+            # only within their own company.
+            caller_has_privilege = bool(
+                set(caller_roles) & (_PRIVILEGED_ROLES - frozenset({"platform_owner"}))
+            )
+            caller_in_same_company = False
+            if caller_has_privilege and owner_company_id is not None:
+                # Verify the caller belongs to the same company as the candidate.
+                caller_company_id = await db.scalar(
+                    sa_text(
+                        "SELECT company_id FROM users WHERE id = :uid AND deleted_at IS NULL"
+                    ),
+                    {"uid": caller_sub},
+                )
+                caller_in_same_company = (
+                    caller_company_id is not None
+                    and str(caller_company_id) == str(owner_company_id)
+                )
+
+            if not caller_in_same_company:
+                log.warning(
+                    "scorecard.access_denied",
+                    scorecard_id=scorecard_id,
+                    caller=caller_sub,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Scorecard {scorecard_id!r} not found.",
+                )
 
     # Build pre-signed URL if a PDF key is stored.
     pdf_url: str | None = None
