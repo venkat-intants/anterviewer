@@ -8,7 +8,7 @@ import { simulateDelay, mockResumesResponse, mockCurrentResume } from './mock';
 // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
 const API_BASE: string = import.meta.env.VITE_API_BASE_URL;
 
-const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false';
+const USE_MOCK = import.meta.env.VITE_USE_MOCK === 'true';
 
 // ---------------------------------------------------------------------------
 // Types — mirror data_gateway ResumeVersionItem / ResumeCurrentResponse / etc.

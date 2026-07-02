@@ -94,7 +94,6 @@ function CompanyAdminPanel({
   const qc = useQueryClient();
   const [email, setEmail] = useState('');
   const [fullName, setFullName] = useState('');
-  const DEFAULT_PW = '12345678';
 
   // getCompanyAdmin 404s when none exists yet — treat any error as "no admin".
   const { data: admin, isLoading } = useQuery({
@@ -114,13 +113,14 @@ function CompanyAdminPanel({
 
   const createMut = useMutation({
     mutationFn: () =>
+      // No password sent: the server generates a random bootstrap hash and
+      // emails a "set your password" link. Never ship a known default.
       createCompanyAdmin(company.id, {
         email: email.trim(),
         full_name: fullName.trim(),
-        password: DEFAULT_PW,
       }),
     onSuccess: () => {
-      toast.success(`Super admin ${email} created for ${company.name}.`);
+      toast.success(`Super admin ${email} created for ${company.name} — a set-password link was emailed.`);
       setEmail('');
       setFullName('');
       void qc.invalidateQueries({ queryKey: ['company-admin', company.id] });
@@ -270,14 +270,11 @@ function CompanyAdminPanel({
             </Button>
           </form>
 
-          {/* Default password hint */}
+          {/* Credential-delivery hint */}
           <p className="flex items-center gap-1.5 text-[12px] text-[#888b91]">
             <KeyRound className="h-3 w-3 text-[#60a5fa]" aria-hidden="true" />
-            Default password{' '}
-            <code className="rounded bg-white/[0.06] px-1.5 py-0.5 font-mono text-[11px] text-white">
-              {DEFAULT_PW}
-            </code>{' '}
-            — they must change it on first login.
+            A secure “set your password” link is emailed to them — no password is
+            shared here.
           </p>
         </>
       )}

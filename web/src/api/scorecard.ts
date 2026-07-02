@@ -4,7 +4,7 @@
 import { simulateDelay, mockScorecardsResponse } from './mock';
 import { feedbackGet } from './client';
 
-const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false';
+const USE_MOCK = import.meta.env.VITE_USE_MOCK === 'true';
 
 export interface ScoreBreakdown {
   communication: number;

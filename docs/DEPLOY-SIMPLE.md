@@ -1,5 +1,11 @@
 # Deploy Guide (Simple English)
 
+> ⚠️ **DEPRECATED / LEGACY — not the current deploy path.** This Railway + Vercel
+> guide is superseded by **[DEPLOY-ORACLE.md](DEPLOY-ORACLE.md)** (single Oracle
+> Cloud VM behind Caddy TLS + Vercel). It is kept for historical reference only;
+> its routing (`vercel.json` rewrites) and cross-origin assumptions no longer
+> match the app. Follow DEPLOY-ORACLE.md instead.
+
 This guide explains how to put the whole project on the internet so anyone can
 use it from a web link. No deep technical knowledge needed — just follow the
 steps in order.

@@ -27,8 +27,6 @@ import { GlassCard, Avatar, Pill } from '@/design/components/primitives';
 import { Reveal } from '@/design/components/Reveal';
 import { gradientFor, initialsOf } from '@/design/data/shared';
 
-const DEFAULT_PW = '12345678';
-
 export default function CompanyAdminConsole() {
   const qc = useQueryClient();
   const [email, setEmail] = useState('');
@@ -43,13 +41,16 @@ export default function CompanyAdminConsole() {
 
   const createMut = useMutation({
     mutationFn: () =>
+      // No password sent: the server generates a random bootstrap hash and
+      // emails a "set your password" link. Never ship a known default — an
+      // attacker could log in during the pre-reset window (must_change_password
+      // lets a bootstrap login set a new password without the current one).
       createMyHrManager({
         email: email.trim(),
         full_name: fullName.trim(),
-        password: DEFAULT_PW,
       }),
     onSuccess: () => {
-      toast.success(`HR manager ${email} created.`);
+      toast.success(`HR manager ${email} created — a set-password link was emailed.`);
       setEmail('');
       setFullName('');
       void qc.invalidateQueries({ queryKey: ['my-hr-managers'] });
@@ -168,11 +169,8 @@ export default function CompanyAdminConsole() {
 
           <p className="flex items-center gap-1.5 text-[12px] text-[#888b91]">
             <KeyRound className="h-3 w-3 text-[#60a5fa]" aria-hidden="true" />
-            Default password{' '}
-            <code className="rounded bg-white/[0.06] px-1.5 py-0.5 font-mono text-[11px] text-white">
-              {DEFAULT_PW}
-            </code>{' '}
-            — they must change it on first login.
+            A secure “set your password” link is emailed to them — no password is
+            shared here.
           </p>
         </GlassCard>
       </Reveal>

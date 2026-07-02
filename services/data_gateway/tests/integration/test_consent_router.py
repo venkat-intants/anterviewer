@@ -23,11 +23,12 @@ Test matrix (7 + 4 + 2 + 4 + 5 cases):
   12. POST → DELETE → DELETE → second DELETE returns 404 (idempotent)
   13. POST session → DELETE consent → POST session → 403 (consent gate cross-service)
 
-  S4-012 trusted-proxy-count gate (4):
+  S4-012 trusted-proxy-count gate (Caddy/Convention-A model):
   14. trusted_proxy_count=0 + spoofed XFF → hash matches direct client host, not spoof
-  15. trusted_proxy_count=1 + XFF="1.2.3.4, 10.0.0.1" → hash matches "1.2.3.4"
-  16. trusted_proxy_count=1 + XFF="attacker, real-client, 10.0.0.1" → hash matches "real-client"
-  17. trusted_proxy_count=1 + no XFF header → falls back to request.client.host
+  15. trusted_proxy_count=1 + XFF="1.2.3.4" (single Caddy hop) → matches "1.2.3.4"
+  16. trusted_proxy_count=2 + XFF="1.2.3.4, <cdn>" (CDN→Caddy) → matches "1.2.3.4"
+  17. trusted_proxy_count=1 + XFF="attacker, real-client" → matches "real-client"
+  18. trusted_proxy_count=1 + no XFF header → falls back to request.client.host
 
   Video-capture full-withdrawal (5):
   18. POST voice+video → DELETE → both rows revoked; response items list covers both types
@@ -680,22 +681,46 @@ def test_extract_client_ip_no_trusted_proxies_ignores_xff(
 def test_extract_client_ip_one_trusted_proxy_uses_correct_hop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """trusted_proxy_count=1 + XFF='1.2.3.4, 10.0.0.1' → extracts '1.2.3.4'.
+    """trusted_proxy_count=1 + XFF='1.2.3.4' → extracts '1.2.3.4'.
 
-    S4-012 — Railway demo topology: one nginx hop sits in front of the app.
-    The rightmost XFF entry (10.0.0.1) was added by our nginx and is trusted
-    infrastructure; the entry to its left (1.2.3.4) is the real client.
+    S4-012 — Oracle/Caddy production topology: a single Caddy reverse proxy
+    sits in front of the app. Caddy sets X-Forwarded-For to the client IP it
+    observed (a single entry) and strips any client-supplied XFF. With
+    trusted_proxy_count=1 the real client is the rightmost (only) entry; the
+    direct TCP peer (10.0.0.1, Caddy's container IP) is NOT the client.
     """
     monkeypatch.setattr(settings, "trusted_proxy_count", 1)
 
     request = _make_request(
-        xff="1.2.3.4, 10.0.0.1",
-        client_host="10.0.0.1",  # direct TCP peer is the local nginx
+        xff="1.2.3.4",
+        client_host="10.0.0.1",  # direct TCP peer is the Caddy container
     )
     ip = _extract_client_ip(request)
 
     assert ip == "1.2.3.4", (
-        f"Expected '1.2.3.4' (client entry, one hop from right) but got '{ip}'"
+        f"Expected '1.2.3.4' (the client entry Caddy set) but got '{ip}'"
+    )
+
+
+def test_extract_client_ip_two_trusted_proxies_cdn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """trusted_proxy_count=2 + XFF='1.2.3.4, <cdn>' → extracts '1.2.3.4'.
+
+    S4-012 — future topology with a CDN (e.g. Cloudflare) in front of Caddy.
+    The CDN sets XFF to the client, Caddy appends the CDN edge IP → two trusted
+    hops. The real client is the entry two positions from the right.
+    """
+    monkeypatch.setattr(settings, "trusted_proxy_count", 2)
+
+    request = _make_request(
+        xff="1.2.3.4, 203.0.113.7",  # client, then CDN edge appended by Caddy
+        client_host="10.0.0.1",
+    )
+    ip = _extract_client_ip(request)
+
+    assert ip == "1.2.3.4", (
+        f"Expected '1.2.3.4' (entry 2 hops from right) but got '{ip}'"
     )
 
 
@@ -704,25 +729,24 @@ def test_extract_client_ip_attacker_spoof_blocked(
 ) -> None:
     """trusted_proxy_count=1: attacker-prepended XFF entry is not trusted.
 
-    S4-012 — the core security scenario. An attacker behind one trusted nginx
-    hop sends:
-        X-Forwarded-For: attacker, real-client, 10.0.0.1
-
-    The nginx appended '10.0.0.1' (its own internal address). With
-    trusted_proxy_count=1 we trust exactly that rightmost entry and read the
-    entry immediately to its left ('real-client').  The 'attacker' entry at
-    index 0 is outside the trusted window and is never used.
+    S4-012 — the core security scenario. Because the real client IP is read by
+    counting ``trusted_proxy_count`` entries from the RIGHT (the trusted end),
+    any number of attacker-prepended entries on the LEFT are ignored. Even if a
+    spoofed value somehow survived Caddy's stripping as:
+        X-Forwarded-For: attacker, real-client
+    trusted_proxy_count=1 reads the rightmost entry ('real-client'); 'attacker'
+    at index 0 is outside the trusted window and is never used.
     """
     monkeypatch.setattr(settings, "trusted_proxy_count", 1)
 
     request = _make_request(
-        xff="attacker, real-client, 10.0.0.1",
+        xff="attacker, real-client",
         client_host="10.0.0.1",
     )
     ip = _extract_client_ip(request)
 
     assert ip == "real-client", (
-        f"Expected 'real-client' (entry at -2 from right) but got '{ip}' — "
+        f"Expected 'real-client' (rightmost, trusted entry) but got '{ip}' — "
         "attacker-prepended XFF entry leaked through the trusted-proxy gate"
     )
 

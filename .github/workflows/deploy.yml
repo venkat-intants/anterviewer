@@ -163,8 +163,10 @@ jobs:
 
             # Run any pending database migrations (idempotent — safe to run on
             # every deploy; alembic checks current head before migrating).
+            # NOTE: the runtime image is pip-built (no poetry) — invoke alembic
+            # directly, matching scripts/oracle-setup.sh.
             $C exec -T data_gateway \
-              poetry run alembic upgrade head
+              alembic -c alembic.ini upgrade head
 
             echo "=== [deploy] finished at $(date -u) ==="
           ENDSSH

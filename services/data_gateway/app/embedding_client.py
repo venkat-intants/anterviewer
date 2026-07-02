@@ -26,9 +26,11 @@ class EmbeddingError(Exception):
 
 
 def _internal_token(acting_user_id: str) -> str:
+    # feedback_billing's /internal/* gate (_require_service_jwt) requires the
+    # "service" role — a plain user/guest token is rejected 403. Mint with it.
     return issue_access_token(
         user_id=acting_user_id,
-        roles=[],
+        roles=["service"],
         secret=settings.jwt_secret,
         algorithm=settings.jwt_algorithm,
         issuer=settings.jwt_issuer,

@@ -31,12 +31,35 @@ x-common-env: &common-env
   APP_ENV: production
   LOG_LEVEL: INFO
 
+# Bounded JSON logs — without this Docker's json-file driver grows unbounded and
+# will fill the Oracle VM's ~47 GB boot volume, hanging the whole host. 10 MB × 3
+# files × 6 containers ≈ 180 MB ceiling.
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+# Runtime confinement (defense-in-depth on a shared single VM). Images already
+# run as a non-root user; this blocks privilege escalation and drops every Linux
+# capability. Caddy re-adds NET_BIND_SERVICE below (it binds :80/:443).
+x-hardening: &hardening
+  security_opt:
+    - "no-new-privileges:true"
+  cap_drop:
+    - ALL
+
 services:
   # --------------------------------------------------------------------------
   # Caddy — TLS termination and reverse proxy (the ONLY public-facing service)
   # --------------------------------------------------------------------------
   caddy:
     image: caddy:2-alpine
+    <<: [*logging, *hardening]
+    # Caddy binds privileged ports 80/443 — restore just that one capability.
+    cap_add:
+      - NET_BIND_SERVICE
     ports:
       - "80:80"
       - "443:443"
@@ -73,6 +96,7 @@ services:
       context: .
       dockerfile: services/data_gateway/Dockerfile
     image: intants/data_gateway:prod
+    <<: [*logging, *hardening]
     env_file: [services/data_gateway/.env]
     environment:
       <<: *common-env
@@ -113,6 +137,7 @@ services:
       context: .
       dockerfile: services/interview_core/Dockerfile
     image: intants/interview_core:prod
+    <<: [*logging, *hardening]
     env_file: [services/interview_core/.env]
     environment:
       <<: *common-env
@@ -141,6 +166,7 @@ services:
   # --------------------------------------------------------------------------
   interview_worker:
     image: intants/interview_core:prod
+    <<: [*logging, *hardening]
     depends_on:
       interview_core:
         condition: service_healthy
@@ -241,6 +267,7 @@ services:
       context: .
       dockerfile: services/feedback_billing/Dockerfile
     image: intants/feedback_billing:prod
+    <<: [*logging, *hardening]
     env_file: [services/feedback_billing/.env]
     environment:
       <<: *common-env
@@ -270,6 +297,7 @@ services:
       context: .
       dockerfile: services/admin_ops/Dockerfile
     image: intants/admin_ops:prod
+    <<: [*logging, *hardening]
     env_file: [services/admin_ops/.env]
     environment:
       <<: *common-env

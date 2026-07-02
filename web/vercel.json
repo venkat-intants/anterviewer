@@ -6,23 +6,8 @@
   "installCommand": "npm install",
   "framework": null,
 
+  "//": "The app calls the API directly via VITE_*_API_URL (set in Vercel env to the Caddy HTTPS domain) — NOT via rewrites. The only rewrite is the SPA fallback so client-side routes resolve to index.html. Do NOT re-add per-service /api/* rewrites: they pointed at retired Railway URLs and conflicted with the real routing.",
   "rewrites": [
-    {
-      "source": "/api/gateway/:path*",
-      "destination": "https://aiinterview-production-e86b.up.railway.app/:path*"
-    },
-    {
-      "source": "/api/interview/:path*",
-      "destination": "https://agile-serenity-production.up.railway.app/:path*"
-    },
-    {
-      "source": "/api/feedback/:path*",
-      "destination": "https://humble-perfection-production.up.railway.app/:path*"
-    },
-    {
-      "source": "/api/admin/:path*",
-      "destination": "https://patient-adaptation-production-d57a.up.railway.app/:path*"
-    },
     {
       "source": "/:path*",
       "destination": "/index.html"

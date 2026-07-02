@@ -1,4 +1,10 @@
 # ============================================================================
+# ⚠️ DEPRECATED / LEGACY — NOT the current deploy path.
+# The supported production deploy is a single Oracle Cloud VM behind Caddy TLS:
+# see docs/DEPLOY-ORACLE.md + docker-compose.prod.yml + scripts/oracle-setup.sh.
+# This Render blueprint is kept for historical reference only; it is unmaintained
+# and its routing/env assumptions no longer match the app.
+# ============================================================================
 # Render Blueprint — Intants AI Voice Interview Platform
 # ============================================================================
 # Deploys the whole stack on Render from one file (Dashboard → Blueprints → New).

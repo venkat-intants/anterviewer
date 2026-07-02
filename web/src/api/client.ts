@@ -18,7 +18,10 @@
 import { getToken, setToken, clearToken } from './tokenStore';
 import { toast } from '../lib/toast';
 
-const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false';
+// Fail-CLOSED: mock data is used only when VITE_USE_MOCK is explicitly 'true'.
+// An unset/missing var → real backend (so a mis-configured prod deploy surfaces
+// as API errors, never as silently-served fake data).
+const USE_MOCK = import.meta.env.VITE_USE_MOCK === 'true';
 
 // Paths that must NOT trigger a refresh loop when they 401.
 const SKIP_REFRESH_PATHS = ['/auth/refresh', '/auth/login', '/auth/register'];

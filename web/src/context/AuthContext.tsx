@@ -15,7 +15,7 @@ import { getToken, setToken, clearToken, subscribeToken } from '../api/tokenStor
 import { attemptRefresh } from '../api/client';
 import { getMe } from '../api/auth';
 
-const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false';
+const USE_MOCK = import.meta.env.VITE_USE_MOCK === 'true';
 // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
 const API_BASE: string = import.meta.env.VITE_API_BASE_URL;
 

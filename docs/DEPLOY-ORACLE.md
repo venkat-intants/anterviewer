@@ -144,23 +144,27 @@ To watch logs: `docker compose --env-file deploy.env -f docker-compose.prod.yml 
 
 ## Step 7 — Connect the website (Vercel)
 
-Vercel rewrites must point at `https://<PUBLIC_API_DOMAIN>` (your Caddy TLS
-endpoint) — not at `http://VM-IP:800x`. The raw service ports are closed;
-the only public entry point is Caddy on 443.
+The frontend calls your Caddy HTTPS domain **directly** via four build-time env
+vars — it does NOT use `vercel.json` rewrites (those are legacy and ignored).
+Caddy fans each bare API path out to the correct backend service, so all four
+URLs point at the **same** domain:
 
-1. In `web/vercel.json`, point all rewrites at your domain:
-   - gateway routes  → `https://api.yourdomain.com/api/v1/auth/`,
-     `https://api.yourdomain.com/api/v1/users/`, etc.
-   - interview routes → `https://api.yourdomain.com/api/v1/interview/`, etc.
-   - feedback routes  → `https://api.yourdomain.com/api/v1/feedback/`, etc.
-   - ops/analytics    → `https://api.yourdomain.com/api/v1/ops/`, etc.
-2. Set the Vercel env var: `VITE_API_BASE_URL=https://api.yourdomain.com`
-   (see `docs/DEPLOY-SIMPLE.md` Section 8 for the full list).
-3. **Redeploy** the Vercel frontend.
+1. In the Vercel project → **Settings → Environment Variables**, set (Production):
+   ```
+   VITE_API_BASE_URL=https://api.yourdomain.com
+   VITE_INTERVIEW_API_URL=https://api.yourdomain.com
+   VITE_FEEDBACK_API_URL=https://api.yourdomain.com
+   VITE_ADMIN_API_URL=https://api.yourdomain.com
+   VITE_USE_MOCK=false
+   ```
+   (Use your real Caddy domain — not `http://VM-IP:800x`; the raw service ports
+   are closed.) `VITE_USE_MOCK=false` is required — the app defaults to mock
+   data if it is unset.
+2. **Redeploy** the Vercel frontend so the new env vars are baked into the build.
 
-The browser talks to Vercel (HTTPS); Vercel rewrites to your domain (also HTTPS,
-via Caddy). All TLS is end-to-end. The VM's raw service ports (8001-8004) remain
-closed to the internet.
+The browser talks to Vercel (static assets, HTTPS) and to `api.yourdomain.com`
+(the API, HTTPS via Caddy). All TLS is end-to-end. The VM's raw service ports
+(8001-8004) remain closed to the internet.
 
 ## Step 8 — Make yourself admin, then test
 

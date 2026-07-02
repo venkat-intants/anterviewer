@@ -409,14 +409,30 @@ class LocalAuthProvider(AuthProvider):
             await self._untrack_session(user_id, key)
             raise ValueError("invalid or expired refresh token")
 
+        # Liveness gate + roles, in one DB session, BEFORE rotating the token.
+        # Without the liveness check a soft-deleted (DPDP erasure) or suspended
+        # account could keep rotating tokens for the full refresh-token TTL —
+        # authenticate()/get_user() filter these out, but refresh() did not.
+        # Doing this before the Redis rotation means a transient DB error can't
+        # destroy a legitimate user's still-valid refresh token.
+        roles: list[str] = []
+        async for session in self._db_factory():
+            live_result = await session.execute(
+                text(
+                    "SELECT 1 FROM users "
+                    "WHERE id = :uid AND deleted_at IS NULL AND is_active = true"
+                ),
+                {"uid": user_id},
+            )
+            if live_result.scalar() is None:
+                log.warning("auth.refresh.rejected_inactive", user_id=user_id)
+                raise ValueError("invalid or expired refresh token")
+            roles = await self._get_roles_for_user(session, user_id)
+
         # Rotate: delete old token immediately + drop it from the session index
         # (the new token is re-added by _issue_tokens below).
         await self._redis.delete(key)
         await self._untrack_session(user_id, key)
-
-        roles: list[str] = []
-        async for session in self._db_factory():
-            roles = await self._get_roles_for_user(session, user_id)
 
         log.info("auth.refresh", user_id=user_id)
         return await self._issue_tokens(user_id, roles)

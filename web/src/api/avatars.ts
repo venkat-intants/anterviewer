@@ -8,7 +8,7 @@ import { clientFetch } from './client';
 
 // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
 const INTERVIEW_BASE: string = import.meta.env.VITE_INTERVIEW_API_URL;
-const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false';
+const USE_MOCK = import.meta.env.VITE_USE_MOCK === 'true';
 
 // ---------------------------------------------------------------------------
 // Mock data — mirrors the stable backend ordering

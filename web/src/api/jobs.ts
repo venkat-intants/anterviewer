@@ -19,7 +19,7 @@ export interface CreateCustomJobResponse {
   title: string;
 }
 
-const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false';
+const USE_MOCK = import.meta.env.VITE_USE_MOCK === 'true';
 
 /**
  * Fetch the list of available jobs.

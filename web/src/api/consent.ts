@@ -6,7 +6,7 @@ import type { ConsentStatus, ConsentResult, ConsentRequest, ConsentType } from '
 import { simulateDelay } from './mock';
 import { apiGet, apiPost } from './client';
 
-const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false';
+const USE_MOCK = import.meta.env.VITE_USE_MOCK === 'true';
 
 /**
  * GET /consent/status — returns current consent state for the authenticated user.

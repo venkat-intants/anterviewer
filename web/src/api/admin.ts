@@ -6,7 +6,7 @@ import { simulateDelay } from './mock';
 import { clientFetch } from './client';
 import { getToken } from './tokenStore';
 
-const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false';
+const USE_MOCK = import.meta.env.VITE_USE_MOCK === 'true';
 
 // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
 const ADMIN_BASE: string =

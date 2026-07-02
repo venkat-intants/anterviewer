@@ -4,6 +4,13 @@
 > Frontend on Vercel (`*.vercel.app`), backend on Railway (`*.railway.app`), **no custom domain**.
 > White-hat / defensive only. This is a checklist for the founder to execute in provider dashboards.
 > Author: security-auditor. Date: 2026-06-02.
+>
+> **Still applies to the current Oracle + Vercel deploy.** The backend now runs on
+> an Oracle VM behind Caddy (`api.yourdomain.com`) instead of Railway, but the
+> frontend (Vercel) and backend remain **different origins**, so the Section 2
+> cross-origin cookie analysis (`AUTH_COOKIE_SAMESITE=none` + CSRF double-submit,
+> as set in `docker-compose.prod.yml`) is unchanged and authoritative. Read
+> "Railway origin" as "your Caddy API domain" throughout.
 
 ---
 

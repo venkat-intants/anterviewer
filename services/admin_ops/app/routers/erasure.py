@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.admin_auth import AdminDep
 from app.database import get_db_session
 from app.models import AuditLog, ErasureRequest, Session, User
+from app.redis_client import get_redis
 
 log = structlog.get_logger(__name__)
 
@@ -54,6 +55,51 @@ router = APIRouter(tags=["dpdp-erasure"])
 # ---------------------------------------------------------------------------
 
 _ERASURE_SCHEDULE_DAYS = 30
+
+# Redis key prefixes — kept in sync with shared.auth.local (do NOT change):
+#   auth_epoch:<uid>     per-user token-revocation epoch (kills access tokens)
+#   user_sessions:<uid>  set of the user's active refresh-token keys
+_TOKEN_EPOCH_PREFIX = "auth_epoch:"
+_SESSIONS_PREFIX = "user_sessions:"
+
+
+async def _revoke_all_tokens(user_id: str) -> None:
+    """Revoke every live session for *user_id* — best-effort, never raises.
+
+    An erasure request soft-deletes the account in Postgres, but the user's
+    already-issued JWTs live in Redis / the client. Without this, a suspended /
+    erasure-requested user keeps full access until their access token expires
+    (~15 min) and could rotate the refresh token for its whole TTL. This mirrors
+    ``LocalAuthProvider.logout_all``:
+      1. bump ``auth_epoch:<uid>`` → any access token with an older ``iat`` is
+         rejected by every service's auth dependency;
+      2. delete the refresh-token keys + the session index so refresh is dead now
+         (``refresh()`` also re-checks ``deleted_at`` as a second guard).
+    Redis errors are logged and swallowed so revocation can never fail the
+    erasure request itself (the DB soft-delete is already committed).
+    """
+    try:
+        redis = get_redis()
+        now_epoch = int(datetime.now(UTC).timestamp())
+        # TTL spans the erasure grace window; the row is hard-deleted by then.
+        await redis.setex(
+            _TOKEN_EPOCH_PREFIX + user_id,
+            _ERASURE_SCHEDULE_DAYS * 86400,
+            now_epoch,
+        )
+        sess_key = _SESSIONS_PREFIX + user_id
+        members = await redis.smembers(sess_key)
+        keys = [m.decode() if isinstance(m, bytes | bytearray) else str(m) for m in members]
+        if keys:
+            await redis.delete(*keys)
+        await redis.delete(sess_key)
+        log.info("erasure.tokens_revoked", user_id=user_id, refresh_keys=len(keys))
+    except Exception as exc:  # noqa: BLE001 — token revocation is best-effort
+        log.warning(
+            "erasure.token_revoke_failed",
+            user_id=user_id,
+            exc_type=type(exc).__name__,
+        )
 
 
 class ErasureRequestBody(BaseModel):
@@ -252,6 +298,10 @@ async def request_erasure(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred while processing the erasure request.",
         ) from exc
+
+    # Revoke live JWTs now that the soft-delete is committed (best-effort).
+    # Without this the user keeps access until their access token expires.
+    await _revoke_all_tokens(str(user_id))
 
     log.info(
         "erasure.requested",

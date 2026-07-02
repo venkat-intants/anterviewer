@@ -21,7 +21,7 @@ import { mockAuthResponse, mockMeResponse, mockLogoutResponse, simulateDelay } f
 import { apiGet, apiPost } from './client';
 import { setToken } from './tokenStore';
 
-const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false';
+const USE_MOCK = import.meta.env.VITE_USE_MOCK === 'true';
 
 export async function login(request: LoginRequest): Promise<LoginResponse> {
   if (USE_MOCK) {

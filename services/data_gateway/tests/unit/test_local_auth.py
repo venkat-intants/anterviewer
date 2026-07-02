@@ -161,6 +161,14 @@ class _FakeDB:
                     return _FakeResult([(u["id"], u["password_hash"])])
             return _FakeResult([])
 
+        # refresh() liveness gate: SELECT 1 FROM users WHERE id=:uid AND live
+        if "select 1 from users" in stmt_lower:
+            uid = str(params["uid"])
+            u = self.users.get(uid)
+            if u and u["is_active"] and u["deleted_at"] is None:
+                return _FakeResult([(1,)])
+            return _FakeResult([])
+
         if "select id, full_name, email from users" in stmt_lower:
             uid = str(params["uid"])
             u = self.users.get(uid)
@@ -267,6 +275,35 @@ async def test_refresh_rotation(provider: LocalAuthProvider) -> None:
     # Old refresh token must now be invalid (rotated out)
     with pytest.raises(ValueError, match="invalid or expired"):
         await provider.refresh(tokens1.refresh_token)
+
+
+@pytest.mark.asyncio
+async def test_refresh_rejected_for_deleted_user(
+    provider: LocalAuthProvider, fake_db: _FakeDB
+) -> None:
+    """A soft-deleted (DPDP erasure) or deactivated account cannot refresh.
+
+    Regression guard: refresh() must re-check deleted_at/is_active so a dead
+    account can't keep rotating tokens for the whole refresh-token TTL.
+    """
+    tokens = await provider.register("gone@example.com", "passw0rd!", "Gone")
+    # Simulate erasure-request soft-delete after the token was issued.
+    fake_db.users[tokens.user_id]["deleted_at"] = "2026-07-02T00:00:00Z"
+
+    with pytest.raises(ValueError, match="invalid or expired"):
+        await provider.refresh(tokens.refresh_token)
+
+
+@pytest.mark.asyncio
+async def test_refresh_rejected_for_deactivated_user(
+    provider: LocalAuthProvider, fake_db: _FakeDB
+) -> None:
+    """A suspended (is_active=false) account cannot refresh either."""
+    tokens = await provider.register("suspended@example.com", "passw0rd!", "Sus")
+    fake_db.users[tokens.user_id]["is_active"] = False
+
+    with pytest.raises(ValueError, match="invalid or expired"):
+        await provider.refresh(tokens.refresh_token)
 
 
 @pytest.mark.asyncio

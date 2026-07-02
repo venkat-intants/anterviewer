@@ -110,23 +110,33 @@ def _extract_client_ip(request: Request) -> str:
         the correct setting for local dev and any deployment with no reverse
         proxy in front of the app.
       - If ``settings.trusted_proxy_count > 0``: parse X-Forwarded-For as a
-        left-to-right list of IPs (original-client first, most-recent proxy
-        last).  The real client IP is the entry at index
-        ``len(hops) - trusted_proxy_count - 1`` — that is, the entry
-        immediately to the left of the N hops we control.  If the header is
-        absent or has fewer entries than ``trusted_proxy_count``, fall back to
-        ``request.client.host``.
+        left-to-right list of IPs (original-client first). Each trusted proxy
+        appends the address it received the request FROM, so with N trusted
+        proxies the real client is the entry at index
+        ``len(hops) - trusted_proxy_count`` — i.e. the Nth entry counted from
+        the right (the standard Werkzeug-ProxyFix model). Counting from the
+        trusted right end means any number of attacker-*prepended* entries are
+        ignored. If the header is absent or has fewer entries than
+        ``trusted_proxy_count``, fall back to ``request.client.host``.
 
-    Example with trusted_proxy_count=1:
-      X-Forwarded-For: "1.2.3.4, 10.0.0.1"
-        hops = ["1.2.3.4", "10.0.0.1"]
-        real_index = 2 - 1 - 1 = 0  →  "1.2.3.4"  ✓
+    Our production topology is a single Caddy reverse proxy (Convention: it
+    sets X-Forwarded-For to the client IP it observed and STRIPS any client-
+    supplied XFF, because the public client is not in Caddy's trusted_proxies).
+    So Caddy emits a single-entry XFF and ``trusted_proxy_count=1`` is correct.
 
-    Example with attacker prepend and trusted_proxy_count=1:
-      X-Forwarded-For: "attacker, real-client, 10.0.0.1"
-        hops = ["attacker", "real-client", "10.0.0.1"]
-        real_index = 3 - 1 - 1 = 1  →  "real-client"  ✓
-        (attacker's prepend at index 0 is ignored)
+    Example with trusted_proxy_count=1 (single Caddy hop):
+      X-Forwarded-For: "1.2.3.4"
+        hops = ["1.2.3.4"]
+        real_index = 1 - 1 = 0  →  "1.2.3.4"  ✓
+
+    Example with an attacker prepend that somehow survives, tpc=1:
+      X-Forwarded-For: "attacker, real-client"
+        hops = ["attacker", "real-client"]
+        real_index = 2 - 1 = 1  →  "real-client"  ✓  (prepend ignored)
+
+    Example with a future CDN in front of Caddy, trusted_proxy_count=2:
+      X-Forwarded-For: "1.2.3.4, <cdn-edge-ip>"
+        real_index = 2 - 2 = 0  →  "1.2.3.4"  ✓
 
     Raw IP values are NEVER logged — only the sha256 hash is stored.
     """
@@ -147,7 +157,7 @@ def _extract_client_ip(request: Request) -> str:
         return direct_host
 
     hops: list[str] = [h.strip() for h in xff.split(",") if h.strip()]
-    real_index: int = len(hops) - settings.trusted_proxy_count - 1
+    real_index: int = len(hops) - settings.trusted_proxy_count
 
     if real_index < 0:
         # Fewer hops than expected (e.g. proxy chain not fully established in

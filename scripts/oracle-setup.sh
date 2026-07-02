@@ -88,6 +88,25 @@ if ! command -v docker >/dev/null 2>&1; then
   echo "==> Installing Docker ..."
   curl -fsSL https://get.docker.com | sh
 fi
+# Ensure the daemon starts on boot so `restart: unless-stopped` containers come
+# back after a VM reboot/power-cycle (get.docker.com usually does this, but make
+# it explicit + idempotent).
+systemctl enable --now docker >/dev/null 2>&1 || true
+
+# --- 1b. Swap — Oracle ARM Free Tier ships with NONE. A small swap file gives
+# the host a page-out cushion so a memory spike degrades instead of hard-OOM-
+# killing a container (which would drop live interviews with no drain).
+if ! swapon --show 2>/dev/null | grep -q '/swapfile'; then
+  if [ ! -f /swapfile ]; then
+    echo "==> Creating 4G swap file ..."
+    fallocate -l 4G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=4096
+    chmod 600 /swapfile
+    mkswap /swapfile >/dev/null
+  fi
+  swapon /swapfile || true
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
 echo "==> Installing iptables-persistent ..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
@@ -140,6 +159,26 @@ echo "==> Using deploy.env:"; sed 's/^/    /' deploy.env
 
 COMPOSE="docker compose --env-file deploy.env -f docker-compose.prod.yml"
 
+# --- 3b. Secrets hygiene ---------------------------------------------------
+# The per-service .env files (scp'd onto the VM) hold DB/JWT/API secrets. scp
+# commonly lands them world-readable (0644). Lock them to owner-only so no other
+# local user or process can read plaintext credentials off disk. Also fail fast
+# if a required .env is missing (compose would otherwise start with empty config).
+echo "==> Securing service .env files (chmod 600) ..."
+_missing_env=0
+for svc in data_gateway interview_core feedback_billing admin_ops; do
+  if [ -f "services/$svc/.env" ]; then
+    chmod 600 "services/$svc/.env"
+  else
+    echo "    MISSING: services/$svc/.env — copy it onto the VM before deploying."
+    _missing_env=1
+  fi
+done
+if [ "$_missing_env" = 1 ]; then
+  echo "ERROR: one or more service .env files are missing (see above)."
+  exit 1
+fi
+
 # --- 4. Build + start ------------------------------------------------------
 echo "==> Building images (first build takes several minutes) ..."
 $COMPOSE build
@@ -191,11 +230,14 @@ cat <<EOF
  1. OCI Console > VCN > Security List: ensure ONLY ports 80 + 443 are open.
     Do NOT open 8001-8004 — those are internal service ports; opening them
     exposes candidate PII and JWTs in cleartext, bypassing TLS.
- 2. In web/vercel.json point ALL rewrites at https://${PUBLIC_API_DOMAIN}:
-      /api/v1/auth/*      -> https://${PUBLIC_API_DOMAIN}/api/v1/auth/
-      /api/v1/interview/* -> https://${PUBLIC_API_DOMAIN}/api/v1/interview/
-      /api/v1/feedback/*  -> https://${PUBLIC_API_DOMAIN}/api/v1/feedback/
-      /api/v1/ops/*       -> https://${PUBLIC_API_DOMAIN}/api/v1/ops/
+ 2. In the Vercel project settings, set ALL FOUR frontend API base URLs to your
+    Caddy HTTPS domain (the app calls these directly; it does NOT use
+    vercel.json rewrites). Caddy fans each bare path out to the right service:
+      VITE_API_BASE_URL=https://${PUBLIC_API_DOMAIN}
+      VITE_INTERVIEW_API_URL=https://${PUBLIC_API_DOMAIN}
+      VITE_FEEDBACK_API_URL=https://${PUBLIC_API_DOMAIN}
+      VITE_ADMIN_API_URL=https://${PUBLIC_API_DOMAIN}
+      VITE_USE_MOCK=false
     (Use your Caddy-issued HTTPS domain — not http://VM-IP:800x.)
     Then redeploy the Vercel frontend.
  3. Make yourself admin:
